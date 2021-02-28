@@ -1,3 +1,23 @@
+//! Library for getting and matching system fonts with
+//! minimal dependencies
+//!
+//! # Usage
+//!
+//! ```rust
+//! use rust_fontconfig::{FcFontCache, FcPattern};
+//!
+//! fn main() {
+//!
+//!     let cache = FcFontCache::build();
+//!     let result = cache.query(&FcPattern {
+//!         name: Some(String::from("Arial")),
+//!         .. Default::default()
+//!     });
+//!
+//!     println!("font path: {:?}", result);
+//! }
+//! ```
+
 #![allow(non_snake_case)]
 
 #[cfg(target_os = "macos")]
