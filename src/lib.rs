@@ -19,16 +19,21 @@
 //! ```
 
 #![allow(non_snake_case)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(target_os = "macos")]
-extern crate core_text;
 extern crate xmlparser;
 extern crate mmapio;
 extern crate allsorts;
 
+extern crate core;
+extern crate alloc;
+
+#[cfg(feature = "std")]
 use std::thread;
+#[cfg(feature = "std")]
 use std::path::PathBuf;
-use std::collections::BTreeMap;
+use alloc::string::String;
+use alloc::collections::btree_map::BTreeMap;
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
@@ -68,7 +73,7 @@ pub struct FcPattern {
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcFontPath {
-    pub path: PathBuf,
+    pub path: String,
     pub font_index: usize,
 }
 
@@ -82,6 +87,7 @@ impl FcFontCache {
     /// Builds a new font cache from all fonts discovered on the system
     ///
     /// NOTE: Performance-intensive, should only be called on startup!
+    #[cfg(feature = "std")]
     pub fn build() -> Self {
 
         #[cfg(target_os = "linux")] {
@@ -176,12 +182,12 @@ impl FcFontCache {
     }
 }
 
+#[cfg(feature = "std")]
 fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     use std::path::Path;
     use xmlparser::Tokenizer;
     use xmlparser::Token::*;
-    use std::io::Read;
     use std::fs;
 
     let fontconfig_path = Path::new("/etc/fonts/fonts.conf");
@@ -271,6 +277,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
     FcScanDirectoriesInner(font_paths)
 }
 
+#[cfg(feature = "std")]
 fn FcScanDirectoriesInner(paths: &[(Option<&str>, &str)]) -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     // scan directories in parallel
@@ -305,6 +312,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<&str>, &str)]) -> Option<Vec<(FcPatte
     Some(result)
 }
 
+#[cfg(feature = "std")]
 fn FcScanSingleDirectoryRecursive(dir: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
     // NOTE: Threads are fast, especially on linux. USE THEM.
@@ -331,6 +339,7 @@ fn FcScanSingleDirectoryRecursive(dir: PathBuf)-> Option<Vec<(FcPattern, FcFontP
     Some(results)
 }
 
+#[cfg(feature = "std")]
 fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
     use allsorts::{
@@ -402,7 +411,10 @@ fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
     Some(
         patterns
         .into_iter()
-        .map(|(pat, index)| (pat, FcFontPath { path: filepath.clone(), font_index: index }))
+        .map(|(pat, index)| (pat, FcFontPath {
+            path: filepath.clone().to_string_lossy().to_string(),
+            font_index: index
+        }))
         .collect()
     )
 }
