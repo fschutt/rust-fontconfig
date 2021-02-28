@@ -6,7 +6,7 @@ edition = "2018"
 license = "MIT"
 description = "Minimal dependency, pure-Rust alternative to font-loader and servo-fontconfig"
 repository = "https://github.com/fschutt/rust-fontconfig"
-keywords = ["fontconfig", "font-loader", "font", "system fonts"]
+keywords = ["fontconfig", "font-loader", "font", "system-fonts"]
 categories = ["gui"]
 
 [dependencies]
