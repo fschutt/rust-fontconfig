@@ -1,0 +1,11 @@
+[package]
+name = "rust-fontconfig"
+version = "0.1.0"
+authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
+edition = "2018"
+
+[dependencies]
+xmlparser = { version = "0.13.3", default-features = false }
+mmapio = { version = "0.9.1", default-features = false }
+allsorts = { version = "0.5.1", default-features = false }
+ttf-parser = { version = "0.12.0", default-features = false, features = ["std"] }
