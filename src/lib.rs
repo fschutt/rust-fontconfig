@@ -77,7 +77,7 @@ pub struct FcFontPath {
     pub font_index: usize,
 }
 
-#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FcFontCache {
     map: BTreeMap<FcPattern, FcFontPath>
 }
