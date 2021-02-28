@@ -1,5 +1,7 @@
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "macos")]
+extern crate core_text;
 extern crate xmlparser;
 extern crate mmapio;
 extern crate allsorts;
@@ -71,6 +73,13 @@ impl FcFontCache {
         #[cfg(target_os = "windows")] {
             FcFontCache {
                 map: FcScanSingleDirectoryRecursive(PathBuf::from("C:\\Windows\\Fonts\\"))
+                .unwrap_or_default().into_iter().collect()
+            }
+        }
+
+        #[cfg(target_os = "macos")] {
+            FcFontCache {
+                map: FcScanSingleDirectoryRecursive(PathBuf::from("~/Library/Fonts"))
                 .unwrap_or_default().into_iter().collect()
             }
         }
