@@ -8,4 +8,3 @@ edition = "2018"
 xmlparser = { version = "0.13.3", default-features = false }
 mmapio = { version = "0.9.1", default-features = false }
 allsorts = { version = "0.5.1", default-features = false }
-ttf-parser = { version = "0.12.0", default-features = false, features = ["std"] }

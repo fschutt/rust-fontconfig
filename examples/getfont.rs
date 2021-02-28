@@ -1,11 +1,19 @@
-use rust_fontconfig::{FcLocateFontInner, FcPattern};
+use rust_fontconfig::{FcFontCache, FcPattern};
+use std::time::Instant;
 
 fn main() {
-    let start = std::time::Instant::now();
-    let font = FcLocateFontInner(FcPattern {
-        postscript_name: String::from("Purisa"),
+
+    let start = Instant::now();
+    let cache = FcFontCache::build();
+    let end = Instant::now();
+
+    let start2 = Instant::now();
+    let result = cache.query(&FcPattern {
+        name: Some(String::from("Purisa")),
         .. Default::default()
     });
-    let end = std::time::Instant::now();
-    println!("font path: {:?} - {:?}", font.map(|f| f.path), end - start);
+    let end2 = Instant::now();
+
+    println!("built cache in: {:?}", end - start);
+    println!("font path: {:?} - queried in {:?}", result, end2 - start2);
 }

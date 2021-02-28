@@ -1,55 +1,155 @@
+#![allow(non_snake_case)]
+
 extern crate xmlparser;
 extern crate mmapio;
 extern crate allsorts;
-extern crate ttf_parser;
 
 use std::thread;
 use std::path::PathBuf;
+use std::collections::BTreeMap;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
-pub struct FcPattern {
-    pub postscript_name: String,
-    pub italic: bool,
-    pub oblique: bool,
-    pub bold: bool,
-    pub monospace: bool,
+pub enum PatternMatch {
+    True,
+    False,
+    DontCare,
 }
 
-impl Default for FcPattern {
-    fn default() -> Self {
-        FcPattern {
-            postscript_name: String::new(),
-            italic: false,
-            oblique: false,
-            bold: false,
-            monospace: false,
+impl PatternMatch {
+    fn into_option(&self) -> Option<bool> {
+        match self {
+            PatternMatch::True => Some(true),
+            PatternMatch::False => Some(false),
+            PatternMatch::DontCare => None,
         }
     }
 }
 
-#[derive(Clone)]
-#[repr(C)]
-pub struct FcFontPath {
-    pub path: PathBuf,
-}
-
-#[no_mangle]
-pub extern "C" fn FcLocateFont(ptr: *mut FcFontPath, pattern: FcPattern) -> bool {
-    match FcLocateFontInner(pattern) {
-        Some(s) => {
-            unsafe { (*ptr).path = s.path; }
-            true
-        },
-        None => false
+impl Default for PatternMatch {
+    fn default() -> Self {
+        PatternMatch::DontCare
     }
 }
 
-pub fn FcLocateFontInner(pattern: FcPattern) -> Option<FcFontPath> {
+#[derive(Debug, Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[repr(C)]
+pub struct FcPattern {
+    pub name: Option<String>,
+    pub family: Option<String>,
+    pub italic: PatternMatch,
+    pub oblique: PatternMatch,
+    pub bold: PatternMatch,
+    pub monospace: PatternMatch,
+}
+
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[repr(C)]
+pub struct FcFontPath {
+    pub path: PathBuf,
+    pub font_index: usize,
+}
+
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+pub struct FcFontCache {
+    map: BTreeMap<FcPattern, FcFontPath>
+}
+
+impl FcFontCache {
+
+    /// Builds a new font cache from all fonts discovered on the system
+    ///
+    /// NOTE: Performance-intensive, should only be called on startup!
+    pub fn build() -> Self {
+
+        #[cfg(target_os = "linux")] {
+            FcFontCache {
+                map: FcScanDirectories().unwrap_or_default().into_iter().collect()
+            }
+        }
+
+        #[cfg(target_os = "windows")] {
+            FcFontCache {
+                map: FcScanSingleDirectoryRecursive(PathBuf::from("C:\\Windows\\Fonts\\"))
+                .unwrap_or_default().into_iter().collect()
+            }
+        }
+    }
+
+    /// Returns the list of fonts and font patterns
+    pub fn list(&self) -> &BTreeMap<FcPattern, FcFontPath> {
+        &self.map
+    }
+
+    /// Queries a font from the in-memory `font -> file` mapping
+    pub fn query(&self, pattern: &FcPattern) -> Option<&FcFontPath> {
+
+        let name_needs_to_match = pattern.name.is_some();
+        let family_needs_to_match = pattern.family.is_some();
+
+        let italic_needs_to_match = pattern.italic.into_option();
+        let oblique_needs_to_match = pattern.oblique.into_option();
+        let bold_needs_to_match = pattern.bold.into_option();
+        let monospace_needs_to_match = pattern.monospace.into_option();
+
+        let result1 = self.map
+        .iter() // TODO: par_iter!
+        .find(|(k, _)| {
+            let name_matches = k.name == pattern.name;
+            let family_matches = k.family == pattern.family;
+            let italic_matches = k.italic == pattern.italic;
+            let oblique_matches = k.oblique == pattern.oblique;
+            let bold_matches = k.bold == pattern.bold;
+            let monospace_matches = k.monospace == pattern.monospace;
+
+            if name_needs_to_match && !name_matches {
+                return false;
+            }
+
+            if family_needs_to_match && !family_matches {
+                return false;
+            }
+
+            if let Some(italic_m) = italic_needs_to_match {
+                if italic_matches != italic_m {
+                    return false;
+                }
+            }
+
+
+            if let Some(oblique_m) = oblique_needs_to_match {
+                if oblique_matches != oblique_m {
+                    return false;
+                }
+            }
+
+
+            if let Some(bold_m) = bold_needs_to_match {
+                if bold_matches != bold_m {
+                    return false;
+                }
+            }
+
+            if let Some(monospace_m) = monospace_needs_to_match {
+                if monospace_matches != monospace_m {
+                    return false;
+                }
+            }
+
+            true
+        });
+
+        if let Some((_, r1)) = result1.as_ref() {
+            return Some(r1);
+        }
+
+        None
+    }
+}
+
+fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     use std::path::Path;
-    use std::fs::File;
-    use mmapio::MmapOptions;
     use xmlparser::Tokenizer;
     use xmlparser::Token::*;
     use std::io::Read;
@@ -139,13 +239,14 @@ pub fn FcLocateFontInner(pattern: FcPattern) -> Option<FcFontPath> {
         return None;
     }
 
-    FcScanDirectories(font_paths, pattern)
+    FcScanDirectoriesInner(font_paths)
 }
 
-pub fn FcScanDirectories(paths: &[(Option<&str>, &str)], pattern: FcPattern) -> Option<FcFontPath> {
+fn FcScanDirectoriesInner(paths: &[(Option<&str>, &str)]) -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     // scan directories in parallel
     let mut threads = (0..32).map(|_| None).collect::<Vec<_>>();
+    let mut result = Vec::new();
 
     for (p_id, (prefix, p)) in paths.iter().enumerate() {
         let mut path = match prefix {
@@ -154,75 +255,72 @@ pub fn FcScanDirectories(paths: &[(Option<&str>, &str)], pattern: FcPattern) -> 
             Some(s) => PathBuf::from(s),
         };
         path.push(p);
-        let pattern_clone = pattern.clone();
-        threads[p_id] = Some(thread::spawn(move || FcScanSingleDirectoryRecursive(path, pattern_clone)));
+        threads[p_id] = Some(thread::spawn(move || FcScanSingleDirectoryRecursive(path)));
     }
 
     for t in threads.iter_mut() {
+
         let t_result = match t.take() {
             Some(s) => s,
             None => continue,
         };
-        let t_result = t_result.join().ok()?;
-        match t_result {
-            Some(c) => return Some(c),
+
+        let mut t_result = t_result.join().ok()?;
+
+        match &mut t_result {
+            Some(c) => { result.append(c); },
             None => { },
         }
     }
 
-    None
+    Some(result)
 }
 
-pub fn FcScanSingleDirectoryRecursive(dir: PathBuf, pattern: FcPattern)-> Option<FcFontPath> {
+fn FcScanSingleDirectoryRecursive(dir: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
-    // NOTE: threads are fast, especially on linux. USE THEM.
+    // NOTE: Threads are fast, especially on linux. USE THEM.
     let mut threads = Vec::new();
 
     for entry in std::fs::read_dir(dir).ok()? {
         let entry = entry.ok()?;
         let path = entry.path();
         let pathbuf = path.to_path_buf();
-        let pattern_clone = pattern.clone();
         if path.is_dir() {
-            threads.push(thread::spawn(move || FcScanSingleDirectoryRecursive(pathbuf, pattern_clone)));
+            threads.push(Some(thread::spawn(move || FcScanSingleDirectoryRecursive(pathbuf))));
         } else {
-            threads.push(thread::spawn(move || FcFontMatchesPattern(pathbuf, pattern_clone)));
+            threads.push(Some(thread::spawn(move || FcParseFont(pathbuf))));
         }
     }
 
-    for t in threads {
-        let t_result = t.join().ok()?;
-        match t_result {
-            Some(c) => { return Some(c); },
-            None => { },
-        }
+    let mut results = Vec::new();
+
+    for t in threads.iter_mut() {
+        let mut t_result = t.take().and_then(|q| q.join().ok().and_then(|o| o)).unwrap_or_default();
+        results.append(&mut t_result);
     }
 
-    None
+    Some(results)
 }
 
-/*
-
-*/
-pub fn FcFontMatchesPattern(filepath: PathBuf, pattern: FcPattern)-> Option<FcFontPath> {
+fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
     use allsorts::{
         tag,
         binary::read::ReadScope,
         font_data::FontData,
-        layout::{LayoutCache, GDEFTable, GPOS, GSUB},
         tables::{
-            FontTableProvider, HheaTable, MaxpTable, HeadTable,
-            loca::LocaTable,
-            cmap::CmapSubtable,
-            glyf::{GlyfTable, Glyph, GlyfRecord},
-        },
-        tables::cmap::owned::CmapSubtable as OwnedCmapSubtable,
+            FontTableProvider, NameTable, HeadTable,
+        }
     };
     use std::fs::File;
     use mmapio::MmapOptions;
+    use std::collections::BTreeSet;
+    use allsorts::get_name::fontcode_get_name;
 
-    // font_index = 0 - TODO!
+    const FONT_SPECIFIER_NAME_ID: u16 = 4;
+    const FONT_SPECIFIER_FAMILY_ID: u16 = 1;
+
+    // font_index = 0 - TODO: iterate through fonts in font file properly!
     let font_index = 0;
 
     // try parsing the font file and see if the postscript name matches
@@ -232,44 +330,50 @@ pub fn FcFontMatchesPattern(filepath: PathBuf, pattern: FcPattern)-> Option<FcFo
     let font_file = scope.read::<FontData<'_>>().ok()?;
     let provider = font_file.table_provider(font_index).ok()?;
 
-    // parse the font from owned-ttf-parser, to get the outline
-    // parsing the outline needs the following tables:
-    //
-    //     required:
-    //          head, hhea, maxp, glyf, cff1, loca
-    //     optional for variable fonts:
-    //          gvar, cff2
-
-
     let head_data = provider.table_data(tag::HEAD).ok()??.into_owned();
-    let maxp_data = provider.table_data(tag::MAXP).ok()??.into_owned();
-    let loca_data = provider.table_data(tag::LOCA).ok()??.into_owned();
-    let glyf_data = provider.table_data(tag::GLYF).ok()??.into_owned();
-    let hhea_data = provider.table_data(tag::HHEA).ok()??.into_owned();
+    let head_table = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
+
+    let is_bold = head_table.is_bold();
+    let is_italic = head_table.is_italic();
+
     let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
+    let name_table = ReadScope::new(&name_data).read::<NameTable>().ok()?;
 
-    // required tables first
-    let mut outline_font_tables = vec![
-        Ok((ttf_parser::Tag::from_bytes(b"head"), Some(head_data.as_ref()))),
-        Ok((ttf_parser::Tag::from_bytes(b"loca"), Some(loca_data.as_ref()))),
-        Ok((ttf_parser::Tag::from_bytes(b"hhea"), Some(hhea_data.as_ref()))),
-        Ok((ttf_parser::Tag::from_bytes(b"maxp"), Some(maxp_data.as_ref()))),
-        Ok((ttf_parser::Tag::from_bytes(b"glyf"), Some(glyf_data.as_ref()))),
-        Ok((ttf_parser::Tag::from_bytes(b"name"), Some(name_data.as_ref()))),
-    ];
+    // one font can support multiple patterns
+    let mut f_family = None;
 
-    let face_tables = ttf_parser::FaceTables::from_table_provider(
-        outline_font_tables.into_iter()
-    ).ok()?;
-
-    face_tables
-    .names()
-    .find_map(|name| {
-        let name = name.to_string()?;
-        if name.as_str() == &pattern.postscript_name {
-            Some(FcFontPath { path: filepath.clone() })
+    let patterns = name_table.name_records
+    .iter() // TODO: par_iter
+    .filter_map(|name_record| {
+        let name_id = name_record.name_id;
+        if name_id == FONT_SPECIFIER_FAMILY_ID {
+            let family = fontcode_get_name(&name_data, FONT_SPECIFIER_FAMILY_ID).ok()??;
+            f_family = Some(family.to_string_lossy().to_string());
+            None
+        } else if name_id == FONT_SPECIFIER_NAME_ID {
+            let family = f_family.as_ref()?;
+            let name = fontcode_get_name(&name_data, FONT_SPECIFIER_NAME_ID).ok()??;
+            let name = name.to_string_lossy().to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some((FcPattern {
+                    name: Some(name),
+                    family: Some(family.clone()),
+                    bold: if is_bold { PatternMatch::True } else { PatternMatch::False },
+                    italic: if is_italic { PatternMatch::True } else { PatternMatch::False },
+                    .. Default::default() // TODO!
+                }, font_index))
+            }
         } else {
             None
         }
-    })
+    }).collect::<BTreeSet<_>>();
+
+    Some(
+        patterns
+        .into_iter()
+        .map(|(pat, index)| (pat, FcFontPath { path: filepath.clone(), font_index: index }))
+        .collect()
+    )
 }
