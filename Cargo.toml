@@ -8,6 +8,7 @@ description = "Minimal dependency, pure-Rust alternative to font-loader and serv
 repository = "https://github.com/fschutt/rust-fontconfig"
 keywords = ["fontconfig", "font-loader", "font", "system-fonts"]
 categories = ["gui"]
+readme = "README.md"
 
 [dependencies]
 xmlparser = { version = "0.13.3", default-features = false }
