@@ -23,7 +23,7 @@
 
 extern crate xmlparser;
 extern crate mmapio;
-extern crate allsorts;
+extern crate allsorts_no_std;
 
 extern crate core;
 extern crate alloc;
@@ -342,18 +342,18 @@ fn FcScanSingleDirectoryRecursive(dir: PathBuf)-> Option<Vec<(FcPattern, FcFontP
 #[cfg(feature = "std")]
 fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
-    use allsorts::{
+    use allsorts_no_std::{
         tag,
         binary::read::ReadScope,
         font_data::FontData,
         tables::{
             FontTableProvider, NameTable, HeadTable,
-        }
+        },
+        get_name::fontcode_get_name,
     };
     use std::fs::File;
     use mmapio::MmapOptions;
     use std::collections::BTreeSet;
-    use allsorts::get_name::fontcode_get_name;
 
     const FONT_SPECIFIER_NAME_ID: u16 = 4;
     const FONT_SPECIFIER_FAMILY_ID: u16 = 1;
@@ -386,12 +386,11 @@ fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
         let name_id = name_record.name_id;
         if name_id == FONT_SPECIFIER_FAMILY_ID {
             let family = fontcode_get_name(&name_data, FONT_SPECIFIER_FAMILY_ID).ok()??;
-            f_family = Some(family.to_string_lossy().to_string());
+            f_family = Some(family);
             None
         } else if name_id == FONT_SPECIFIER_NAME_ID {
             let family = f_family.as_ref()?;
             let name = fontcode_get_name(&name_data, FONT_SPECIFIER_NAME_ID).ok()??;
-            let name = name.to_string_lossy().to_string();
             if name.is_empty() {
                 None
             } else {
