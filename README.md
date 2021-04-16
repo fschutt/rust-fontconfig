@@ -1,28 +1,29 @@
 # rust-fontconfig
 
 Pure-Rust rewrite of the Linux fontconfig library (no system
-dependencies) - using ttf-parser and allsorts
+dependencies) - using allsorts as a font parser in order to
+parse `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf`
 
 **NOTE**: Also works on Windows and macOS - without external dependencies!
 
 ## Motivation
 
-There are a number of reasons why I want to have a pure-Rust version
-of fontconfig:
+There are a number of reasons why I want to have
+a pure-Rust version of fontconfig:
 
 - fontconfig with all dependencies (expat and freetype) is ~190.000
   lines of C (extremely bloated for what it does)
 - fontconfig, freetype, expat and basically any kind of parsing in C
   is a common attack vector (via maliciously crafted fonts). The Rust
-  versions (ttf-parser, allsorts) all check boundaries before accessing
+  version (allsorts) checks the boundaries before accessing
   memory, so attacks via font files should be less common.
 - it gets rid of the cmake / cc dependencies necessary to build
   [azul](https://azul.rs) on Linux
 - fontconfig isn't really a "hard" library to rewrite, it just
-  parses fonts and selects fonts by their name
+  parses fonts and selects fonts by name
 - Rust has existing xml parsers and font parsers, just use those
 - It allows fontconfig libraries to be purely statically linked
-- Font parsing / loading can be easily multithreaded
+- Font parsing / loading can be easily multithreaded (parsing font files in parallel)
 - It reduces the number of necessary non-Rust dependencies on Linux for azul to 0
 - fontconfig (or at least the Rust bindings) do not allow you
   to store an in-memory cache, only an on-disk cache, requiring
