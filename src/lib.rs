@@ -29,8 +29,6 @@ extern crate core;
 extern crate alloc;
 
 #[cfg(feature = "std")]
-use std::thread;
-#[cfg(feature = "std")]
 use std::path::PathBuf;
 use alloc::string::String;
 use alloc::collections::btree_map::BTreeMap;
@@ -62,12 +60,24 @@ impl Default for PatternMatch {
 #[derive(Debug, Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcPattern {
+    // font name
     pub name: Option<String>,
+    // family name
     pub family: Option<String>,
+    // "italic" property
     pub italic: PatternMatch,
+    // "oblique" property
     pub oblique: PatternMatch,
+    // "bold" property
     pub bold: PatternMatch,
+    // "monospace" property
     pub monospace: PatternMatch,
+    // "condensed" property
+    pub condensed: PatternMatch,
+    // font weight
+    pub weight: usize,
+    // start..end unicode range
+    pub unicode_range: [usize;2],
 }
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
@@ -186,8 +196,6 @@ impl FcFontCache {
 fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     use std::path::Path;
-    use xmlparser::Tokenizer;
-    use xmlparser::Token::*;
     use std::fs;
 
     let fontconfig_path = Path::new("/etc/fonts/fonts.conf");
@@ -196,19 +204,33 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
         return None;
     }
 
-    // let file = File::open(fontconfig_path).ok()?;
     let xml_utf8 = fs::read_to_string(fontconfig_path).ok()?;
-    // let mmap = unsafe { MmapOptions::new().map(&file).ok()? };
-    // let xml_utf8 = std::str::from_utf8(&file[..]).ok()?;
+
+    let mut font_paths = [(None, "");32];
+    let font_paths_count = ParseFontsConf(&xml_utf8, &mut font_paths)?;
+    let font_paths = &font_paths[0..font_paths_count];
+
+    if font_paths.is_empty() {
+        return None;
+    }
+
+    Some(FcScanDirectoriesInner(font_paths))
+}
+
+// Parses the fonts.conf file
+//
+// NOTE: This function also works on no_std
+fn ParseFontsConf<'a>(input: &'a str, font_paths: &mut [(Option<&'a str>, &'a str);32]) -> Option<usize> {
+
+    use xmlparser::Tokenizer;
+    use xmlparser::Token::*;
 
     let mut font_paths_count = 0;
-    let mut font_paths = [(None, "");32];
-
     let mut current_prefix: Option<&str> = None;
     let mut current_dir: Option<&str> = None;
     let mut is_in_dir = false;
 
-    for token in Tokenizer::from(xml_utf8.as_str()) {
+    'outer: for token in Tokenizer::from(input) {
         let token = token.ok()?;
         match token {
             ElementStart { local, .. } => {
@@ -254,7 +276,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
                 if let Some(d) = current_dir.as_ref() {
                     if font_paths_count >= font_paths.len() {
-                        return None; // error: exceeded maximum number of font paths
+                        break 'outer; // error: exceeded maximum number of font paths
                     }
 
                     font_paths[font_paths_count] = (current_prefix, d);
@@ -268,79 +290,87 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
         }
     }
 
-    let font_paths = &font_paths[0..font_paths_count];
-
-    if font_paths.is_empty() {
-        return None;
-    }
-
-    FcScanDirectoriesInner(font_paths)
+    Some(font_paths_count)
 }
 
 #[cfg(feature = "std")]
-fn FcScanDirectoriesInner(paths: &[(Option<&str>, &str)]) -> Option<Vec<(FcPattern, FcFontPath)>> {
+fn FcScanDirectoriesInner(paths: &[(Option<&str>, &str)]) -> Vec<(FcPattern, FcFontPath)> {
+
+    use rayon::prelude::*;
 
     // scan directories in parallel
-    let mut threads = (0..32).map(|_| None).collect::<Vec<_>>();
-    let mut result = Vec::new();
-
-    for (p_id, (prefix, p)) in paths.iter().enumerate() {
+    paths
+    .par_iter()
+    .flat_map(|(prefix, p)| {
         let mut path = match prefix {
             // "xdg" => ,
             None => PathBuf::new(),
             Some(s) => PathBuf::from(s),
         };
         path.push(p);
-        threads[p_id] = Some(thread::spawn(move || FcScanSingleDirectoryRecursive(path)));
-    }
-
-    for t in threads.iter_mut() {
-
-        let t_result = match t.take() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let mut t_result = t_result.join().ok()?;
-
-        match &mut t_result {
-            Some(c) => { result.append(c); },
-            None => { },
-        }
-    }
-
-    Some(result)
+        FcScanSingleDirectoryRecursive(path)
+    }).collect()
 }
 
 #[cfg(feature = "std")]
-fn FcScanSingleDirectoryRecursive(dir: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
+fn FcScanSingleDirectoryRecursive(dir: PathBuf)-> Vec<(FcPattern, FcFontPath)> {
 
-    // NOTE: Threads are fast, especially on linux. USE THEM.
-    let mut threads = Vec::new();
+    let mut files_to_parse = Vec::new();
+    let mut dirs_to_parse = vec![dir];
 
-    for entry in std::fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        let pathbuf = path.to_path_buf();
-        if path.is_dir() {
-            threads.push(Some(thread::spawn(move || FcScanSingleDirectoryRecursive(pathbuf))));
+    'outer: loop {
+
+        let mut new_dirs_to_parse = Vec::new();
+
+        'inner: for dir in dirs_to_parse.clone() {
+
+            let dir = match std::fs::read_dir(dir) {
+                Ok(o) => o,
+                Err(_) => continue 'inner,
+            };
+
+            for (path, pathbuf) in dir.filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                let pathbuf = path.to_path_buf();
+                Some((path, pathbuf))
+            }) {
+                if path.is_dir() {
+                    new_dirs_to_parse.push(pathbuf);
+                } else {
+                    files_to_parse.push(pathbuf);
+                }
+            }
+        }
+
+        if new_dirs_to_parse.is_empty() {
+            break 'outer;
         } else {
-            threads.push(Some(thread::spawn(move || FcParseFont(pathbuf))));
+            dirs_to_parse = new_dirs_to_parse;
         }
     }
 
-    let mut results = Vec::new();
-
-    for t in threads.iter_mut() {
-        let mut t_result = t.take().and_then(|q| q.join().ok().and_then(|o| o)).unwrap_or_default();
-        results.append(&mut t_result);
-    }
-
-    Some(results)
+    FcParseFontFiles(&files_to_parse)
 }
 
 #[cfg(feature = "std")]
-fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
+fn FcParseFontFiles(files_to_parse: &[PathBuf])-> Vec<(FcPattern, FcFontPath)> {
+
+    use rayon::prelude::*;
+
+    let result = files_to_parse
+    .par_iter()
+    .filter_map(|file| FcParseFont(file))
+    .collect::<Vec<Vec<_>>>();
+
+    result
+    .into_iter()
+    .flat_map(|f| f.into_iter())
+    .collect()
+}
+
+#[cfg(feature = "std")]
+fn FcParseFont(filepath: &PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
     use allsorts_no_std::{
         tag,
@@ -362,7 +392,7 @@ fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
     let font_index = 0;
 
     // try parsing the font file and see if the postscript name matches
-    let file = File::open(filepath.clone()).ok()?;
+    let file = File::open(filepath).ok()?;
     let font_bytes = unsafe { MmapOptions::new().map(&file).ok()? };
     let scope = ReadScope::new(&font_bytes[..]);
     let font_file = scope.read::<FontData<'_>>().ok()?;
@@ -411,7 +441,7 @@ fn FcParseFont(filepath: PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
         patterns
         .into_iter()
         .map(|(pat, index)| (pat, FcFontPath {
-            path: filepath.clone().to_string_lossy().to_string(),
+            path: filepath.to_string_lossy().to_string(),
             font_index: index
         }))
         .collect()
