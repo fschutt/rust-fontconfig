@@ -109,14 +109,14 @@ impl FcFontCache {
         #[cfg(target_os = "windows")] {
             FcFontCache {
                 map: FcScanSingleDirectoryRecursive(PathBuf::from("C:\\Windows\\Fonts\\"))
-                .unwrap_or_default().into_iter().collect()
+                .into_iter().collect()
             }
         }
 
         #[cfg(target_os = "macos")] {
             FcFontCache {
                 map: FcScanSingleDirectoryRecursive(PathBuf::from("~/Library/Fonts"))
-                .unwrap_or_default().into_iter().collect()
+                .into_iter().collect()
             }
         }
     }
