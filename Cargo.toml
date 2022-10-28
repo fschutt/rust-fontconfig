@@ -13,9 +13,9 @@ readme = "README.md"
 [dependencies]
 xmlparser = { version = "0.13.3", default-features = false }
 mmapio = { version = "0.9.1", default-features = false }
-allsorts_no_std = { version = "0.5.2", default-features = false }
 rayon = { version = "1.5.0", default-features = false }
+allsorts = "0.12.1"
 
 [features]
 default = ["std"]
-std = ["allsorts_no_std/std"]
+std = []

@@ -23,7 +23,7 @@
 
 extern crate xmlparser;
 extern crate mmapio;
-extern crate allsorts_no_std;
+extern crate allsorts;
 
 extern crate core;
 extern crate alloc;
@@ -372,7 +372,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf])-> Vec<(FcPattern, FcFontPath)> {
 #[cfg(feature = "std")]
 fn FcParseFont(filepath: &PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
 
-    use allsorts_no_std::{
+    use allsorts::{
         tag,
         binary::read::ReadScope,
         font_data::FontData,
@@ -421,12 +421,12 @@ fn FcParseFont(filepath: &PathBuf)-> Option<Vec<(FcPattern, FcFontPath)>> {
         } else if name_id == FONT_SPECIFIER_NAME_ID {
             let family = f_family.as_ref()?;
             let name = fontcode_get_name(&name_data, FONT_SPECIFIER_NAME_ID).ok()??;
-            if name.is_empty() {
+            if name.to_bytes().is_empty() {
                 None
             } else {
                 Some((FcPattern {
-                    name: Some(name),
-                    family: Some(family.clone()),
+                    name: Some(String::from_utf8_lossy(name.to_bytes()).to_string()),
+                    family: Some(String::from_utf8_lossy(family.as_bytes()).to_string()),
                     bold: if is_bold { PatternMatch::True } else { PatternMatch::False },
                     italic: if is_italic { PatternMatch::True } else { PatternMatch::False },
                     .. Default::default() // TODO!
