@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "0.1.5"
+version = "0.1.6"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2018"
 license = "MIT"
@@ -14,7 +14,7 @@ readme = "README.md"
 xmlparser = { version = "0.13.3", default-features = false }
 mmapio = { version = "0.9.1", default-features = false }
 rayon = { version = "1.5.0", default-features = false }
-allsorts = "0.12.1"
+allsorts = { version = "0.14.0", default-features = false, features = ["flate2_rust"] }
 
 [features]
 default = ["std"]
