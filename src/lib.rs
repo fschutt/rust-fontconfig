@@ -122,8 +122,8 @@ impl FcFontCache {
             let home_dir = std::env::var("HOME").unwrap_or(String::new());
             let font_dirs = vec![
                 (Some(home_dir.as_ref()), "Library/Fonts"),
-                (None, "System/Library/Fonts"),
-                (None, "Library/Fonts"),
+                (None, "/System/Library/Fonts"),
+                (None, "/Library/Fonts"),
             ];
             FcFontCache {
                 map: FcScanDirectoriesInner(&font_dirs)
