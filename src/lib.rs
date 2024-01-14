@@ -119,11 +119,10 @@ impl FcFontCache {
 
         #[cfg(target_os = "macos")]
         {
-            let home_dir = std::env::var("HOME").unwrap_or(String::new());
             let font_dirs = vec![
-                (Some(home_dir.as_ref()), "Library/Fonts"),
-                (None, "/System/Library/Fonts"),
-                (None, "/Library/Fonts"),
+                (None, "~/Library/Fonts".to_owned()),
+                (None, "/System/Library/Fonts".to_owned()),
+                (None, "/Library/Fonts".to_owned()),
             ];
             FcFontCache {
                 map: FcScanDirectoriesInner(&font_dirs)
