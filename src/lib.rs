@@ -460,9 +460,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
     paths
         .par_iter()
         .filter_map(|(prefix, p)| {
-            dbg!((prefix, p));
             if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
-                dbg!(&path);
                 Some(FcScanSingleDirectoryRecursive(path))
             } else {
                 None
