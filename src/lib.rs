@@ -9,12 +9,12 @@
 //! fn main() {
 //!
 //!     let cache = FcFontCache::build();
-//!     let result = cache.query(&FcPattern {
+//!     let results = cache.query(&FcPattern {
 //!         name: Some(String::from("Arial")),
 //!         .. Default::default()
 //!     });
 //!
-//!     println!("font path: {:?}", result);
+//!     println!("font results: {:?}", results);
 //! }
 //! ```
 
@@ -139,7 +139,7 @@ impl FcFontCache {
     }
 
     /// Queries a font from the in-memory `font -> file` mapping
-    pub fn query(&self, pattern: &FcPattern) -> Option<&FcFontPath> {
+    pub fn query(&self, pattern: &FcPattern) -> Vec<&FcFontPath> {
         let name_needs_to_match = pattern.name.is_some();
         let family_needs_to_match = pattern.family.is_some();
 
@@ -148,57 +148,52 @@ impl FcFontCache {
         let bold_needs_to_match = pattern.bold.into_option();
         let monospace_needs_to_match = pattern.monospace.into_option();
 
-        let result1 = self
+        self
             .map
             .iter() // TODO: par_iter!
-            .find(|(k, _)| {
-                let name_matches = k.name == pattern.name;
-                let family_matches = k.family == pattern.family;
-                let italic_matches = k.italic == pattern.italic;
-                let oblique_matches = k.oblique == pattern.oblique;
-                let bold_matches = k.bold == pattern.bold;
-                let monospace_matches = k.monospace == pattern.monospace;
+            .filter_map(|(metadata, font_path)| {
+                let name_matches = metadata.name == pattern.name;
+                let family_matches = metadata.family == pattern.family;
+                let italic_matches = metadata.italic == pattern.italic;
+                let oblique_matches = metadata.oblique == pattern.oblique;
+                let bold_matches = metadata.bold == pattern.bold;
+                let monospace_matches = metadata.monospace == pattern.monospace;
 
                 if name_needs_to_match && !name_matches {
-                    return false;
+                    return None;
                 }
 
                 if family_needs_to_match && !family_matches {
-                    return false;
+                    return None;
                 }
 
                 if let Some(italic_m) = italic_needs_to_match {
                     if italic_matches != italic_m {
-                        return false;
+                        return None;
                     }
                 }
 
                 if let Some(oblique_m) = oblique_needs_to_match {
                     if oblique_matches != oblique_m {
-                        return false;
+                        return None;
                     }
                 }
 
                 if let Some(bold_m) = bold_needs_to_match {
                     if bold_matches != bold_m {
-                        return false;
+                        return None;
                     }
                 }
 
                 if let Some(monospace_m) = monospace_needs_to_match {
                     if monospace_matches != monospace_m {
-                        return false;
+                        return None;
                     }
                 }
 
-                true
-            });
-
-        if let Some((_, r1)) = result1.as_ref() {
-            return Some(r1);
-        }
-
-        None
+                Some(font_path)
+            })
+            .collect::<Vec<_>>()
     }
 }
 
