@@ -215,15 +215,14 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     let xml_utf8 = fs::read_to_string(fontconfig_path).ok()?;
 
-    let mut font_paths = [(None, ""); 32];
-    let font_paths_count = ParseFontsConf(&xml_utf8, &mut font_paths)?;
-    let font_paths = &font_paths[0..font_paths_count];
+    let mut font_paths = Vec::with_capacity(32);
+    ParseFontsConf(&xml_utf8, &mut font_paths)?;
 
     if font_paths.is_empty() {
         return None;
     }
 
-    Some(FcScanDirectoriesInner(font_paths))
+    Some(FcScanDirectoriesInner(font_paths.as_slice()))
 }
 
 // Parses the fonts.conf file
@@ -231,7 +230,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 // NOTE: This function also works on no_std
 fn ParseFontsConf<'a>(
     input: &'a str,
-    font_paths: &mut [(Option<&'a str>, &'a str); 32],
+    font_paths: &mut Vec<(Option<&'a str>, &'a str)>,
 ) -> Option<usize> {
     use xmlparser::Token::*;
     use xmlparser::Tokenizer;
@@ -288,11 +287,7 @@ fn ParseFontsConf<'a>(
                 }
 
                 if let Some(d) = current_dir.as_ref() {
-                    if font_paths_count >= font_paths.len() {
-                        break 'outer; // error: exceeded maximum number of font paths
-                    }
-
-                    font_paths[font_paths_count] = (current_prefix, d);
+                    font_paths.push((current_prefix, d));
                     font_paths_count += 1;
                     is_in_dir = false;
                     current_dir = None;
