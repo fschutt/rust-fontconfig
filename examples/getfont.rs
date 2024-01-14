@@ -7,12 +7,12 @@ fn main() {
     let end = Instant::now();
 
     let start2 = Instant::now();
-    let result = cache.query(&FcPattern {
+    let results = cache.query(&FcPattern {
         name: Some(String::from("Purisa")),
         ..Default::default()
     });
     let end2 = Instant::now();
 
     println!("built cache in: {:?}", end - start);
-    println!("font path: {:?} - queried in {:?}", result, end2 - start2);
+    println!("font results: {:?} - queried in {:?}", results, end2 - start2);
 }
