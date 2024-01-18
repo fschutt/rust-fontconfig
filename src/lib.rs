@@ -119,11 +119,10 @@ impl FcFontCache {
 
         #[cfg(target_os = "macos")]
         {
-            let home_dir = std::env::var("HOME").unwrap_or(String::new());
             let font_dirs = vec![
-                (Some(home_dir.as_ref()), "Library/Fonts"),
-                (None, "/System/Library/Fonts"),
-                (None, "/Library/Fonts"),
+                (None, "~/Library/Fonts".to_owned()),
+                (None, "/System/Library/Fonts".to_owned()),
+                (None, "/Library/Fonts".to_owned()),
             ];
             FcFontCache {
                 map: FcScanDirectoriesInner(&font_dirs)
@@ -203,73 +202,212 @@ impl FcFontCache {
 }
 
 #[cfg(feature = "std")]
+/// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
+///
+/// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
+fn process_path(
+    prefix: &Option<String>,
+    mut path: PathBuf,
+    is_include_path: bool,
+) -> Option<PathBuf> {
+    use std::env::var;
+
+    const HOME_SHORTCUT: &str = "~";
+    const CWD_PATH: &str = ".";
+
+    const HOME_ENV_VAR: &str = "HOME";
+    const XDG_CONFIG_HOME_ENV_VAR: &str = "XDG_CONFIG_HOME";
+    const XDG_CONFIG_HOME_DEFAULT_PATH_SUFFIX: &str = ".config";
+    const XDG_DATA_HOME_ENV_VAR: &str = "XDG_DATA_HOME";
+    const XDG_DATA_HOME_DEFAULT_PATH_SUFFIX: &str = ".local/share";
+
+    const PREFIX_CWD: &str = "cwd";
+    const PREFIX_DEFAULT: &str = "default";
+    const PREFIX_XDG: &str = "xdg";
+
+    // These three could, in theory, be cached, but the work required to do so outweighs the minor benefits
+    fn get_home_value() -> Option<PathBuf> {
+        var(HOME_ENV_VAR)
+            .ok()
+            .map(PathBuf::from)
+    }
+    fn get_xdg_config_home_value() -> Option<PathBuf> {
+        var(XDG_CONFIG_HOME_ENV_VAR)
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| get_home_value()
+                .map(|home_path|
+                    home_path.join(XDG_CONFIG_HOME_DEFAULT_PATH_SUFFIX))
+            )
+    }
+    fn get_xdg_data_home_value() -> Option<PathBuf> {
+        var(XDG_DATA_HOME_ENV_VAR)
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| get_home_value()
+                .map(|home_path|
+                    home_path.join(XDG_DATA_HOME_DEFAULT_PATH_SUFFIX))
+            )
+    }
+
+    // Resolve the tilde character in the path, if present
+    if path.starts_with(HOME_SHORTCUT) {
+        if let Some(home_path) = get_home_value() {
+            path = home_path.join(path.strip_prefix(HOME_SHORTCUT).expect("already checked that it starts with the prefix"));
+        } else {
+            return None;
+        }
+    }
+
+    // Resolve prefix values
+    match prefix {
+        Some(prefix) => match prefix.as_str() {
+            PREFIX_CWD | PREFIX_DEFAULT => {
+                let mut new_path = PathBuf::from(CWD_PATH);
+                new_path.push(path);
+
+                Some(new_path)
+            }
+            PREFIX_XDG => {
+                if is_include_path {
+                    get_xdg_config_home_value()
+                        .map(|xdg_config_home_path| xdg_config_home_path.join(path))
+                } else {
+                    get_xdg_data_home_value()
+                        .map(|xdg_data_home_path| xdg_data_home_path.join(path))
+                }
+            }
+            _ => None // Unsupported prefix
+        }
+        None => Some(path),
+    }
+}
+
+#[cfg(feature = "std")]
 fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
     use std::fs;
     use std::path::Path;
 
-    let fontconfig_path = Path::new("/etc/fonts/fonts.conf");
+    const BASE_FONTCONFIG_PATH: &str = "/etc/fonts/fonts.conf";
 
-    if !fontconfig_path.exists() {
+    if !Path::new(BASE_FONTCONFIG_PATH).exists() {
         return None;
     }
 
-    let xml_utf8 = fs::read_to_string(fontconfig_path).ok()?;
+    let mut font_paths = Vec::with_capacity(32);
+    let mut paths_to_visit = vec![(None, PathBuf::from(BASE_FONTCONFIG_PATH))];
 
-    let mut font_paths = [(None, ""); 32];
-    let font_paths_count = ParseFontsConf(&xml_utf8, &mut font_paths)?;
-    let font_paths = &font_paths[0..font_paths_count];
+    while let Some((prefix, mut path_to_visit)) = paths_to_visit.pop() {
+        path_to_visit = match process_path(&prefix, path_to_visit, true) {
+            Some(path) => path,
+            None => continue
+        };
+
+        let metadata = match fs::metadata(path_to_visit.as_path()) {
+            Ok(metadata) => metadata,
+            Err(_) => continue
+        };
+
+        if metadata.is_file() {
+            let xml_utf8 = match fs::read_to_string(path_to_visit.as_path()) {
+                Ok(xml_utf8) => xml_utf8,
+                Err(_) => continue
+            };
+
+            ParseFontsConf(xml_utf8.as_str(), &mut paths_to_visit, &mut font_paths);
+        } else if metadata.is_dir() {
+            let dir_entries = match fs::read_dir(path_to_visit) {
+                Ok(dir_entries) => dir_entries,
+                Err(_) => continue
+            };
+
+            for dir_entry in dir_entries {
+                if let Ok(dir_entry) = dir_entry {
+                    let entry_path = dir_entry.path();
+
+                    // `fs::metadata` traverses symbolic links
+                    let metadata = match fs::metadata(entry_path.as_path()) {
+                        Ok(metadata) => metadata,
+                        Err(_) => continue
+                    };
+
+                    if metadata.is_file() {
+                        if let Some(file_name) = entry_path.file_name() {
+                            let file_name_str = file_name.to_string_lossy();
+                            if file_name_str.starts_with(|c: char| c.is_ascii_digit()) && file_name_str.ends_with(".conf") {
+                                paths_to_visit.push((None, entry_path));
+                            }
+                        }
+                    }
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
 
     if font_paths.is_empty() {
         return None;
     }
 
-    Some(FcScanDirectoriesInner(font_paths))
+    Some(FcScanDirectoriesInner(font_paths.as_slice()))
 }
 
 // Parses the fonts.conf file
 //
 // NOTE: This function also works on no_std
-fn ParseFontsConf<'a>(
-    input: &'a str,
-    font_paths: &mut [(Option<&'a str>, &'a str); 32],
-) -> Option<usize> {
+fn ParseFontsConf(
+    input: &str,
+    paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
+    font_paths: &mut Vec<(Option<String>, String)>,
+) -> Option<()> {
     use xmlparser::Token::*;
     use xmlparser::Tokenizer;
 
-    let mut font_paths_count = 0;
+    const TAG_INCLUDE: &str = "include";
+    const TAG_DIR: &str = "dir";
+    const ATTRIBUTE_PREFIX: &str = "prefix";
+
     let mut current_prefix: Option<&str> = None;
-    let mut current_dir: Option<&str> = None;
+    let mut current_path: Option<&str> = None;
+    let mut is_in_include = false;
     let mut is_in_dir = false;
 
     'outer: for token in Tokenizer::from(input) {
         let token = token.ok()?;
         match token {
             ElementStart { local, .. } => {
-                if local.as_str() != "dir" {
-                    continue;
+                if is_in_include || is_in_dir {
+                    return None; /* error: nested tags */
                 }
 
-                if is_in_dir {
-                    return None; /* error: nested <dir></dir> tags */
+                match local.as_str() {
+                    TAG_INCLUDE => {
+                        is_in_include = true;
+                    }
+                    TAG_DIR => {
+                        is_in_dir = true;
+                    }
+                    _ => continue
                 }
-                is_in_dir = true;
-                current_dir = None;
+
+                current_path = None;
             }
             Text { text, .. } => {
                 let text = text.as_str().trim();
                 if text.is_empty() {
                     continue;
                 }
-                if is_in_dir {
-                    current_dir = Some(text);
+                if is_in_include || is_in_dir {
+                    current_path = Some(text);
                 }
             }
             Attribute { local, value, .. } => {
-                if !is_in_dir {
+                if !is_in_include && !is_in_dir {
                     continue;
                 }
-                // attribute on <dir node>
-                if local.as_str() == "prefix" {
+                // attribute on <include> or <dir> node
+                if local.as_str() == ATTRIBUTE_PREFIX {
                     current_prefix = Some(value.as_str());
                 }
             }
@@ -279,49 +417,55 @@ fn ParseFontsConf<'a>(
                     _ => continue,
                 };
 
-                if end_tag.as_str() != "dir" {
-                    continue;
-                }
+                match end_tag.as_str() {
+                    TAG_INCLUDE => {
+                        if !is_in_include {
+                            continue;
+                        }
 
-                if !is_in_dir {
-                    continue;
-                }
-
-                if let Some(d) = current_dir.as_ref() {
-                    if font_paths_count >= font_paths.len() {
-                        break 'outer; // error: exceeded maximum number of font paths
+                        if let Some(current_path) = current_path.as_ref() {
+                            paths_to_visit.push((current_prefix.map(ToOwned::to_owned), PathBuf::from(current_path)));
+                        }
                     }
+                    TAG_DIR => {
+                        if !is_in_dir {
+                            continue;
+                        }
 
-                    font_paths[font_paths_count] = (current_prefix, d);
-                    font_paths_count += 1;
-                    is_in_dir = false;
-                    current_dir = None;
-                    current_prefix = None;
+                        if let Some(current_path) = current_path.as_ref() {
+                            font_paths.push((current_prefix.map(ToOwned::to_owned), (*current_path).to_owned()));
+                        }
+                    }
+                    _ => continue
                 }
+
+                is_in_include = false;
+                is_in_dir = false;
+                current_path = None;
+                current_prefix = None;
             }
             _ => {}
         }
     }
 
-    Some(font_paths_count)
+    Some(())
 }
 
 #[cfg(feature = "std")]
-fn FcScanDirectoriesInner(paths: &[(Option<&str>, &str)]) -> Vec<(FcPattern, FcFontPath)> {
+fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern, FcFontPath)> {
     use rayon::prelude::*;
 
     // scan directories in parallel
     paths
         .par_iter()
-        .flat_map(|(prefix, p)| {
-            let mut path = match prefix {
-                // "xdg" => ,
-                None => PathBuf::new(),
-                Some(s) => PathBuf::from(s),
-            };
-            path.push(p);
-            FcScanSingleDirectoryRecursive(path)
+        .filter_map(|(prefix, p)| {
+            if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
+                Some(FcScanSingleDirectoryRecursive(path))
+            } else {
+                None
+            }
         })
+        .flatten()
         .collect()
 }
 
