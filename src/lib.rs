@@ -106,8 +106,13 @@ impl FcFontCache {
 
         #[cfg(target_os = "windows")]
         {
+            // `~` isn't actually valid on Windows, but it will be converted by `process_path`
+            let font_dirs = vec![
+                (None, "C:\\Windows\\Fonts\\".to_owned()),
+                (None, "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned()),
+            ];
             FcFontCache {
-                map: FcScanSingleDirectoryRecursive(PathBuf::from("C:\\Windows\\Fonts\\"))
+                map: FcScanDirectoriesInner(&font_dirs)
                     .into_iter()
                     .collect(),
             }
