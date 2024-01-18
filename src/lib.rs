@@ -42,12 +42,8 @@ pub enum PatternMatch {
 }
 
 impl PatternMatch {
-    fn into_option(&self) -> Option<bool> {
-        match self {
-            PatternMatch::True => Some(true),
-            PatternMatch::False => Some(false),
-            PatternMatch::DontCare => None,
-        }
+    fn needs_to_match(&self) -> bool {
+        matches!(self, PatternMatch::True | PatternMatch::False)
     }
 }
 
@@ -142,10 +138,10 @@ impl FcFontCache {
         let name_needs_to_match = pattern.name.is_some();
         let family_needs_to_match = pattern.family.is_some();
 
-        let italic_needs_to_match = pattern.italic.into_option();
-        let oblique_needs_to_match = pattern.oblique.into_option();
-        let bold_needs_to_match = pattern.bold.into_option();
-        let monospace_needs_to_match = pattern.monospace.into_option();
+        let italic_needs_to_match = pattern.italic.needs_to_match();
+        let oblique_needs_to_match = pattern.oblique.needs_to_match();
+        let bold_needs_to_match = pattern.bold.needs_to_match();
+        let monospace_needs_to_match = pattern.monospace.needs_to_match();
 
         let result1 = self
             .map
@@ -166,28 +162,20 @@ impl FcFontCache {
                     return false;
                 }
 
-                if let Some(italic_m) = italic_needs_to_match {
-                    if italic_matches != italic_m {
-                        return false;
-                    }
+                if italic_needs_to_match && !italic_matches {
+                    return false;
                 }
 
-                if let Some(oblique_m) = oblique_needs_to_match {
-                    if oblique_matches != oblique_m {
-                        return false;
-                    }
+                if oblique_needs_to_match && !oblique_matches {
+                    return false;
                 }
 
-                if let Some(bold_m) = bold_needs_to_match {
-                    if bold_matches != bold_m {
-                        return false;
-                    }
+                if bold_needs_to_match && !bold_matches {
+                    return false;
                 }
 
-                if let Some(monospace_m) = monospace_needs_to_match {
-                    if monospace_matches != monospace_m {
-                        return false;
-                    }
+                if monospace_needs_to_match && !monospace_matches {
+                    return false;
                 }
 
                 true
