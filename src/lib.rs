@@ -137,9 +137,9 @@ impl FcFontCache {
     pub fn list(&self) -> &BTreeMap<FcPattern, FcFontPath> {
         &self.map
     }
+    
+    fn query_matches_internal(k: &FcPattern, pattern: &FcPattern) -> bool {
 
-    /// Queries a font from the in-memory `font -> file` mapping
-    pub fn query(&self, pattern: &FcPattern) -> Vec<&FcFontPath> {
         let name_needs_to_match = pattern.name.is_some();
         let family_needs_to_match = pattern.family.is_some();
 
@@ -148,44 +148,65 @@ impl FcFontCache {
         let bold_needs_to_match = pattern.bold.needs_to_match();
         let monospace_needs_to_match = pattern.monospace.needs_to_match();
 
+        let name_matches = k.name == pattern.name;
+        let family_matches = k.family == pattern.family;
+        let italic_matches = k.italic == pattern.italic;
+        let oblique_matches = k.oblique == pattern.oblique;
+        let bold_matches = k.bold == pattern.bold;
+        let monospace_matches = k.monospace == pattern.monospace;
+        
+        if name_needs_to_match && !name_matches {
+            return false;
+        }
+        
+        if family_needs_to_match && !family_matches {
+            return false;
+        }
+
+        if name_needs_to_match && !name_matches {
+            return false;
+        }
+
+        if family_needs_to_match && !family_matches {
+            return false;
+        }
+
+        if italic_needs_to_match && !italic_matches {
+            return false;
+        }
+
+        if oblique_needs_to_match && !oblique_matches {
+            return false;
+        }
+
+        if bold_needs_to_match && !bold_matches {
+            return false;
+        }
+
+        if monospace_needs_to_match && !monospace_matches {
+            return false;
+        }
+
+        true
+    }
+
+    /// Queries a font from the in-memory `font -> file` mapping, returns all matching fonts
+    pub fn query_all(&self, pattern: &FcPattern) -> Vec<&FcFontPath> {
         self
             .map
             .iter() // TODO: par_iter!
-            .filter_map(|(metadata, font_path)| {
-                let name_matches = metadata.name == pattern.name;
-                let family_matches = metadata.family == pattern.family;
-                let italic_matches = metadata.italic == pattern.italic;
-                let oblique_matches = metadata.oblique == pattern.oblique;
-                let bold_matches = metadata.bold == pattern.bold;
-                let monospace_matches = metadata.monospace == pattern.monospace;
+            .filter(|(k, _)| Self::query_matches_internal(k, pattern))
+            .map(|(_, v)| v)
+            .collect()
+    }
 
-                if name_needs_to_match && !name_matches {
-                    return None;
-                }
-
-                if family_needs_to_match && !family_matches {
-                    return None;
-                }
-
-                if italic_needs_to_match && !italic_matches {
-                    return false;
-                }
-
-                if oblique_needs_to_match && !oblique_matches {
-                    return false;
-                }
-
-                if bold_needs_to_match && !bold_matches {
-                    return false;
-                }
-
-                if monospace_needs_to_match && !monospace_matches {
-                    return false;
-                }
-
-                Some(font_path)
-            })
-            .collect::<Vec<_>>()
+    /// Queries a font from the in-memory `font -> file` mapping, returns the first found font (early return)
+    pub fn query(&self, pattern: &FcPattern) -> Option<&FcFontPath> {
+        self
+            .map
+            .iter() // TODO: par_iter!
+            .find(|(k, _)| Self::query_matches_internal(k, pattern))
+            .map(|(_, v)| v)
     }
 }
 
@@ -361,7 +382,7 @@ fn ParseFontsConf(
     let mut is_in_include = false;
     let mut is_in_dir = false;
 
-    'outer: for token in Tokenizer::from(input) {
+    for token in Tokenizer::from(input) {
         let token = token.ok()?;
         match token {
             ElementStart { local, .. } => {
