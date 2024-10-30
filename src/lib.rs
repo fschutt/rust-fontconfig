@@ -470,11 +470,26 @@ fn ParseFontsConf(
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern, FcFontPath)> {
-    use rayon::prelude::*;
 
-    // scan directories in parallel
-    paths
-        .par_iter()
+    #[cfg(feature = "multithreading")] {
+        use rayon::prelude::*;
+
+        // scan directories in parallel
+        paths
+            .par_iter()
+            .filter_map(|(prefix, p)| {
+                if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
+                    Some(FcScanSingleDirectoryRecursive(path))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect()
+    }
+    #[cfg(not(feature = "multithreading"))] {
+        paths
+        .iter()
         .filter_map(|(prefix, p)| {
             if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
                 Some(FcScanSingleDirectoryRecursive(path))
@@ -484,6 +499,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
         })
         .flatten()
         .collect()
+    }
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -526,14 +542,28 @@ fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> 
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> {
-    use rayon::prelude::*;
 
-    let result = files_to_parse
-        .par_iter()
-        .filter_map(|file| FcParseFont(file))
-        .collect::<Vec<Vec<_>>>();
+    let result = {
+        #[cfg(feature = "multithreading")] {
+            use rayon::prelude::*;
 
-    result.into_iter().flat_map(|f| f.into_iter()).collect()
+            files_to_parse
+            .par_iter()
+            .filter_map(|file| FcParseFont(file))
+            .collect::<Vec<Vec<_>>>()
+        }
+        #[cfg(not(feature = "multithreading"))] {
+            files_to_parse
+            .iter()
+            .filter_map(|file| FcParseFont(file))
+            .collect::<Vec<Vec<_>>>()
+        }
+    };
+
+    result
+    .into_iter()
+    .flat_map(|f| f.into_iter())
+    .collect()
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
