@@ -21,6 +21,7 @@
 #![allow(non_snake_case)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "parsing")]
 extern crate allsorts;
 extern crate mmapio;
 extern crate xmlparser;
@@ -30,6 +31,8 @@ extern crate core;
 
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
+use alloc::borrow::ToOwned;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
@@ -89,10 +92,16 @@ pub struct FcFontCache {
 }
 
 impl FcFontCache {
+
+    #[cfg(not(all(feature = "std", feature = "parsing")))]
+    pub fn build() -> Self {
+        Self::default()
+    }
+
     /// Builds a new font cache from all fonts discovered on the system
     ///
     /// NOTE: Performance-intensive, should only be called on startup!
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -292,7 +301,7 @@ fn process_path(
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
     use std::fs;
     use std::path::Path;
@@ -363,8 +372,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 }
 
 // Parses the fonts.conf file
-//
-// NOTE: This function also works on no_std
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn ParseFontsConf(
     input: &str,
     paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
@@ -433,7 +441,7 @@ fn ParseFontsConf(
                         }
 
                         if let Some(current_path) = current_path.as_ref() {
-                            paths_to_visit.push((current_prefix.map(ToOwned::to_owned), PathBuf::from(current_path)));
+                            paths_to_visit.push((current_prefix.map(ToOwned::to_owned), PathBuf::from(*current_path)));
                         }
                     }
                     TAG_DIR => {
@@ -460,7 +468,7 @@ fn ParseFontsConf(
     Some(())
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern, FcFontPath)> {
     use rayon::prelude::*;
 
@@ -478,7 +486,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
         .collect()
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> {
     let mut files_to_parse = Vec::new();
     let mut dirs_to_parse = vec![dir];
@@ -516,7 +524,7 @@ fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> 
     FcParseFontFiles(&files_to_parse)
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> {
     use rayon::prelude::*;
 
@@ -528,7 +536,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
     result.into_iter().flat_map(|f| f.into_iter()).collect()
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
     use allsorts::{
         binary::read::ReadScope,
