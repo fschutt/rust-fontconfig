@@ -23,6 +23,7 @@
 
 #[cfg(feature = "parsing")]
 extern crate allsorts;
+#[cfg(feature = "std")]
 extern crate mmapio;
 extern crate xmlparser;
 
