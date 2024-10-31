@@ -162,6 +162,10 @@ impl FcFontCache {
                     .collect(),
             }
         }
+    
+        #[cfg(target_family = "wasm")] {
+            Self::default()
+        }
     }
 
     /// Returns the list of fonts and font patterns
