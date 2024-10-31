@@ -23,7 +23,7 @@
 
 #[cfg(feature = "parsing")]
 extern crate allsorts;
-#[cfg(feature = "std")]
+#[cfg(all(not(target_family = "wasm"), feature = "std"))]
 extern crate mmapio;
 extern crate xmlparser;
 
@@ -597,8 +597,9 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
         tables::{FontTableProvider, HeadTable, NameTable},
         tag,
     };
+    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
     use mmapio::MmapOptions;
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, io::Read};
     use std::fs::File;
 
     const FONT_SPECIFIER_NAME_ID: u16 = 4;
@@ -609,7 +610,10 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     // try parsing the font file and see if the postscript name matches
     let file = File::open(filepath).ok()?;
+    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
     let font_bytes = unsafe { MmapOptions::new().map(&file).ok()? };
+    #[cfg(not(all(not(target_family = "wasm"), feature = "std")))]
+    let font_bytes = std::fs::read(filepath).ok()?;
     let scope = ReadScope::new(&font_bytes[..]);
     let font_file = scope.read::<FontData<'_>>().ok()?;
     let provider = font_file.table_provider(font_index).ok()?;
