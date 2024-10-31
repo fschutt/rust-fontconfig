@@ -87,6 +87,14 @@ pub struct FcFontPath {
     pub font_index: usize,
 }
 
+/// Represent an in-memory font file
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[repr(C)]
+pub struct FcFont {
+    pub bytes: Vec<u8>,
+    pub font_index: usize,
+}
+
 #[derive(Debug, Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FcFontCache {
     map: BTreeMap<FcPattern, FcFontPath>,
@@ -94,6 +102,19 @@ pub struct FcFontCache {
 
 impl FcFontCache {
 
+    /// Adds in-memory font files (`path` will be base64 encoded)
+    pub fn with_memory_fonts(&mut self, f: &[(FcPattern, FcFont)]) -> &mut Self {
+        use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+        self.map.extend(f.iter().map(|(k, v)| {
+            (k.clone(), FcFontPath {
+                path: format!("base64:{}",URL_SAFE.encode(&v.bytes)),
+                font_index: v.font_index,
+            })
+        }));
+        self
+    }
+
+    /// Builds a new font cache
     #[cfg(not(all(feature = "std", feature = "parsing")))]
     pub fn build() -> Self {
         Self::default()
