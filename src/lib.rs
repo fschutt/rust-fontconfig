@@ -107,7 +107,11 @@ impl FcFontCache {
         use base64::{engine::general_purpose::URL_SAFE, Engine as _};
         self.map.extend(f.iter().map(|(k, v)| {
             (k.clone(), FcFontPath {
-                path: format!("base64:{}",URL_SAFE.encode(&v.bytes)),
+                path: {
+                    let mut s = String::from("base64:");
+                    s.push_str(&URL_SAFE.encode(&v.bytes));
+                    s
+                },
                 font_index: v.font_index,
             })
         }));
