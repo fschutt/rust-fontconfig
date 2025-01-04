@@ -602,12 +602,15 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
         binary::read::ReadScope,
         font_data::FontData,
         get_name::fontcode_get_name,
-        tables::{FontTableProvider, HeadTable, NameTable},
+        post::PostTable,
+        tables::{
+            os2::Os2, FontTableProvider, HeadTable, HheaTable, HmtxTable, MaxpTable, NameTable,
+        },
         tag,
     };
     #[cfg(all(not(target_family = "wasm"), feature = "std"))]
     use mmapio::MmapOptions;
-    use std::{collections::BTreeSet, io::Read};
+    use std::collections::BTreeSet;
     use std::fs::File;
 
     const FONT_SPECIFIER_NAME_ID: u16 = 4;
@@ -631,6 +634,53 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     let is_bold = head_table.is_bold();
     let is_italic = head_table.is_italic();
+    let mut detected_monospace = None;
+
+    let post_data = provider.table_data(tag::POST).ok()??;
+    if let Ok(post_table) = ReadScope::new(&post_data).read::<PostTable>() {
+        // isFixedPitch here - https://learn.microsoft.com/en-us/typography/opentype/spec/post#header
+        detected_monospace = Some(post_table.header.is_fixed_pitch != 0);
+    }
+
+    if detected_monospace.is_none() {
+        // https://learn.microsoft.com/en-us/typography/opentype/spec/os2#panose
+        // Table 20 here - https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6OS2.html
+        let os2_data = provider.table_data(tag::OS_2).ok()??;
+        let os2_table = ReadScope::new(&os2_data)
+            .read_dep::<Os2>(os2_data.len())
+            .ok()?;
+        let monospace = os2_table.panose[0] == 2;
+        detected_monospace = Some(monospace);
+    }
+
+    if detected_monospace.is_none() {
+        let hhea_data = provider.table_data(tag::HHEA).ok()??;
+        let hhea_table = ReadScope::new(&hhea_data).read::<HheaTable>().ok()?;
+        let maxp_data = provider.table_data(tag::MAXP).ok()??;
+        let maxp_table = ReadScope::new(&maxp_data).read::<MaxpTable>().ok()?;
+        let hmtx_data = provider.table_data(tag::HMTX).ok()??;
+        let hmtx_table = ReadScope::new(&hmtx_data)
+            .read_dep::<HmtxTable<'_>>((
+                usize::from(maxp_table.num_glyphs),
+                usize::from(hhea_table.num_h_metrics),
+            ))
+            .ok()?;
+
+        let mut monospace = true;
+        let mut last_advance = 0;
+        for i in 0..hhea_table.num_h_metrics as usize {
+            let advance = hmtx_table.h_metrics.read_item(i).ok()?.advance_width;
+            if i > 0 && advance != last_advance {
+                monospace = false;
+                break;
+            }
+            last_advance = advance;
+        }
+
+        detected_monospace = Some(monospace);
+    }
+
+    let is_monospace = detected_monospace.unwrap_or(false);
 
     let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
     let name_table = ReadScope::new(&name_data).read::<NameTable>().ok()?;
@@ -663,6 +713,11 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
                                 PatternMatch::False
                             },
                             italic: if is_italic {
+                                PatternMatch::True
+                            } else {
+                                PatternMatch::False
+                            },
+                            monospace: if is_monospace {
                                 PatternMatch::True
                             } else {
                                 PatternMatch::False
