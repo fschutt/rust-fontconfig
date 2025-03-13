@@ -575,21 +575,6 @@ fn test_font_search() {
     assert!(latin_found, "Should find a Latin-capable font");
     assert!(cjk_found, "Should find a CJK-capable font");
 
-    // Test 3: Search for bold Arial font
-    let mut trace = Vec::new();
-    let arial_bold_query = FcPattern {
-        family: Some("Arial".to_string()),
-        bold: PatternMatch::True,
-        ..Default::default()
-    };
-
-    let result = cache.query(&arial_bold_query, &mut trace);
-    assert!(result.is_some(), "Should find Arial Bold font");
-    assert_eq!(
-        result.unwrap().id,
-        arial_bold_id,
-        "Should match Arial Bold font ID"
-    );
 }
 
 #[test]
@@ -620,4 +605,40 @@ fn test_failing_isolated() {
     let result = cache.query(&arial_query, &mut trace);
     assert!(result.is_some(), "Should find Arial font");
     assert_eq!(result.unwrap().id, arial_id, "Should match Arial font ID");
+}
+
+#[test]
+fn test_failing_isolated_2() {
+
+    // Create fixed font IDs for deterministic testing
+    let arial_id = FontId(1);
+    let arial_bold_id = FontId(2);
+    let courier_id = FontId(3);
+    let fira_id = FontId(4);
+    let noto_cjk_id = FontId(5);
+
+    // Create a set of fonts with various properties for testing search functionality
+    let fonts = getfonts(arial_id, arial_bold_id, courier_id, fira_id, noto_cjk_id);
+
+    // Create font cache with all our test fonts using deterministic IDs
+    let mut cache = FcFontCache::default();
+    for (id, pattern, font) in fonts {
+        cache.with_memory_font_with_id(id, pattern, font);
+    }
+
+    // Test 3: Search for bold Arial font
+    let mut trace = Vec::new();
+    let arial_bold_query = FcPattern {
+        family: Some("Arial".to_string()),
+        bold: PatternMatch::True,
+        ..Default::default()
+    };
+
+    let result = cache.query(&arial_bold_query, &mut trace);
+    assert!(result.is_some(), "Should find Arial Bold font");
+    assert_eq!(
+        result.unwrap().id,
+        arial_bold_id,
+        "Should match Arial Bold font ID"
+    );
 }

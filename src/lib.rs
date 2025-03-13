@@ -803,10 +803,8 @@ impl FcFontCache {
             }
         }
 
-        println!("initial matches: {:#?}", matches);
-
         // Sort by style score (lowest first), then by unicode coverage (highest first)
-        matches.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        matches.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(&a.1)));
 
         matches.first().map(|(id, _, _, metadata)| {
             // Find fallbacks for this font
@@ -834,7 +832,7 @@ impl FcFontCache {
         }
 
         // Sort by style score (lowest first), then by unicode coverage (highest first)
-        matches.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        matches.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(&a.1)));
 
         matches
             .into_iter()
@@ -892,7 +890,7 @@ impl FcFontCache {
         }
 
         // Sort by style score (lowest first), then by coverage (highest first)
-        candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        candidates.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(&a.1)));
 
         // Deduplicate by keeping only the best match per unique unicode range
         let mut seen_ranges = Vec::new();
