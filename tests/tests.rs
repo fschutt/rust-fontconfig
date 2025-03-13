@@ -574,7 +574,6 @@ fn test_font_search() {
 
     assert!(latin_found, "Should find a Latin-capable font");
     assert!(cjk_found, "Should find a CJK-capable font");
-
 }
 
 #[test]
@@ -609,7 +608,6 @@ fn test_failing_isolated() {
 
 #[test]
 fn test_failing_isolated_2() {
-
     // Create fixed font IDs for deterministic testing
     let arial_id = FontId(1);
     let arial_bold_id = FontId(2);
