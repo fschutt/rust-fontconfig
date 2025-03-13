@@ -21,14 +21,7 @@
 #![allow(non_snake_case)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(feature = "parsing")]
-extern crate allsorts;
-#[cfg(all(not(target_family = "wasm"), feature = "std"))]
-extern crate mmapio;
-extern crate xmlparser;
-
 extern crate alloc;
-extern crate core;
 
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
@@ -598,7 +591,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
-    use allsorts::{
+    use allsorts_subset_browser::{
         binary::read::ReadScope,
         font_data::FontData,
         get_name::fontcode_get_name,
