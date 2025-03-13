@@ -5,7 +5,7 @@ fn main() {
     let fonts = cache.query_all(&FcPattern {
         monospace: PatternMatch::True,
         ..Default::default()
-    });
+    }, &mut Vec::new());
 
     println!("total fonts: {}", fonts.len());
 

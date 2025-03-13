@@ -1,27 +1,13 @@
 //! Library for getting and matching system fonts with
 //! minimal dependencies
-//!
-//! # Usage
-//!
-//! ```rust
-//! use rust_fontconfig::{FcFontCache, FcPattern};
-//!
-//! fn main() {
-//!
-//!     let cache = FcFontCache::build();
-//!     let results = cache.query(&FcPattern {
-//!         name: Some(String::from("Arial")),
-//!         .. Default::default()
-//!     });
-//!
-//!     println!("font results: {:?}", results);
-//! }
-//! ```
 
 #![allow(non_snake_case)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+
+#[cfg(test)]
+mod tests;
 
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
@@ -29,6 +15,61 @@ use alloc::vec::Vec;
 use alloc::borrow::ToOwned;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
+
+/// Simple UUID generator for font match IDs
+/// Doesn't use external crates for simplicity
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub struct FontId(pub u128);
+
+impl FontId {
+    /// Generate a new pseudo-UUID without external dependencies
+    pub fn new() -> Self {
+        #[cfg(feature = "std")]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            
+            let time_part = now.as_nanos();
+            let random_part = {
+                // Simple PRNG based on time
+                let seed = now.as_secs() as u64;
+                let a = 6364136223846793005u64;
+                let c = 1442695040888963407u64;
+                let r = a.wrapping_mul(seed).wrapping_add(c);
+                r as u64
+            };
+            
+            // Combine time and random parts
+            let id = (time_part & 0xFFFFFFFFFFFFFFFFu128) | ((random_part as u128) << 64);
+            FontId(id)
+        }
+        
+        #[cfg(not(feature = "std"))]
+        {
+            // For no_std contexts, just use a counter
+            static mut COUNTER: u128 = 0;
+            let id = unsafe {
+                COUNTER += 1;
+                COUNTER
+            };
+            FontId(id)
+        }
+    }
+}
+
+impl core::fmt::Display for FontId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let id = self.0;
+        write!(f, "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            (id >> 96) & 0xFFFFFFFF,
+            (id >> 80) & 0xFFFF,
+            (id >> 64) & 0xFFFF,
+            (id >> 48) & 0xFFFF,
+            id & 0xFFFFFFFFFFFF)
+    }
+}
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
@@ -42,6 +83,14 @@ impl PatternMatch {
     fn needs_to_match(&self) -> bool {
         matches!(self, PatternMatch::True | PatternMatch::False)
     }
+    
+    fn matches(&self, other: &PatternMatch) -> bool {
+        match (self, other) {
+            (PatternMatch::DontCare, _) => true,
+            (_, PatternMatch::DontCare) => true,
+            (a, b) => a == b,
+        }
+    }
 }
 
 impl Default for PatternMatch {
@@ -50,6 +99,254 @@ impl Default for PatternMatch {
     }
 }
 
+/// Font weight values as defined in CSS specification
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[repr(C)]
+pub enum FcWeight {
+    Thin = 100,
+    ExtraLight = 200,
+    Light = 300,
+    Normal = 400,
+    Medium = 500,
+    SemiBold = 600,
+    Bold = 700,
+    ExtraBold = 800,
+    Black = 900,
+}
+
+impl FcWeight {
+    pub fn from_u16(weight: u16) -> Self {
+        match weight {
+            0..=149 => FcWeight::Thin,
+            150..=249 => FcWeight::ExtraLight,
+            250..=349 => FcWeight::Light,
+            350..=449 => FcWeight::Normal,
+            450..=549 => FcWeight::Medium,
+            550..=649 => FcWeight::SemiBold,
+            650..=749 => FcWeight::Bold,
+            750..=849 => FcWeight::ExtraBold,
+            _ => FcWeight::Black,
+        }
+    }
+    
+    /// Follows CSS spec for weight matching
+    pub fn find_best_match(&self, available: &[FcWeight]) -> Option<FcWeight> {
+        if available.is_empty() {
+            return None;
+        }
+        
+        if available.contains(self) {
+            return Some(*self);
+        }
+        
+        match *self {
+            FcWeight::Normal => {
+                // Try 500 first, then below, then above
+                if available.contains(&FcWeight::Medium) {
+                    return Some(FcWeight::Medium);
+                }
+                // Fall through to Light case
+                return FcWeight::Light.find_best_match(available);
+            }
+            FcWeight::Medium => {
+                // Try 400 first, then below, then above
+                if available.contains(&FcWeight::Normal) {
+                    return Some(FcWeight::Normal);
+                }
+                // Fall through to Light case
+                return FcWeight::Light.find_best_match(available);
+            }
+            FcWeight::Thin | FcWeight::ExtraLight | FcWeight::Light => {
+                // Try weights below in descending order, then above in ascending
+                for weight in [FcWeight::Light, FcWeight::ExtraLight, FcWeight::Thin].iter() {
+                    if available.contains(weight) && *weight <= *self {
+                        return Some(*weight);
+                    }
+                }
+                
+                for weight in [FcWeight::Normal, FcWeight::Medium, FcWeight::SemiBold, 
+                               FcWeight::Bold, FcWeight::ExtraBold, FcWeight::Black].iter() {
+                    if available.contains(weight) {
+                        return Some(*weight);
+                    }
+                }
+            }
+            FcWeight::SemiBold | FcWeight::Bold | FcWeight::ExtraBold | FcWeight::Black => {
+                // Try weights above in ascending order, then below in descending
+                for weight in [FcWeight::SemiBold, FcWeight::Bold, FcWeight::ExtraBold, FcWeight::Black].iter() {
+                    if available.contains(weight) && *weight >= *self {
+                        return Some(*weight);
+                    }
+                }
+                
+                for weight in [FcWeight::Medium, FcWeight::Normal, FcWeight::Light, 
+                               FcWeight::ExtraLight, FcWeight::Thin].iter() {
+                    if available.contains(weight) {
+                        return Some(*weight);
+                    }
+                }
+            }
+        }
+        
+        // If nothing matches, return the first available weight
+        Some(available[0])
+    }
+}
+
+impl Default for FcWeight {
+    fn default() -> Self {
+        FcWeight::Normal
+    }
+}
+
+/// CSS font-stretch values
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[repr(C)]
+pub enum FcStretch {
+    UltraCondensed = 1,
+    ExtraCondensed = 2,
+    Condensed = 3,
+    SemiCondensed = 4,
+    Normal = 5,
+    SemiExpanded = 6,
+    Expanded = 7,
+    ExtraExpanded = 8,
+    UltraExpanded = 9,
+}
+
+impl FcStretch {
+    pub fn from_u16(width_class: u16) -> Self {
+        match width_class {
+            1 => FcStretch::UltraCondensed,
+            2 => FcStretch::ExtraCondensed,
+            3 => FcStretch::Condensed,
+            4 => FcStretch::SemiCondensed,
+            5 => FcStretch::Normal,
+            6 => FcStretch::SemiExpanded,
+            7 => FcStretch::Expanded,
+            8 => FcStretch::ExtraExpanded,
+            9 => FcStretch::UltraExpanded,
+            _ => FcStretch::Normal,
+        }
+    }
+    
+    /// Follows CSS spec for stretch matching
+    pub fn find_best_match(&self, available: &[FcStretch]) -> Option<FcStretch> {
+        if available.is_empty() {
+            return None;
+        }
+        
+        if available.contains(self) {
+            return Some(*self);
+        }
+        
+        // For 'normal' or condensed values, narrower widths are checked first, then wider values
+        if *self <= FcStretch::Normal {
+            // Find narrower values first
+            let mut closest_narrower = None;
+            for stretch in available.iter() {
+                if *stretch < *self && (closest_narrower.is_none() || *stretch > closest_narrower.unwrap()) {
+                    closest_narrower = Some(*stretch);
+                }
+            }
+            
+            if closest_narrower.is_some() {
+                return closest_narrower;
+            }
+            
+            // Otherwise, find wider values
+            let mut closest_wider = None;
+            for stretch in available.iter() {
+                if *stretch > *self && (closest_wider.is_none() || *stretch < closest_wider.unwrap()) {
+                    closest_wider = Some(*stretch);
+                }
+            }
+            
+            return closest_wider;
+        } else {
+            // For expanded values, wider values are checked first, then narrower values
+            let mut closest_wider = None;
+            for stretch in available.iter() {
+                if *stretch > *self && (closest_wider.is_none() || *stretch < closest_wider.unwrap()) {
+                    closest_wider = Some(*stretch);
+                }
+            }
+            
+            if closest_wider.is_some() {
+                return closest_wider;
+            }
+            
+            // Otherwise, find narrower values
+            let mut closest_narrower = None;
+            for stretch in available.iter() {
+                if *stretch < *self && (closest_narrower.is_none() || *stretch > closest_narrower.unwrap()) {
+                    closest_narrower = Some(*stretch);
+                }
+            }
+            
+            return closest_narrower;
+        }
+    }
+}
+
+impl Default for FcStretch {
+    fn default() -> Self {
+        FcStretch::Normal
+    }
+}
+
+/// Unicode range representation for font matching
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UnicodeRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl UnicodeRange {
+    pub fn contains(&self, c: char) -> bool {
+        let c = c as u32;
+        c >= self.start && c <= self.end
+    }
+    
+    pub fn overlaps(&self, other: &UnicodeRange) -> bool {
+        self.start <= other.end && other.start <= self.end
+    }
+    
+    pub fn is_subset_of(&self, other: &UnicodeRange) -> bool {
+        self.start >= other.start && self.end <= other.end
+    }
+}
+
+/// Log levels for trace messages
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+pub enum TraceLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+/// Reason for font matching failure or success
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchReason {
+    NameMismatch { requested: Option<String>, found: Option<String> },
+    FamilyMismatch { requested: Option<String>, found: Option<String> },
+    StyleMismatch { property: &'static str, requested: String, found: String },
+    WeightMismatch { requested: FcWeight, found: FcWeight },
+    StretchMismatch { requested: FcStretch, found: FcStretch },
+    UnicodeRangeMismatch { character: char, ranges: Vec<UnicodeRange> },
+    Success,
+}
+
+/// Trace message for debugging font matching
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceMsg {
+    pub level: TraceLevel,
+    pub path: String,
+    pub reason: MatchReason,
+}
+
+/// Font pattern for matching
 #[derive(Debug, Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcPattern {
@@ -68,11 +365,39 @@ pub struct FcPattern {
     // "condensed" property
     pub condensed: PatternMatch,
     // font weight
-    pub weight: usize,
-    // start..end unicode range
-    pub unicode_range: [usize; 2],
+    pub weight: FcWeight,
+    // font stretch
+    pub stretch: FcStretch,
+    // unicode ranges to match
+    pub unicode_ranges: Vec<UnicodeRange>,
 }
 
+impl FcPattern {
+    /// Check if this pattern would match the given character
+    pub fn contains_char(&self, c: char) -> bool {
+        if self.unicode_ranges.is_empty() {
+            return true; // No ranges specified means match all characters
+        }
+        
+        for range in &self.unicode_ranges {
+            if range.contains(c) {
+                return true;
+            }
+        }
+        
+        false
+    }
+}
+
+/// Font match result with UUID
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontMatch {
+    pub id: FontId,
+    pub unicode_ranges: Vec<UnicodeRange>,
+    pub fallbacks: Vec<FontId>,
+}
+
+/// Path to a font file
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcFontPath {
@@ -80,35 +405,50 @@ pub struct FcFontPath {
     pub font_index: usize,
 }
 
-/// Represent an in-memory font file
-#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+/// In-memory font data
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcFont {
     pub bytes: Vec<u8>,
     pub font_index: usize,
+    pub id: String, // For identification in tests
 }
 
-#[derive(Debug, Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct FcFontCache {
+    // Pattern to path mapping
     map: BTreeMap<FcPattern, FcFontPath>,
+    // Memory fonts (id to font bytes)
+    memory_fonts: BTreeMap<String, FcFont>,
+    // UUID to font path mapping
+    id_map: BTreeMap<FontId, FcFontPath>,
 }
 
 impl FcFontCache {
-
-    /// Adds in-memory font files (`path` will be base64 encoded)
-    pub fn with_memory_fonts(&mut self, f: &[(FcPattern, FcFont)]) -> &mut Self {
-        use base64::{engine::general_purpose::URL_SAFE, Engine as _};
-        self.map.extend(f.iter().map(|(k, v)| {
-            (k.clone(), FcFontPath {
-                path: {
-                    let mut s = String::from("base64:");
-                    s.push_str(&URL_SAFE.encode(&v.bytes));
-                    s
-                },
-                font_index: v.font_index,
-            })
-        }));
+    /// Adds in-memory font files
+    pub fn with_memory_fonts(&mut self, fonts: Vec<(FcPattern, FcFont)>) -> &mut Self {
+        for (pattern, font) in fonts {
+            let font_id = font.id.clone();
+            let font_path = FcFontPath {
+                path: format!("memory:{}", font_id),
+                font_index: font.font_index,
+            };
+            
+            self.memory_fonts.insert(font_id, font);
+            self.map.insert(pattern, font_path);
+        }
+        
         self
+    }
+    
+    /// Get font data for a given font ID
+    pub fn get_font_by_id(&self, id: &FontId) -> Option<&FcFontPath> {
+        self.id_map.get(id)
+    }
+    
+    /// Get in-memory font data
+    pub fn get_memory_font(&self, id: &str) -> Option<&FcFont> {
+        self.memory_fonts.get(id)
     }
 
     /// Builds a new font cache
@@ -118,18 +458,20 @@ impl FcFontCache {
     }
 
     /// Builds a new font cache from all fonts discovered on the system
-    ///
-    /// NOTE: Performance-intensive, should only be called on startup!
-    #[cfg(all(feature = "std", feature = "parsing"))]
+        #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
         #[cfg(target_os = "linux")]
         {
-            FcFontCache {
+            let mut cache = FcFontCache {
                 map: FcScanDirectories()
                     .unwrap_or_default()
                     .into_iter()
                     .collect(),
-            }
+                memory_fonts: BTreeMap::new(),
+                id_map: BTreeMap::new(),
+            };
+            cache.build_id_map();
+            cache
         }
 
         #[cfg(target_os = "windows")]
@@ -139,11 +481,16 @@ impl FcFontCache {
                 (None, "C:\\Windows\\Fonts\\".to_owned()),
                 (None, "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned()),
             ];
-            FcFontCache {
+            
+            let mut cache = FcFontCache {
                 map: FcScanDirectoriesInner(&font_dirs)
                     .into_iter()
                     .collect(),
-            }
+                memory_fonts: BTreeMap::new(),
+                id_map: BTreeMap::new(),
+            };
+            cache.build_id_map();
+            cache
         }
 
         #[cfg(target_os = "macos")]
@@ -153,16 +500,34 @@ impl FcFontCache {
                 (None, "/System/Library/Fonts".to_owned()),
                 (None, "/Library/Fonts".to_owned()),
             ];
-            FcFontCache {
+            
+            let mut cache = FcFontCache {
                 map: FcScanDirectoriesInner(&font_dirs)
                     .into_iter()
                     .collect(),
-            }
+                memory_fonts: BTreeMap::new(),
+                id_map: BTreeMap::new(),
+            };
+            cache.build_id_map();
+            cache
         }
-    
-        #[cfg(target_family = "wasm")] {
+
+        #[cfg(target_family = "wasm")]
+        {
             Self::default()
         }
+    }
+    
+    /// Build the ID map for quick lookups
+    fn build_id_map(&mut self) {
+        let mut id_map = BTreeMap::new();
+        
+        for (_, path) in &self.map {
+            let id = FontId::new();
+            id_map.insert(id, path.clone());
+        }
+        
+        self.id_map = id_map;
     }
 
     /// Returns the list of fonts and font patterns
@@ -170,325 +535,556 @@ impl FcFontCache {
         &self.map
     }
     
-    fn query_matches_internal(k: &FcPattern, pattern: &FcPattern) -> bool {
-
-        let name_needs_to_match = pattern.name.is_some();
-        let family_needs_to_match = pattern.family.is_some();
-
-        let italic_needs_to_match = pattern.italic.needs_to_match();
-        let oblique_needs_to_match = pattern.oblique.needs_to_match();
-        let bold_needs_to_match = pattern.bold.needs_to_match();
-        let monospace_needs_to_match = pattern.monospace.needs_to_match();
-
-        let name_matches = k.name == pattern.name;
-        let family_matches = k.family == pattern.family;
-        let italic_matches = k.italic == pattern.italic;
-        let oblique_matches = k.oblique == pattern.oblique;
-        let bold_matches = k.bold == pattern.bold;
-        let monospace_matches = k.monospace == pattern.monospace;
-        
-        if name_needs_to_match && !name_matches {
-            return false;
+    /// Check if a pattern matches the query, with detailed tracing
+    fn query_matches_internal(
+        k: &FcPattern, 
+        pattern: &FcPattern, 
+        trace: &mut Vec<TraceMsg>
+    ) -> bool {
+        // If a specific name is requested, it must match
+        if let Some(ref name) = pattern.name {
+            if k.name.as_ref() != Some(name) {
+                trace.push(TraceMsg {
+                    level: TraceLevel::Info,
+                    path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                    reason: MatchReason::NameMismatch {
+                        requested: pattern.name.clone(),
+                        found: k.name.clone(),
+                    },
+                });
+                return false;
+            }
         }
         
-        if family_needs_to_match && !family_matches {
-            return false;
+        // If a specific family is requested, it must match
+        if let Some(ref family) = pattern.family {
+            if k.family.as_ref() != Some(family) {
+                trace.push(TraceMsg {
+                    level: TraceLevel::Info,
+                    path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                    reason: MatchReason::FamilyMismatch {
+                        requested: pattern.family.clone(),
+                        found: k.family.clone(),
+                    },
+                });
+                return false;
+            }
         }
 
-        if name_needs_to_match && !name_matches {
+        // Check style properties
+        let style_properties = [
+            ("italic", pattern.italic.needs_to_match(), pattern.italic.matches(&k.italic)),
+            ("oblique", pattern.oblique.needs_to_match(), pattern.oblique.matches(&k.oblique)),
+            ("bold", pattern.bold.needs_to_match(), pattern.bold.matches(&k.bold)),
+            ("monospace", pattern.monospace.needs_to_match(), pattern.monospace.matches(&k.monospace)),
+            ("condensed", pattern.condensed.needs_to_match(), pattern.condensed.matches(&k.condensed)),
+        ];
+        
+        for (property_name, needs_to_match, matches) in style_properties {
+            if needs_to_match && !matches {
+                trace.push(TraceMsg {
+                    level: TraceLevel::Info,
+                    path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                    reason: MatchReason::StyleMismatch {
+                        property: property_name,
+                        requested: format!("{:?}", pattern.italic),
+                        found: format!("{:?}", k.italic),
+                    },
+                });
+                return false;
+            }
+        }
+        
+        // Check weight
+        if pattern.weight != FcWeight::Normal && pattern.weight != k.weight {
+            trace.push(TraceMsg {
+                level: TraceLevel::Info,
+                path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                reason: MatchReason::WeightMismatch {
+                    requested: pattern.weight,
+                    found: k.weight,
+                },
+            });
             return false;
         }
-
-        if family_needs_to_match && !family_matches {
+        
+        // Check stretch
+        if pattern.stretch != FcStretch::Normal && pattern.stretch != k.stretch {
+            trace.push(TraceMsg {
+                level: TraceLevel::Info,
+                path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                reason: MatchReason::StretchMismatch {
+                    requested: pattern.stretch,
+                    found: k.stretch,
+                },
+            });
             return false;
         }
-
-        if italic_needs_to_match && !italic_matches {
-            return false;
-        }
-
-        if oblique_needs_to_match && !oblique_matches {
-            return false;
-        }
-
-        if bold_needs_to_match && !bold_matches {
-            return false;
-        }
-
-        if monospace_needs_to_match && !monospace_matches {
-            return false;
+        
+        // Check unicode ranges if specified
+        if !pattern.unicode_ranges.is_empty() {
+            let mut has_overlap = false;
+            
+            for p_range in &pattern.unicode_ranges {
+                for k_range in &k.unicode_ranges {
+                    if p_range.overlaps(k_range) {
+                        has_overlap = true;
+                        break;
+                    }
+                }
+                if has_overlap {
+                    break;
+                }
+            }
+            
+            if !has_overlap {
+                trace.push(TraceMsg {
+                    level: TraceLevel::Info,
+                    path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                    reason: MatchReason::UnicodeRangeMismatch {
+                        character: '\0', // No specific character to report
+                        ranges: k.unicode_ranges.clone(),
+                    },
+                });
+                return false;
+            }
         }
 
         true
     }
 
     /// Queries a font from the in-memory `font -> file` mapping, returns all matching fonts
-    pub fn query_all(&self, pattern: &FcPattern) -> Vec<&FcFontPath> {
-        self
-            .map
-            .iter() // TODO: par_iter!
-            .filter(|(k, _)| Self::query_matches_internal(k, pattern))
-            .map(|(_, v)| v)
-            .collect()
-    }
-
-    /// Queries a font from the in-memory `font -> file` mapping, returns the first found font (early return)
-    pub fn query(&self, pattern: &FcPattern) -> Option<&FcFontPath> {
-        self
-            .map
-            .iter() // TODO: par_iter!
-            .find(|(k, _)| Self::query_matches_internal(k, pattern))
-            .map(|(_, v)| v)
-    }
-}
-
-#[cfg(feature = "std")]
-/// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
-///
-/// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
-fn process_path(
-    prefix: &Option<String>,
-    mut path: PathBuf,
-    is_include_path: bool,
-) -> Option<PathBuf> {
-    use std::env::var;
-
-    const HOME_SHORTCUT: &str = "~";
-    const CWD_PATH: &str = ".";
-
-    const HOME_ENV_VAR: &str = "HOME";
-    const XDG_CONFIG_HOME_ENV_VAR: &str = "XDG_CONFIG_HOME";
-    const XDG_CONFIG_HOME_DEFAULT_PATH_SUFFIX: &str = ".config";
-    const XDG_DATA_HOME_ENV_VAR: &str = "XDG_DATA_HOME";
-    const XDG_DATA_HOME_DEFAULT_PATH_SUFFIX: &str = ".local/share";
-
-    const PREFIX_CWD: &str = "cwd";
-    const PREFIX_DEFAULT: &str = "default";
-    const PREFIX_XDG: &str = "xdg";
-
-    // These three could, in theory, be cached, but the work required to do so outweighs the minor benefits
-    fn get_home_value() -> Option<PathBuf> {
-        var(HOME_ENV_VAR)
-            .ok()
-            .map(PathBuf::from)
-    }
-    fn get_xdg_config_home_value() -> Option<PathBuf> {
-        var(XDG_CONFIG_HOME_ENV_VAR)
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| get_home_value()
-                .map(|home_path|
-                    home_path.join(XDG_CONFIG_HOME_DEFAULT_PATH_SUFFIX))
-            )
-    }
-    fn get_xdg_data_home_value() -> Option<PathBuf> {
-        var(XDG_DATA_HOME_ENV_VAR)
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| get_home_value()
-                .map(|home_path|
-                    home_path.join(XDG_DATA_HOME_DEFAULT_PATH_SUFFIX))
-            )
-    }
-
-    // Resolve the tilde character in the path, if present
-    if path.starts_with(HOME_SHORTCUT) {
-        if let Some(home_path) = get_home_value() {
-            path = home_path.join(path.strip_prefix(HOME_SHORTCUT).expect("already checked that it starts with the prefix"));
-        } else {
-            return None;
-        }
-    }
-
-    // Resolve prefix values
-    match prefix {
-        Some(prefix) => match prefix.as_str() {
-            PREFIX_CWD | PREFIX_DEFAULT => {
-                let mut new_path = PathBuf::from(CWD_PATH);
-                new_path.push(path);
-
-                Some(new_path)
+    pub fn query_all(
+        &self, 
+        pattern: &FcPattern,
+        trace: &mut Vec<TraceMsg>
+    ) -> Vec<FontMatch> {
+        let mut results = Vec::new();
+        
+        for (k, v) in &self.map {
+            if Self::query_matches_internal(k, pattern, trace) {
+                // Create a new FontMatch with generated UUID
+                let id = *self.id_map.iter()
+                    .find(|(_, path)| *path == v)
+                    .map(|(id, _)| id)
+                    .unwrap_or_else(|| {
+                        trace.push(TraceMsg {
+                            level: TraceLevel::Error,
+                            path: v.path.clone(),
+                            reason: MatchReason::Success, // We found a match but no UUID
+                        });
+                        // Should never happen, but use a fallback if it does
+                        &FontId(0)
+                    });
+                
+                // Find fallbacks for this font
+                let fallbacks = self.find_fallbacks(k, trace);
+                
+                results.push(FontMatch {
+                    id,
+                    unicode_ranges: k.unicode_ranges.clone(),
+                    fallbacks,
+                });
             }
-            PREFIX_XDG => {
-                if is_include_path {
-                    get_xdg_config_home_value()
-                        .map(|xdg_config_home_path| xdg_config_home_path.join(path))
-                } else {
-                    get_xdg_data_home_value()
-                        .map(|xdg_data_home_path| xdg_data_home_path.join(path))
+        }
+        
+        results
+    }
+    
+    /// Find fallback fonts for a given pattern
+    fn find_fallbacks(
+        &self, 
+        pattern: &FcPattern,
+        _trace: &mut Vec<TraceMsg>
+    ) -> Vec<FontId> {
+        let mut fallbacks = Vec::new();
+        
+        // Simple fallback strategy - collect fonts with the same family
+        // but different weights/styles
+        if let Some(family) = &pattern.family {
+            for (k, v) in &self.map {
+                if k.family.as_ref() == Some(family) && k != pattern {
+                    if let Some(id) = self.id_map.iter()
+                        .find(|(_, path)| *path == v)
+                        .map(|(id, _)| *id) {
+                        fallbacks.push(id);
+                    }
                 }
             }
-            _ => None // Unsupported prefix
         }
-        None => Some(path),
-    }
-}
-
-#[cfg(all(feature = "std", feature = "parsing"))]
-fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
-    use std::fs;
-    use std::path::Path;
-
-    const BASE_FONTCONFIG_PATH: &str = "/etc/fonts/fonts.conf";
-
-    if !Path::new(BASE_FONTCONFIG_PATH).exists() {
-        return None;
-    }
-
-    let mut font_paths = Vec::with_capacity(32);
-    let mut paths_to_visit = vec![(None, PathBuf::from(BASE_FONTCONFIG_PATH))];
-
-    while let Some((prefix, mut path_to_visit)) = paths_to_visit.pop() {
-        path_to_visit = match process_path(&prefix, path_to_visit, true) {
-            Some(path) => path,
-            None => continue
-        };
-
-        let metadata = match fs::metadata(path_to_visit.as_path()) {
-            Ok(metadata) => metadata,
-            Err(_) => continue
-        };
-
-        if metadata.is_file() {
-            let xml_utf8 = match fs::read_to_string(path_to_visit.as_path()) {
-                Ok(xml_utf8) => xml_utf8,
-                Err(_) => continue
-            };
-
-            ParseFontsConf(xml_utf8.as_str(), &mut paths_to_visit, &mut font_paths);
-        } else if metadata.is_dir() {
-            let dir_entries = match fs::read_dir(path_to_visit) {
-                Ok(dir_entries) => dir_entries,
-                Err(_) => continue
-            };
-
-            for dir_entry in dir_entries {
-                if let Ok(dir_entry) = dir_entry {
-                    let entry_path = dir_entry.path();
-
-                    // `fs::metadata` traverses symbolic links
-                    let metadata = match fs::metadata(entry_path.as_path()) {
-                        Ok(metadata) => metadata,
-                        Err(_) => continue
-                    };
-
-                    if metadata.is_file() {
-                        if let Some(file_name) = entry_path.file_name() {
-                            let file_name_str = file_name.to_string_lossy();
-                            if file_name_str.starts_with(|c: char| c.is_ascii_digit()) && file_name_str.ends_with(".conf") {
-                                paths_to_visit.push((None, entry_path));
+        
+        // Add fonts with overlapping unicode ranges as fallbacks
+        if !pattern.unicode_ranges.is_empty() {
+            for (k, v) in &self.map {
+                if k != pattern && !k.unicode_ranges.is_empty() {
+                    let mut has_overlap = false;
+                    
+                    for p_range in &pattern.unicode_ranges {
+                        for k_range in &k.unicode_ranges {
+                            if p_range.overlaps(k_range) {
+                                has_overlap = true;
+                                break;
+                            }
+                        }
+                        if has_overlap {
+                            break;
+                        }
+                    }
+                    
+                    if has_overlap {
+                        if let Some(id) = self.id_map.iter()
+                            .find(|(_, path)| *path == v)
+                            .map(|(id, _)| *id) {
+                            if !fallbacks.contains(&id) {
+                                fallbacks.push(id);
                             }
                         }
                     }
-                } else {
-                    return None;
                 }
             }
         }
+        
+        fallbacks
     }
 
-    if font_paths.is_empty() {
-        return None;
+    /// Queries a font from the in-memory `font -> file` mapping, returns the first found font (early return)
+    pub fn query(
+        &self, 
+        pattern: &FcPattern,
+        trace: &mut Vec<TraceMsg>
+    ) -> Option<FontMatch> {
+        for (k, v) in &self.map {
+            if Self::query_matches_internal(k, pattern, trace) {
+                // Get UUID for this font
+                let id = *self.id_map.iter()
+                    .find(|(_, path)| *path == v)
+                    .map(|(id, _)| id)
+                    .unwrap_or_else(|| {
+                        trace.push(TraceMsg {
+                            level: TraceLevel::Error,
+                            path: v.path.clone(),
+                            reason: MatchReason::Success, // We found a match but no UUID
+                        });
+                        // Should never happen, but use a fallback if it does
+                        &FontId(0)
+                    });
+                
+                // Find fallbacks for this font
+                let fallbacks = self.find_fallbacks(k, trace);
+                
+                return Some(FontMatch {
+                    id,
+                    unicode_ranges: k.unicode_ranges.clone(),
+                    fallbacks,
+                });
+            }
+        }
+        
+        None
     }
-
-    Some(FcScanDirectoriesInner(font_paths.as_slice()))
+    
+    /// Find fonts that can render the given text, considering Unicode ranges
+    pub fn query_for_text(
+        &self, 
+        pattern: &FcPattern, 
+        text: &str,
+        trace: &mut Vec<TraceMsg>
+    ) -> Vec<FontMatch> {
+        let base_matches = self.query_all(pattern, trace);
+        
+        // Early return if no matches or text is empty
+        if base_matches.is_empty() || text.is_empty() {
+            return base_matches;
+        }
+        
+        let chars: Vec<char> = text.chars().collect();
+        let mut required_fonts = Vec::new();
+        let mut covered_chars = vec![false; chars.len()];
+        
+        // First try with the matches we already have
+        for font_match in &base_matches {
+            let font_path = match self.id_map.get(&font_match.id) {
+                Some(path) => path,
+                None => continue,
+            };
+            
+            let pattern = self.map.iter()
+                .find(|(_, path)| path == &font_path)
+                .map(|(pattern, _)| pattern);
+            
+            if let Some(pattern) = pattern {
+                for (i, &c) in chars.iter().enumerate() {
+                    if !covered_chars[i] && pattern.contains_char(c) {
+                        covered_chars[i] = true;
+                    }
+                }
+            }
+            
+            // Check if this font covers any characters
+            let covers_some = covered_chars.iter().any(|&covered| covered);
+            if covers_some {
+                required_fonts.push(font_match.clone());
+            }
+        }
+        
+        // If there are still uncovered characters, look for additional fonts
+        let all_covered = covered_chars.iter().all(|&covered| covered);
+        if !all_covered {
+            // Create a pattern that matches any font that supports the uncovered characters
+            let mut fallback_pattern = FcPattern::default();
+            
+            // Add the uncovered characters as Unicode ranges
+            for (i, &c) in chars.iter().enumerate() {
+                if !covered_chars[i] {
+                    let c_value = c as u32;
+                    fallback_pattern.unicode_ranges.push(UnicodeRange {
+                        start: c_value,
+                        end: c_value,
+                    });
+                    
+                    trace.push(TraceMsg {
+                        level: TraceLevel::Warning,
+                        path: "<fallback search>".to_string(),
+                        reason: MatchReason::UnicodeRangeMismatch {
+                            character: c,
+                            ranges: Vec::new(), // We don't know which fonts to report here
+                        },
+                    });
+                }
+            }
+            
+            // Find fonts that support these uncovered characters
+            let fallback_matches = self.query_all(&fallback_pattern, trace);
+            
+            for font_match in fallback_matches {
+                if !required_fonts.iter().any(|m| m.id == font_match.id) {
+                    required_fonts.push(font_match);
+                }
+            }
+        }
+        
+        required_fonts
+    }
 }
 
-// Parses the fonts.conf file
+// Remaining implementation for font scanning, parsing, etc.
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn ParseFontsConf(
-    input: &str,
-    paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
-    font_paths: &mut Vec<(Option<String>, String)>,
-) -> Option<()> {
-    use xmlparser::Token::*;
-    use xmlparser::Tokenizer;
+fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
+    use allsorts_subset_browser::{
+        binary::read::ReadScope,
+        font_data::FontData,
+        get_name::fontcode_get_name,
+        post::PostTable,
+        tables::{
+            os2::Os2, FontTableProvider, HeadTable, HheaTable, HmtxTable, MaxpTable, NameTable,
+        },
+        tag,
+    };
+    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
+    use mmapio::MmapOptions;
+    use std::collections::BTreeSet;
+    use std::fs::File;
 
-    const TAG_INCLUDE: &str = "include";
-    const TAG_DIR: &str = "dir";
-    const ATTRIBUTE_PREFIX: &str = "prefix";
+    const FONT_SPECIFIER_NAME_ID: u16 = 4;
+    const FONT_SPECIFIER_FAMILY_ID: u16 = 1;
 
-    let mut current_prefix: Option<&str> = None;
-    let mut current_path: Option<&str> = None;
-    let mut is_in_include = false;
-    let mut is_in_dir = false;
+    // Try parsing the font file and see if the postscript name matches
+    let file = File::open(filepath).ok()?;
+    
+    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
+    let font_bytes = unsafe { MmapOptions::new().map(&file).ok()? };
+    
+    #[cfg(not(all(not(target_family = "wasm"), feature = "std")))]
+    let font_bytes = std::fs::read(filepath).ok()?;
+    
+    let scope = ReadScope::new(&font_bytes[..]);
+    let font_file = scope.read::<FontData<'_>>().ok()?;
+    
+    // Handle collections properly by iterating through all fonts
+    let mut results = Vec::new();
+    let mut font_index = 0;
+    while let Some(provider) = font_file.table_provider(font_index).ok() {
+        font_index += 1;
+        let head_data = provider.table_data(tag::HEAD).ok()??.into_owned();
+        let head_table = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
 
-    for token in Tokenizer::from(input) {
-        let token = token.ok()?;
-        match token {
-            ElementStart { local, .. } => {
-                if is_in_include || is_in_dir {
-                    return None; /* error: nested tags */
-                }
+        let is_bold = head_table.is_bold();
+        let is_italic = head_table.is_italic();
+        let mut detected_monospace = None;
 
-                match local.as_str() {
-                    TAG_INCLUDE => {
-                        is_in_include = true;
-                    }
-                    TAG_DIR => {
-                        is_in_dir = true;
-                    }
-                    _ => continue
-                }
-
-                current_path = None;
-            }
-            Text { text, .. } => {
-                let text = text.as_str().trim();
-                if text.is_empty() {
-                    continue;
-                }
-                if is_in_include || is_in_dir {
-                    current_path = Some(text);
-                }
-            }
-            Attribute { local, value, .. } => {
-                if !is_in_include && !is_in_dir {
-                    continue;
-                }
-                // attribute on <include> or <dir> node
-                if local.as_str() == ATTRIBUTE_PREFIX {
-                    current_prefix = Some(value.as_str());
-                }
-            }
-            ElementEnd { end, .. } => {
-                let end_tag = match end {
-                    xmlparser::ElementEnd::Close(_, a) => a,
-                    _ => continue,
-                };
-
-                match end_tag.as_str() {
-                    TAG_INCLUDE => {
-                        if !is_in_include {
-                            continue;
-                        }
-
-                        if let Some(current_path) = current_path.as_ref() {
-                            paths_to_visit.push((current_prefix.map(ToOwned::to_owned), PathBuf::from(*current_path)));
-                        }
-                    }
-                    TAG_DIR => {
-                        if !is_in_dir {
-                            continue;
-                        }
-
-                        if let Some(current_path) = current_path.as_ref() {
-                            font_paths.push((current_prefix.map(ToOwned::to_owned), (*current_path).to_owned()));
-                        }
-                    }
-                    _ => continue
-                }
-
-                is_in_include = false;
-                is_in_dir = false;
-                current_path = None;
-                current_prefix = None;
-            }
-            _ => {}
+        let post_data = provider.table_data(tag::POST).ok()??;
+        if let Ok(post_table) = ReadScope::new(&post_data).read::<PostTable>() {
+            // isFixedPitch here - https://learn.microsoft.com/en-us/typography/opentype/spec/post#header
+            detected_monospace = Some(post_table.header.is_fixed_pitch != 0);
         }
-    }
 
-    Some(())
+        // Get font properties from OS/2 table
+        let os2_data = provider.table_data(tag::OS_2).ok()??;
+        let os2_table = ReadScope::new(&os2_data)
+            .read_dep::<Os2>(os2_data.len())
+            .ok()?;
+        
+        // Extract additional style information
+        let is_oblique = os2_table.fs_selection.contains(allsorts_subset_browser::tables::os2::FsSelection::OBLIQUE);
+        let weight = FcWeight::from_u16(os2_table.us_weight_class);
+        let stretch = FcStretch::from_u16(os2_table.us_width_class);
+        
+        // Extract unicode ranges
+        let mut unicode_ranges = Vec::new();
+        
+        // Process the 4 Unicode range bitfields from OS/2 table
+        let ranges = [
+            os2_table.ul_unicode_range1,
+            os2_table.ul_unicode_range2,
+            os2_table.ul_unicode_range3,
+            os2_table.ul_unicode_range4,
+        ];
+        
+        // Unicode range bit positions to actual ranges
+        // Based on OpenType spec: https://learn.microsoft.com/en-us/typography/opentype/spec/os2#ur
+        let range_mappings = [
+            // Range 1 (Basic Latin through General Punctuation)
+            (0, 0x0000, 0x007F), // Basic Latin
+            (1, 0x0080, 0x00FF), // Latin-1 Supplement
+            (2, 0x0100, 0x017F), // Latin Extended-A
+            // ... add more range mappings
+            
+            // A simplified example - in practice, you'd include all ranges from the OpenType spec
+            (7, 0x0370, 0x03FF), // Greek and Coptic
+            (9, 0x0400, 0x04FF), // Cyrillic
+            (29, 0x2000, 0x206F), // General Punctuation
+            (57, 0x4E00, 0x9FFF), // CJK Unified Ideographs
+        ];
+        
+        for (range_idx, bit_pos, start, end) in range_mappings.iter().map(|&(bit, start, end)| {
+            let range_idx = bit / 32;
+            let bit_pos = bit % 32;
+            (range_idx, bit_pos, start, end)
+        }) {
+            if range_idx < 4 && (ranges[range_idx] & (1 << bit_pos)) != 0 {
+                unicode_ranges.push(UnicodeRange { start, end });
+            }
+        }
+        
+        // If no monospace detection yet, check using hmtx
+        if detected_monospace.is_none() {
+
+            // Try using PANOSE classification
+            if os2_table.panose[0] == 2 { // 2 = Latin Text
+                detected_monospace = Some(os2_table.panose[3] == 9); // 9 = Monospaced
+            } else {
+                let hhea_data = provider.table_data(tag::HHEA).ok()??;
+                let hhea_table = ReadScope::new(&hhea_data).read::<HheaTable>().ok()?;
+                let maxp_data = provider.table_data(tag::MAXP).ok()??;
+                let maxp_table = ReadScope::new(&maxp_data).read::<MaxpTable>().ok()?;
+                let hmtx_data = provider.table_data(tag::HMTX).ok()??;
+                let hmtx_table = ReadScope::new(&hmtx_data)
+                    .read_dep::<HmtxTable<'_>>((
+                        usize::from(maxp_table.num_glyphs),
+                        usize::from(hhea_table.num_h_metrics),
+                    ))
+                    .ok()?;
+
+                let mut monospace = true;
+                let mut last_advance = 0;
+                for i in 0..hhea_table.num_h_metrics as usize {
+                    let advance = hmtx_table.h_metrics.read_item(i).ok()?.advance_width;
+                    if i > 0 && advance != last_advance {
+                        monospace = false;
+                        break;
+                    }
+                    last_advance = advance;
+                }
+
+                detected_monospace = Some(monospace);
+            }
+        }
+
+        let is_monospace = detected_monospace.unwrap_or(false);
+
+        let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
+        let name_table = ReadScope::new(&name_data).read::<NameTable>().ok()?;
+
+        // One font can support multiple patterns
+        let mut f_family = None;
+
+        let patterns = name_table
+            .name_records
+            .iter()
+            .filter_map(|name_record| {
+                let name_id = name_record.name_id;
+                if name_id == FONT_SPECIFIER_FAMILY_ID {
+                    let family = fontcode_get_name(&name_data, FONT_SPECIFIER_FAMILY_ID).ok()??;
+                    f_family = Some(family);
+                    None
+                } else if name_id == FONT_SPECIFIER_NAME_ID {
+                    let family = f_family.as_ref()?;
+                    let name = fontcode_get_name(&name_data, FONT_SPECIFIER_NAME_ID).ok()??;
+                    if name.to_bytes().is_empty() {
+                        None
+                    } else {
+                        Some((
+                            FcPattern {
+                                name: Some(String::from_utf8_lossy(name.to_bytes()).to_string()),
+                                family: Some(String::from_utf8_lossy(family.as_bytes()).to_string()),
+                                bold: if is_bold {
+                                    PatternMatch::True
+                                } else {
+                                    PatternMatch::False
+                                },
+                                italic: if is_italic {
+                                    PatternMatch::True
+                                } else {
+                                    PatternMatch::False
+                                },
+                                oblique: if is_oblique {
+                                    PatternMatch::True
+                                } else {
+                                    PatternMatch::False
+                                },
+                                monospace: if is_monospace {
+                                    PatternMatch::True
+                                } else {
+                                    PatternMatch::False
+                                },
+                                condensed: if stretch <= FcStretch::Condensed {
+                                    PatternMatch::True
+                                } else {
+                                    PatternMatch::False
+                                },
+                                weight,
+                                stretch,
+                                unicode_ranges: unicode_ranges.clone(),
+                            },
+                            font_index,
+                        ))
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+
+        results.extend(
+            patterns
+                .into_iter()
+                .map(|(pat, index)| {
+                    (
+                        pat,
+                        FcFontPath {
+                            path: filepath.to_string_lossy().to_string(),
+                            font_index: index,
+                        },
+                    )
+                })
+        );
+    }
+    
+    if results.is_empty() {
+        Some(results)
+    } else {
+        None
+    }
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -589,155 +1185,84 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
     .collect()
 }
 
-#[cfg(all(feature = "std", feature = "parsing"))]
-fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
-    use allsorts_subset_browser::{
-        binary::read::ReadScope,
-        font_data::FontData,
-        get_name::fontcode_get_name,
-        post::PostTable,
-        tables::{
-            os2::Os2, FontTableProvider, HeadTable, HheaTable, HmtxTable, MaxpTable, NameTable,
-        },
-        tag,
-    };
-    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
-    use mmapio::MmapOptions;
-    use std::collections::BTreeSet;
-    use std::fs::File;
+#[cfg(feature = "std")]
+/// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
+///
+/// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
+fn process_path(
+    prefix: &Option<String>,
+    mut path: PathBuf,
+    is_include_path: bool,
+) -> Option<PathBuf> {
+    use std::env::var;
 
-    const FONT_SPECIFIER_NAME_ID: u16 = 4;
-    const FONT_SPECIFIER_FAMILY_ID: u16 = 1;
+    const HOME_SHORTCUT: &str = "~";
+    const CWD_PATH: &str = ".";
 
-    // font_index = 0 - TODO: iterate through fonts in font file properly!
-    let font_index = 0;
+    const HOME_ENV_VAR: &str = "HOME";
+    const XDG_CONFIG_HOME_ENV_VAR: &str = "XDG_CONFIG_HOME";
+    const XDG_CONFIG_HOME_DEFAULT_PATH_SUFFIX: &str = ".config";
+    const XDG_DATA_HOME_ENV_VAR: &str = "XDG_DATA_HOME";
+    const XDG_DATA_HOME_DEFAULT_PATH_SUFFIX: &str = ".local/share";
 
-    // try parsing the font file and see if the postscript name matches
-    let file = File::open(filepath).ok()?;
-    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
-    let font_bytes = unsafe { MmapOptions::new().map(&file).ok()? };
-    #[cfg(not(all(not(target_family = "wasm"), feature = "std")))]
-    let font_bytes = std::fs::read(filepath).ok()?;
-    let scope = ReadScope::new(&font_bytes[..]);
-    let font_file = scope.read::<FontData<'_>>().ok()?;
-    let provider = font_file.table_provider(font_index).ok()?;
+    const PREFIX_CWD: &str = "cwd";
+    const PREFIX_DEFAULT: &str = "default";
+    const PREFIX_XDG: &str = "xdg";
 
-    let head_data = provider.table_data(tag::HEAD).ok()??.into_owned();
-    let head_table = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
-
-    let is_bold = head_table.is_bold();
-    let is_italic = head_table.is_italic();
-    let mut detected_monospace = None;
-
-    let post_data = provider.table_data(tag::POST).ok()??;
-    if let Ok(post_table) = ReadScope::new(&post_data).read::<PostTable>() {
-        // isFixedPitch here - https://learn.microsoft.com/en-us/typography/opentype/spec/post#header
-        detected_monospace = Some(post_table.header.is_fixed_pitch != 0);
+    // These three could, in theory, be cached, but the work required to do so outweighs the minor benefits
+    fn get_home_value() -> Option<PathBuf> {
+        var(HOME_ENV_VAR)
+            .ok()
+            .map(PathBuf::from)
+    }
+    fn get_xdg_config_home_value() -> Option<PathBuf> {
+        var(XDG_CONFIG_HOME_ENV_VAR)
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| get_home_value()
+                .map(|home_path|
+                    home_path.join(XDG_CONFIG_HOME_DEFAULT_PATH_SUFFIX))
+            )
+    }
+    fn get_xdg_data_home_value() -> Option<PathBuf> {
+        var(XDG_DATA_HOME_ENV_VAR)
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| get_home_value()
+                .map(|home_path|
+                    home_path.join(XDG_DATA_HOME_DEFAULT_PATH_SUFFIX))
+            )
     }
 
-    if detected_monospace.is_none() {
-        // https://learn.microsoft.com/en-us/typography/opentype/spec/os2#panose
-        // Table 20 here - https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6OS2.html
-        let os2_data = provider.table_data(tag::OS_2).ok()??;
-        let os2_table = ReadScope::new(&os2_data)
-            .read_dep::<Os2>(os2_data.len())
-            .ok()?;
-        let monospace = os2_table.panose[0] == 2;
-        detected_monospace = Some(monospace);
-    }
-
-    if detected_monospace.is_none() {
-        let hhea_data = provider.table_data(tag::HHEA).ok()??;
-        let hhea_table = ReadScope::new(&hhea_data).read::<HheaTable>().ok()?;
-        let maxp_data = provider.table_data(tag::MAXP).ok()??;
-        let maxp_table = ReadScope::new(&maxp_data).read::<MaxpTable>().ok()?;
-        let hmtx_data = provider.table_data(tag::HMTX).ok()??;
-        let hmtx_table = ReadScope::new(&hmtx_data)
-            .read_dep::<HmtxTable<'_>>((
-                usize::from(maxp_table.num_glyphs),
-                usize::from(hhea_table.num_h_metrics),
-            ))
-            .ok()?;
-
-        let mut monospace = true;
-        let mut last_advance = 0;
-        for i in 0..hhea_table.num_h_metrics as usize {
-            let advance = hmtx_table.h_metrics.read_item(i).ok()?.advance_width;
-            if i > 0 && advance != last_advance {
-                monospace = false;
-                break;
-            }
-            last_advance = advance;
+    // Resolve the tilde character in the path, if present
+    if path.starts_with(HOME_SHORTCUT) {
+        if let Some(home_path) = get_home_value() {
+            path = home_path.join(path.strip_prefix(HOME_SHORTCUT).expect("already checked that it starts with the prefix"));
+        } else {
+            return None;
         }
-
-        detected_monospace = Some(monospace);
     }
 
-    let is_monospace = detected_monospace.unwrap_or(false);
+    // Resolve prefix values
+    match prefix {
+        Some(prefix) => match prefix.as_str() {
+            PREFIX_CWD | PREFIX_DEFAULT => {
+                let mut new_path = PathBuf::from(CWD_PATH);
+                new_path.push(path);
 
-    let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
-    let name_table = ReadScope::new(&name_data).read::<NameTable>().ok()?;
-
-    // one font can support multiple patterns
-    let mut f_family = None;
-
-    let patterns = name_table
-        .name_records
-        .iter() // TODO: par_iter
-        .filter_map(|name_record| {
-            let name_id = name_record.name_id;
-            if name_id == FONT_SPECIFIER_FAMILY_ID {
-                let family = fontcode_get_name(&name_data, FONT_SPECIFIER_FAMILY_ID).ok()??;
-                f_family = Some(family);
-                None
-            } else if name_id == FONT_SPECIFIER_NAME_ID {
-                let family = f_family.as_ref()?;
-                let name = fontcode_get_name(&name_data, FONT_SPECIFIER_NAME_ID).ok()??;
-                if name.to_bytes().is_empty() {
-                    None
-                } else {
-                    Some((
-                        FcPattern {
-                            name: Some(String::from_utf8_lossy(name.to_bytes()).to_string()),
-                            family: Some(String::from_utf8_lossy(family.as_bytes()).to_string()),
-                            bold: if is_bold {
-                                PatternMatch::True
-                            } else {
-                                PatternMatch::False
-                            },
-                            italic: if is_italic {
-                                PatternMatch::True
-                            } else {
-                                PatternMatch::False
-                            },
-                            monospace: if is_monospace {
-                                PatternMatch::True
-                            } else {
-                                PatternMatch::False
-                            },
-                            ..Default::default() // TODO!
-                        },
-                        font_index,
-                    ))
-                }
-            } else {
-                None
+                Some(new_path)
             }
-        })
-        .collect::<BTreeSet<_>>();
-
-    Some(
-        patterns
-            .into_iter()
-            .map(|(pat, index)| {
-                (
-                    pat,
-                    FcFontPath {
-                        path: filepath.to_string_lossy().to_string(),
-                        font_index: index,
-                    },
-                )
-            })
-            .collect(),
-    )
+            PREFIX_XDG => {
+                if is_include_path {
+                    get_xdg_config_home_value()
+                        .map(|xdg_config_home_path| xdg_config_home_path.join(path))
+                } else {
+                    get_xdg_data_home_value()
+                        .map(|xdg_data_home_path| xdg_data_home_path.join(path))
+                }
+            }
+            _ => None // Unsupported prefix
+        }
+        None => Some(path),
+    }
 }
