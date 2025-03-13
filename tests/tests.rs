@@ -72,16 +72,18 @@ fn test_unicode_range_matching() {
 
     // Get font IDs for assertions
     let font_list = cache.list();
-    let latin_id = font_list.iter()
+    let latin_id = font_list
+        .iter()
         .find(|(pattern, _)| pattern.name == Some("Latin Font".to_string()))
         .map(|(_, id)| *id)
         .expect("Latin font not found");
-    
-    let cyrillic_id = font_list.iter()
+
+    let cyrillic_id = font_list
+        .iter()
         .find(|(pattern, _)| pattern.name == Some("Cyrillic Font".to_string()))
         .map(|(_, id)| *id)
         .expect("Cyrillic font not found");
-    
+
     // Test querying with Unicode ranges
     let mut trace = Vec::new();
 
@@ -400,14 +402,17 @@ fn test_font_search() {
                 family: Some("Arial".to_string()),
                 weight: FcWeight::Normal,
                 monospace: PatternMatch::False,
-                unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
+                unicode_ranges: vec![UnicodeRange {
+                    start: 0x0000,
+                    end: 0x007F,
+                }],
                 ..Default::default()
             },
             FcFont {
                 bytes: vec![1, 2, 3, 4],
                 font_index: 0,
                 id: "arial-regular".to_string(),
-            }
+            },
         ),
         (
             FcPattern {
@@ -416,14 +421,17 @@ fn test_font_search() {
                 weight: FcWeight::Bold,
                 bold: PatternMatch::True,
                 monospace: PatternMatch::False,
-                unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
+                unicode_ranges: vec![UnicodeRange {
+                    start: 0x0000,
+                    end: 0x007F,
+                }],
                 ..Default::default()
             },
             FcFont {
                 bytes: vec![5, 6, 7, 8],
                 font_index: 0,
                 id: "arial-bold".to_string(),
-            }
+            },
         ),
         // Monospace fonts
         (
@@ -432,14 +440,17 @@ fn test_font_search() {
                 family: Some("Courier New".to_string()),
                 weight: FcWeight::Normal,
                 monospace: PatternMatch::True,
-                unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
+                unicode_ranges: vec![UnicodeRange {
+                    start: 0x0000,
+                    end: 0x007F,
+                }],
                 ..Default::default()
             },
             FcFont {
                 bytes: vec![9, 10, 11, 12],
                 font_index: 0,
                 id: "courier-new".to_string(),
-            }
+            },
         ),
         (
             FcPattern {
@@ -447,14 +458,17 @@ fn test_font_search() {
                 family: Some("Fira Code".to_string()),
                 weight: FcWeight::Normal,
                 monospace: PatternMatch::True,
-                unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
+                unicode_ranges: vec![UnicodeRange {
+                    start: 0x0000,
+                    end: 0x007F,
+                }],
                 ..Default::default()
             },
             FcFont {
                 bytes: vec![13, 14, 15, 16],
                 font_index: 0,
                 id: "fira-code".to_string(),
-            }
+            },
         ),
         // CJK font
         (
@@ -464,8 +478,14 @@ fn test_font_search() {
                 weight: FcWeight::Normal,
                 monospace: PatternMatch::False,
                 unicode_ranges: vec![
-                    UnicodeRange { start: 0x0000, end: 0x007F }, // Latin
-                    UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK
+                    UnicodeRange {
+                        start: 0x0000,
+                        end: 0x007F,
+                    }, // Latin
+                    UnicodeRange {
+                        start: 0x4E00,
+                        end: 0x9FFF,
+                    }, // CJK
                 ],
                 ..Default::default()
             },
@@ -473,7 +493,7 @@ fn test_font_search() {
                 bytes: vec![17, 18, 19, 20],
                 font_index: 0,
                 id: "noto-sans-cjk".to_string(),
-            }
+            },
         ),
     ];
 
@@ -484,7 +504,8 @@ fn test_font_search() {
     // Get font IDs by pattern name for later verification
     let font_list = cache.list();
     let get_id_by_name = |name: &str| -> FontId {
-        font_list.iter()
+        font_list
+            .iter()
             .find(|(pattern, _)| pattern.name.as_ref().map_or(false, |n| n == name))
             .map(|(_, id)| *id)
             .expect(&format!("Font '{}' not found", name))
@@ -502,7 +523,7 @@ fn test_font_search() {
         name: Some("Arial".to_string()),
         ..Default::default()
     };
-    
+
     let result = cache.query(&arial_query, &mut trace);
     assert!(result.is_some(), "Should find Arial font");
     assert_eq!(result.unwrap().id, arial_id, "Should match Arial font ID");
@@ -514,10 +535,15 @@ fn test_font_search() {
         bold: PatternMatch::True,
         ..Default::default()
     };
-    
+
     let result = cache.query(&arial_bold_query, &mut trace);
     assert!(result.is_some(), "Should find Arial Bold font");
-    assert_eq!(result.unwrap().id, arial_bold_id, "Should match Arial Bold font ID");
+    println!("trace: {trace:#?}");
+    assert_eq!(
+        result.unwrap().id,
+        arial_bold_id,
+        "Should match Arial Bold font ID"
+    );
 
     // Test 3: Search for any monospace font
     let mut trace = Vec::new();
@@ -525,38 +551,47 @@ fn test_font_search() {
         monospace: PatternMatch::True,
         ..Default::default()
     };
-    
+
     let results = cache.query_all(&monospace_query, &mut trace);
     assert_eq!(results.len(), 2, "Should find two monospace fonts");
-    
+
     let result_ids: Vec<FontId> = results.into_iter().map(|m| m.id).collect();
-    assert!(result_ids.contains(&courier_id), "Should include Courier New");
+    assert!(
+        result_ids.contains(&courier_id),
+        "Should include Courier New"
+    );
     assert!(result_ids.contains(&fira_id), "Should include Fira Code");
 
     // Test 4: Search for a font that can render CJK text
     let mut trace = Vec::new();
     let cjk_text = "你好"; // Hello in Chinese
-    
+
     let results = cache.query_for_text(&FcPattern::default(), cjk_text, &mut trace);
     assert!(!results.is_empty(), "Should find fonts for CJK text");
-    
+
     let result_ids: Vec<FontId> = results.into_iter().map(|m| m.id).collect();
-    assert!(result_ids.contains(&noto_cjk_id), "Should include Noto Sans CJK");
-    
+    assert!(
+        result_ids.contains(&noto_cjk_id),
+        "Should include Noto Sans CJK"
+    );
+
     // Test 5: Multiple fonts for mixed text
     let mut trace = Vec::new();
     let mixed_text = "Hello 你好"; // Latin and CJK
-    
+
     let results = cache.query_for_text(&FcPattern::default(), mixed_text, &mut trace);
-    assert!(results.len() >= 2, "Should find multiple fonts for mixed text");
-    
+    assert!(
+        results.len() >= 2,
+        "Should find multiple fonts for mixed text"
+    );
+
     // Verify that we got both Latin and CJK capable fonts
     let latin_found = results.iter().any(|m| {
         let id = m.id;
         id == arial_id || id == arial_bold_id || id == courier_id || id == fira_id
     });
     let cjk_found = results.iter().any(|m| m.id == noto_cjk_id);
-    
+
     assert!(latin_found, "Should find a Latin-capable font");
     assert!(cjk_found, "Should find a CJK-capable font");
 }

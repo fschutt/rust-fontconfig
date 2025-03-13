@@ -148,15 +148,15 @@ impl FcWeight {
         if available.is_empty() {
             return None;
         }
-    
+
         // Exact match
         if available.contains(self) {
             return Some(*self);
         }
-    
+
         // Get numeric value
         let self_value = *self as u16;
-    
+
         match *self {
             FcWeight::Normal => {
                 // For Normal (400), try Medium (500) first
@@ -170,7 +170,12 @@ impl FcWeight {
                     }
                 }
                 // Last, try heavier weights
-                for weight in &[FcWeight::SemiBold, FcWeight::Bold, FcWeight::ExtraBold, FcWeight::Black] {
+                for weight in &[
+                    FcWeight::SemiBold,
+                    FcWeight::Bold,
+                    FcWeight::ExtraBold,
+                    FcWeight::Black,
+                ] {
                     if available.contains(weight) {
                         return Some(*weight);
                     }
@@ -188,7 +193,12 @@ impl FcWeight {
                     }
                 }
                 // Last, try heavier weights
-                for weight in &[FcWeight::SemiBold, FcWeight::Bold, FcWeight::ExtraBold, FcWeight::Black] {
+                for weight in &[
+                    FcWeight::SemiBold,
+                    FcWeight::Bold,
+                    FcWeight::ExtraBold,
+                    FcWeight::Black,
+                ] {
                     if available.contains(weight) {
                         return Some(*weight);
                     }
@@ -198,7 +208,7 @@ impl FcWeight {
                 // For lightweight fonts (<400), first try lighter or equal weights
                 let mut best_match = None;
                 let mut smallest_diff = u16::MAX;
-                
+
                 // Find the closest lighter weight
                 for weight in available {
                     let weight_value = *weight as u16;
@@ -211,15 +221,15 @@ impl FcWeight {
                         }
                     }
                 }
-                
+
                 if best_match.is_some() {
                     return best_match;
                 }
-                
+
                 // If no lighter weight, find the closest heavier weight
                 best_match = None;
                 smallest_diff = u16::MAX;
-                
+
                 for weight in available {
                     let weight_value = *weight as u16;
                     if weight_value > self_value {
@@ -230,14 +240,14 @@ impl FcWeight {
                         }
                     }
                 }
-                
+
                 return best_match;
             }
             FcWeight::SemiBold | FcWeight::Bold | FcWeight::ExtraBold | FcWeight::Black => {
                 // For heavyweight fonts (>500), first try heavier or equal weights
                 let mut best_match = None;
                 let mut smallest_diff = u16::MAX;
-                
+
                 // Find the closest heavier weight
                 for weight in available {
                     let weight_value = *weight as u16;
@@ -250,15 +260,15 @@ impl FcWeight {
                         }
                     }
                 }
-                
+
                 if best_match.is_some() {
                     return best_match;
                 }
-                
+
                 // If no heavier weight, find the closest lighter weight
                 best_match = None;
                 smallest_diff = u16::MAX;
-                
+
                 for weight in available {
                     let weight_value = *weight as u16;
                     if weight_value < self_value {
@@ -269,11 +279,11 @@ impl FcWeight {
                         }
                     }
                 }
-                
+
                 return best_match;
             }
         }
-    
+
         // If nothing matches by now, return the first available weight
         Some(available[0])
     }
@@ -625,7 +635,7 @@ impl FcFontCache {
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
         let mut cache = FcFontCache::default();
-        
+
         #[cfg(target_os = "linux")]
         {
             if let Some(font_entries) = FcScanDirectories() {
@@ -643,7 +653,10 @@ impl FcFontCache {
             // `~` isn't actually valid on Windows, but it will be converted by `process_path`
             let font_dirs = vec![
                 (None, "C:\\Windows\\Fonts\\".to_owned()),
-                (None, "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned()),
+                (
+                    None,
+                    "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned(),
+                ),
             ];
 
             let font_entries = FcScanDirectoriesInner(&font_dirs);
@@ -677,7 +690,10 @@ impl FcFontCache {
 
     /// Returns the list of fonts and font patterns
     pub fn list(&self) -> Vec<(&FcPattern, FontId)> {
-        self.patterns.iter().map(|(pattern, id)| (pattern, *id)).collect()
+        self.patterns
+            .iter()
+            .map(|(pattern, id)| (pattern, *id))
+            .collect()
     }
 
     /// Queries a font from the in-memory cache, returns the first found font (early return)
@@ -688,14 +704,15 @@ impl FcFontCache {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
                 let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
                 let coverage = Self::calculate_unicode_coverage(&metadata.unicode_ranges);
-                matches.push((*id, coverage, metadata.clone()));
+                let style_score = Self::calculate_style_score(pattern, metadata);
+                matches.push((*id, coverage, style_score, metadata.clone()));
             }
         }
 
-        // Sort by unicode coverage (highest first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort by unicode coverage (highest first), then by style score (lowest first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
 
-        matches.first().map(|(id, _, metadata)| {
+        matches.first().map(|(id, _, _, metadata)| {
             // Find fallbacks for this font
             let fallbacks = self.find_fallbacks(metadata, trace);
 
@@ -715,16 +732,17 @@ impl FcFontCache {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
                 let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
                 let coverage = Self::calculate_unicode_coverage(&metadata.unicode_ranges);
-                matches.push((*id, coverage, metadata.clone()));
+                let style_score = Self::calculate_style_score(pattern, metadata);
+                matches.push((*id, coverage, style_score, metadata.clone()));
             }
         }
 
-        // Sort by unicode coverage (highest first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort by unicode coverage (highest first), then by style score (lowest first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
 
         matches
             .into_iter()
-            .map(|(id, _, metadata)| {
+            .map(|(id, _, _, metadata)| {
                 let fallbacks = self.find_fallbacks(&metadata, trace);
 
                 FontMatch {
@@ -745,7 +763,7 @@ impl FcFontCache {
 
         // Collect all potential fallbacks (excluding original pattern)
         let original_id = self.patterns.get(pattern);
-        
+
         for (stored_pattern, id) in &self.patterns {
             // Skip if this is the original pattern
             if original_id.is_some() && original_id.unwrap() == id {
@@ -755,7 +773,8 @@ impl FcFontCache {
             // Check if this font supports any of the unicode ranges
             if !stored_pattern.unicode_ranges.is_empty() {
                 let supports_ranges = pattern.unicode_ranges.iter().any(|p_range| {
-                    stored_pattern.unicode_ranges
+                    stored_pattern
+                        .unicode_ranges
                         .iter()
                         .any(|k_range| p_range.overlaps(k_range))
                 });
@@ -938,6 +957,7 @@ impl FcFontCache {
                 return false;
             }
         }
+
         // Check style properties
         let style_properties = [
             (
@@ -969,6 +989,21 @@ impl FcFontCache {
 
         for (property_name, needs_to_match, matches) in style_properties {
             if needs_to_match && !matches {
+                let (requested, found) = match property_name {
+                    "italic" => (format!("{:?}", pattern.italic), format!("{:?}", k.italic)),
+                    "oblique" => (format!("{:?}", pattern.oblique), format!("{:?}", k.oblique)),
+                    "bold" => (format!("{:?}", pattern.bold), format!("{:?}", k.bold)),
+                    "monospace" => (
+                        format!("{:?}", pattern.monospace),
+                        format!("{:?}", k.monospace),
+                    ),
+                    "condensed" => (
+                        format!("{:?}", pattern.condensed),
+                        format!("{:?}", k.condensed),
+                    ),
+                    _ => (String::new(), String::new()),
+                };
+
                 trace.push(TraceMsg {
                     level: TraceLevel::Info,
                     path: k
@@ -977,8 +1012,8 @@ impl FcFontCache {
                         .map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
                     reason: MatchReason::StyleMismatch {
                         property: property_name,
-                        requested: format!("{:?}", pattern.italic),
-                        found: format!("{:?}", k.italic),
+                        requested,
+                        found,
                     },
                 });
                 return false;
@@ -1051,7 +1086,6 @@ impl FcFontCache {
 
         true
     }
-
     /// Find fallback fonts for a given pattern
     // Helper to calculate total unicode coverage
     fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
@@ -1073,18 +1107,45 @@ impl FcFontCache {
         let stretch_diff = (original.stretch as i32 - candidate.stretch as i32).abs();
         score += (stretch_diff * 100) as u32;
 
-        // Style properties
-        if original.italic != candidate.italic {
-            score += 300;
+        // Style properties - penalize DontCare matches when specific values are requested
+        if original.italic != PatternMatch::DontCare {
+            if candidate.italic == PatternMatch::DontCare {
+                score += 150; // Penalty for DontCare
+            } else if original.italic != candidate.italic {
+                score += 300; // Penalty for mismatch
+            }
         }
-        if original.bold != candidate.bold {
-            score += 300;
+
+        if original.bold != PatternMatch::DontCare {
+            if candidate.bold == PatternMatch::DontCare {
+                score += 150; // Penalty for DontCare
+            } else if original.bold != candidate.bold {
+                score += 300; // Penalty for mismatch
+            }
         }
-        if original.oblique != candidate.oblique {
-            score += 200;
+
+        if original.oblique != PatternMatch::DontCare {
+            if candidate.oblique == PatternMatch::DontCare {
+                score += 100; // Penalty for DontCare
+            } else if original.oblique != candidate.oblique {
+                score += 200; // Penalty for mismatch
+            }
         }
-        if original.monospace != candidate.monospace {
-            score += 100;
+
+        if original.monospace != PatternMatch::DontCare {
+            if candidate.monospace == PatternMatch::DontCare {
+                score += 50; // Penalty for DontCare
+            } else if original.monospace != candidate.monospace {
+                score += 100; // Penalty for mismatch
+            }
+        }
+
+        if original.condensed != PatternMatch::DontCare {
+            if candidate.condensed == PatternMatch::DontCare {
+                score += 50; // Penalty for DontCare
+            } else if original.condensed != candidate.condensed {
+                score += 100; // Penalty for mismatch
+            }
         }
 
         score
@@ -1108,18 +1169,18 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
     while let Some((prefix, path_to_visit)) = paths_to_visit.pop() {
         let path = match process_path(&prefix, path_to_visit, true) {
             Some(path) => path,
-            None => continue
+            None => continue,
         };
 
         let metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
-            Err(_) => continue
+            Err(_) => continue,
         };
 
         if metadata.is_file() {
             let xml_utf8 = match fs::read_to_string(&path) {
                 Ok(xml_utf8) => xml_utf8,
-                Err(_) => continue
+                Err(_) => continue,
             };
 
             if ParseFontsConf(&xml_utf8, &mut paths_to_visit, &mut font_paths).is_none() {
@@ -1128,21 +1189,21 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
         } else if metadata.is_dir() {
             let dir_entries = match fs::read_dir(&path) {
                 Ok(dir_entries) => dir_entries,
-                Err(_) => continue
+                Err(_) => continue,
             };
 
             for entry_result in dir_entries {
                 let entry = match entry_result {
                     Ok(entry) => entry,
-                    Err(_) => continue
+                    Err(_) => continue,
                 };
-                
+
                 let entry_path = entry.path();
-                
+
                 // `fs::metadata` traverses symbolic links
                 let entry_metadata = match fs::metadata(&entry_path) {
                     Ok(metadata) => metadata,
-                    Err(_) => continue
+                    Err(_) => continue,
                 };
 
                 if !entry_metadata.is_file() {
@@ -1151,11 +1212,13 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
                 let file_name = match entry_path.file_name() {
                     Some(name) => name,
-                    None => continue
+                    None => continue,
                 };
 
                 let file_name_str = file_name.to_string_lossy();
-                if file_name_str.starts_with(|c: char| c.is_ascii_digit()) && file_name_str.ends_with(".conf") {
+                if file_name_str.starts_with(|c: char| c.is_ascii_digit())
+                    && file_name_str.ends_with(".conf")
+                {
                     paths_to_visit.push((None, entry_path));
                 }
             }
@@ -1191,9 +1254,9 @@ fn ParseFontsConf(
     for token_result in Tokenizer::from(input) {
         let token = match token_result {
             Ok(token) => token,
-            Err(_) => return None
+            Err(_) => return None,
         };
-        
+
         match token {
             ElementStart { local, .. } => {
                 if is_in_include || is_in_dir {
@@ -1207,7 +1270,7 @@ fn ParseFontsConf(
                     TAG_DIR => {
                         is_in_dir = true;
                     }
-                    _ => continue
+                    _ => continue,
                 }
 
                 current_path = None;
@@ -1243,7 +1306,10 @@ fn ParseFontsConf(
                         }
 
                         if let Some(current_path) = current_path.as_ref() {
-                            paths_to_visit.push((current_prefix.map(ToOwned::to_owned), PathBuf::from(*current_path)));
+                            paths_to_visit.push((
+                                current_prefix.map(ToOwned::to_owned),
+                                PathBuf::from(*current_path),
+                            ));
                         }
                     }
                     TAG_DIR => {
@@ -1252,10 +1318,13 @@ fn ParseFontsConf(
                         }
 
                         if let Some(current_path) = current_path.as_ref() {
-                            font_paths.push((current_prefix.map(ToOwned::to_owned), (*current_path).to_owned()));
+                            font_paths.push((
+                                current_prefix.map(ToOwned::to_owned),
+                                (*current_path).to_owned(),
+                            ));
                         }
                     }
-                    _ => continue
+                    _ => continue,
                 }
 
                 is_in_include = false;

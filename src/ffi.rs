@@ -854,27 +854,31 @@ pub extern "C" fn fc_cache_get_font_path(
     if cache.is_null() || id.is_null() {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let cache = &*cache;
         let id_rust = FontId::from_fontid_c(&*id);
-        
+
         match cache.get_font_by_id(&id_rust) {
             Some(FontSource::Disk(path)) => {
                 let path_c = FcFontPathC {
-                    path: CString::new(path.path.clone()).unwrap_or_default().into_raw(),
+                    path: CString::new(path.path.clone())
+                        .unwrap_or_default()
+                        .into_raw(),
                     font_index: path.font_index,
                 };
-                
+
                 Box::into_raw(Box::new(path_c))
             }
             Some(FontSource::Memory(font)) => {
                 // For memory fonts, return a special path
                 let path_c = FcFontPathC {
-                    path: CString::new(format!("memory:{}", font.id)).unwrap_or_default().into_raw(),
+                    path: CString::new(format!("memory:{}", font.id))
+                        .unwrap_or_default()
+                        .into_raw(),
                     font_index: font.font_index,
                 };
-                
+
                 Box::into_raw(Box::new(path_c))
             }
             None => ptr::null_mut(),
@@ -893,19 +897,19 @@ pub extern "C" fn fc_cache_query(
     if cache.is_null() || pattern.is_null() || trace.is_null() || trace_count.is_null() {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let cache = &*cache;
         let pattern_rust = c_to_pattern(pattern);
-        
+
         let mut trace_msgs = Vec::new();
         let result = cache.query(&pattern_rust, &mut trace_msgs);
-        
+
         // Convert trace messages
         let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
         *trace = trace_c;
         *trace_count = count;
-        
+
         match result {
             Some(match_obj) => {
                 let match_c = font_match_to_c(&match_obj);
@@ -925,17 +929,17 @@ pub extern "C" fn fc_cache_get_font_metadata(
     if cache.is_null() || id.is_null() {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let cache = &*cache;
         let id_rust = FontId::from_fontid_c(&*id);
-        
+
         // Get metadata directly from ID
         let pattern = match cache.get_metadata_by_id(&id_rust) {
             Some(pattern) => pattern,
             None => return ptr::null_mut(),
         };
-        
+
         // Create metadata from pattern
         let metadata = Box::new(FcFontMetadataC {
             copyright: option_string_to_c_char(pattern.metadata.copyright.as_ref()),
@@ -951,12 +955,14 @@ pub extern "C" fn fc_cache_get_font_metadata(
             manufacturer_url: option_string_to_c_char(pattern.metadata.manufacturer_url.as_ref()),
             postscript_name: option_string_to_c_char(pattern.metadata.postscript_name.as_ref()),
             preferred_family: option_string_to_c_char(pattern.metadata.preferred_family.as_ref()),
-            preferred_subfamily: option_string_to_c_char(pattern.metadata.preferred_subfamily.as_ref()),
+            preferred_subfamily: option_string_to_c_char(
+                pattern.metadata.preferred_subfamily.as_ref(),
+            ),
             trademark: option_string_to_c_char(pattern.metadata.trademark.as_ref()),
             unique_id: option_string_to_c_char(pattern.metadata.unique_id.as_ref()),
             version: option_string_to_c_char(pattern.metadata.version.as_ref()),
         });
-        
+
         Box::into_raw(metadata)
     }
 }
@@ -972,20 +978,20 @@ pub extern "C" fn fc_font_new(
     if bytes.is_null() || bytes_len == 0 || id.is_null() {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let id_rust = CStr::from_ptr(id).to_string_lossy().into_owned();
         let bytes_vec = slice::from_raw_parts(bytes, bytes_len).to_vec();
-        
+
         let bytes_ptr = Box::into_raw(bytes_vec.into_boxed_slice()) as *mut u8;
-        
+
         let font = FcFontC {
             bytes: bytes_ptr,
             bytes_len,
             font_index,
             id: CString::new(id_rust).unwrap_or_default().into_raw(),
         };
-        
+
         Box::into_raw(Box::new(font))
     }
 }
@@ -999,33 +1005,33 @@ pub extern "C" fn fc_cache_list_fonts(
     if cache.is_null() || count.is_null() {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let cache = &*cache;
         let font_list = cache.list();
-        
+
         if font_list.is_empty() {
             *count = 0;
             return ptr::null_mut();
         }
-        
+
         let mut font_info = Vec::with_capacity(font_list.len());
-        
+
         for (pattern, id) in font_list {
             let name = option_string_to_c_char(pattern.name.as_ref());
             let family = option_string_to_c_char(pattern.family.as_ref());
-            
+
             font_info.push(FcFontInfoC {
                 id: FcFontIdC::from_fontid(&id),
                 name,
                 family,
             });
         }
-        
+
         *count = font_info.len();
         let ptr = font_info.as_mut_ptr();
         mem::forget(font_info);
-        
+
         ptr
     }
 }
@@ -1041,25 +1047,25 @@ pub extern "C" fn fc_cache_add_memory_fonts(
     if cache.is_null() || patterns.is_null() || fonts.is_null() || count == 0 {
         return;
     }
-    
+
     unsafe {
         let cache = &mut *cache;
         let patterns_slice = slice::from_raw_parts(patterns, count);
         let fonts_slice = slice::from_raw_parts(fonts, count);
-        
+
         let mut memory_fonts = Vec::with_capacity(count);
-        
+
         for i in 0..count {
             let pattern = c_to_pattern(&patterns_slice[i]);
             let font = &fonts_slice[i];
-            
+
             let font_id = c_char_to_option_string(font.id).unwrap_or_default();
             let bytes = if font.bytes.is_null() || font.bytes_len == 0 {
                 Vec::new()
             } else {
                 slice::from_raw_parts(font.bytes, font.bytes_len).to_vec()
             };
-            
+
             memory_fonts.push((
                 pattern,
                 FcFont {
@@ -1069,7 +1075,7 @@ pub extern "C" fn fc_cache_add_memory_fonts(
                 },
             ));
         }
-        
+
         cache.with_memory_fonts(memory_fonts);
     }
 }
@@ -1083,38 +1089,43 @@ pub extern "C" fn fc_cache_query_all(
     trace_count: *mut usize,
     matches_count: *mut usize,
 ) -> *mut *mut FcFontMatchC {
-    if cache.is_null() || pattern.is_null() || trace.is_null() || trace_count.is_null() || matches_count.is_null() {
+    if cache.is_null()
+        || pattern.is_null()
+        || trace.is_null()
+        || trace_count.is_null()
+        || matches_count.is_null()
+    {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let cache = &*cache;
         let pattern_rust = c_to_pattern(pattern);
-        
+
         let mut trace_msgs = Vec::new();
         let results = cache.query_all(&pattern_rust, &mut trace_msgs);
-        
+
         // Convert trace messages
         let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
         *trace = trace_c;
         *trace_count = count;
-        
+
         if results.is_empty() {
             *matches_count = 0;
             return ptr::null_mut();
         }
-        
+
         // Convert results to C representation
         let mut matches_c = Vec::with_capacity(results.len());
         for match_obj in &results {
             let match_c = font_match_to_c(match_obj);
             matches_c.push(Box::into_raw(Box::new(match_c)));
         }
-        
+
         *matches_count = matches_c.len();
         let ptr = matches_c.as_mut_ptr();
         mem::forget(matches_c);
-        
+
         ptr
     }
 }
@@ -1129,39 +1140,45 @@ pub extern "C" fn fc_cache_query_for_text(
     trace_count: *mut usize,
     matches_count: *mut usize,
 ) -> *mut *mut FcFontMatchC {
-    if cache.is_null() || pattern.is_null() || text.is_null() || trace.is_null() || trace_count.is_null() || matches_count.is_null() {
+    if cache.is_null()
+        || pattern.is_null()
+        || text.is_null()
+        || trace.is_null()
+        || trace_count.is_null()
+        || matches_count.is_null()
+    {
         return ptr::null_mut();
     }
-    
+
     unsafe {
         let cache = &*cache;
         let pattern_rust = c_to_pattern(pattern);
         let text_rust = CStr::from_ptr(text).to_string_lossy().into_owned();
-        
+
         let mut trace_msgs = Vec::new();
         let results = cache.query_for_text(&pattern_rust, &text_rust, &mut trace_msgs);
-        
+
         // Convert trace messages
         let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
         *trace = trace_c;
         *trace_count = count;
-        
+
         if results.is_empty() {
             *matches_count = 0;
             return ptr::null_mut();
         }
-        
+
         // Convert results to C representation
         let mut matches_c = Vec::with_capacity(results.len());
         for match_obj in &results {
             let match_c = font_match_to_c(match_obj);
             matches_c.push(Box::into_raw(Box::new(match_c)));
         }
-        
+
         *matches_count = matches_c.len();
         let ptr = matches_c.as_mut_ptr();
         mem::forget(matches_c);
-        
+
         ptr
     }
 }
