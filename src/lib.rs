@@ -24,8 +24,26 @@ use std::path::PathBuf;
 
 /// Simple UUID generator for font match IDs
 /// Doesn't use external crates for simplicity
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct FontId(pub u128);
+
+impl core::fmt::Debug for FontId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(self, f)
+    }
+}
+
+impl core::fmt::Display for FontId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let id = self.0;
+        write!(f, "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            (id >> 96) & 0xFFFFFFFF,
+            (id >> 80) & 0xFFFF,
+            (id >> 64) & 0xFFFF,
+            (id >> 48) & 0xFFFF,
+            id & 0xFFFFFFFFFFFF)
+    }
+}
 
 impl FontId {
     /// Generate a new pseudo-UUID without external dependencies
@@ -62,18 +80,6 @@ impl FontId {
             };
             FontId(id)
         }
-    }
-}
-
-impl core::fmt::Display for FontId {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let id = self.0;
-        write!(f, "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            (id >> 96) & 0xFFFFFFFF,
-            (id >> 80) & 0xFFFF,
-            (id >> 64) & 0xFFFF,
-            (id >> 48) & 0xFFFF,
-            id & 0xFFFFFFFFFFFF)
     }
 }
 
@@ -423,7 +429,14 @@ impl FcPattern {
 pub struct FontMatch {
     pub id: FontId,
     pub unicode_ranges: Vec<UnicodeRange>,
-    pub fallbacks: Vec<FontId>,
+    pub fallbacks: Vec<FontMatchNoFallback>,
+}
+
+/// Font match result with UUID (without fallback)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontMatchNoFallback {
+    pub id: FontId,
+    pub unicode_ranges: Vec<UnicodeRange>,
 }
 
 /// Path to a font file
@@ -487,7 +500,7 @@ impl FcFontCache {
     }
 
     /// Builds a new font cache from all fonts discovered on the system
-        #[cfg(all(feature = "std", feature = "parsing"))]
+    #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
         #[cfg(target_os = "linux")]
         {
@@ -570,36 +583,41 @@ impl FcFontCache {
         pattern: &FcPattern, 
         trace: &mut Vec<TraceMsg>
     ) -> bool {
-        // If a specific name is requested, it must match
-        if let Some(ref name) = pattern.name {
-            if k.name.as_ref() != Some(name) {
-                trace.push(TraceMsg {
-                    level: TraceLevel::Info,
-                    path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
-                    reason: MatchReason::NameMismatch {
-                        requested: pattern.name.clone(),
-                        found: k.name.clone(),
-                    },
-                });
-                return false;
+            // Check name - substring match
+            if let Some(ref name) = pattern.name {
+                let matches = k.name.as_ref()
+                    .map_or(false, |k_name| k_name.contains(name));
+                    
+                if !matches {
+                    trace.push(TraceMsg {
+                        level: TraceLevel::Info,
+                        path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), Clone::clone),
+                        reason: MatchReason::NameMismatch {
+                            requested: pattern.name.clone(),
+                            found: k.name.clone(),
+                        },
+                    });
+                    return false;
+                }
             }
-        }
-        
-        // If a specific family is requested, it must match
-        if let Some(ref family) = pattern.family {
-            if k.family.as_ref() != Some(family) {
-                trace.push(TraceMsg {
-                    level: TraceLevel::Info,
-                    path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
-                    reason: MatchReason::FamilyMismatch {
-                        requested: pattern.family.clone(),
-                        found: k.family.clone(),
-                    },
-                });
-                return false;
+            
+            // Check family - substring match
+            if let Some(ref family) = pattern.family {
+                let matches = k.family.as_ref()
+                    .map_or(false, |k_family| k_family.contains(family));
+                    
+                if !matches {
+                    trace.push(TraceMsg {
+                        level: TraceLevel::Info,
+                        path: k.name.as_ref().map_or_else(|| "<unknown>".to_string(), Clone::clone),
+                        reason: MatchReason::FamilyMismatch {
+                            requested: pattern.family.clone(),
+                            found: k.family.clone(),
+                        },
+                    });
+                    return false;
+                }
             }
-        }
-
         // Check style properties
         let style_properties = [
             ("italic", pattern.italic.needs_to_match(), pattern.italic.matches(&k.italic)),
@@ -682,136 +700,152 @@ impl FcFontCache {
         true
     }
 
-    /// Queries a font from the in-memory `font -> file` mapping, returns all matching fonts
-    pub fn query_all(
-        &self, 
-        pattern: &FcPattern,
-        trace: &mut Vec<TraceMsg>
-    ) -> Vec<FontMatch> {
-        let mut results = Vec::new();
-        
-        for (k, v) in &self.map {
-            if Self::query_matches_internal(k, pattern, trace) {
-                // Create a new FontMatch with generated UUID
-                let id = *self.id_map.iter()
-                    .find(|(_, path)| *path == v)
-                    .map(|(id, _)| id)
-                    .unwrap_or_else(|| {
-                        trace.push(TraceMsg {
-                            level: TraceLevel::Error,
-                            path: v.path.clone(),
-                            reason: MatchReason::Success, // We found a match but no UUID
-                        });
-                        // Should never happen, but use a fallback if it does
-                        &FontId(0)
-                    });
-                
-                // Find fallbacks for this font
-                let fallbacks = self.find_fallbacks(k, trace);
-                
-                results.push(FontMatch {
-                    id,
-                    unicode_ranges: k.unicode_ranges.clone(),
-                    fallbacks,
-                });
-            }
-        }
-        
-        results
+    /// Find fallback fonts for a given pattern
+    // Helper to calculate total unicode coverage
+    fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
+        ranges.iter()
+            .map(|range| (range.end - range.start + 1) as u64)
+            .sum()
     }
     
-    /// Find fallback fonts for a given pattern
-    fn find_fallbacks(
-        &self, 
-        pattern: &FcPattern,
-        _trace: &mut Vec<TraceMsg>
-    ) -> Vec<FontId> {
-        let mut fallbacks = Vec::new();
+    // Calculate CSS style matching score (lower is better)
+    fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> u32 {
+        let mut score = 0;
         
-        // Simple fallback strategy - collect fonts with the same family
-        // but different weights/styles
-        if let Some(family) = &pattern.family {
-            for (k, v) in &self.map {
-                if k.family.as_ref() == Some(family) && k != pattern {
-                    if let Some(id) = self.id_map.iter()
-                        .find(|(_, path)| *path == v)
-                        .map(|(id, _)| *id) {
-                        fallbacks.push(id);
+        // Weight difference (0-800)
+        let weight_diff = (original.weight as i32 - candidate.weight as i32).abs();
+        score += weight_diff as u32;
+        
+        // Stretch difference (1-9)
+        let stretch_diff = (original.stretch as i32 - candidate.stretch as i32).abs();
+        score += (stretch_diff * 100) as u32;
+        
+        // Style properties
+        if original.italic != candidate.italic { score += 300; }
+        if original.bold != candidate.bold { score += 300; }
+        if original.oblique != candidate.oblique { score += 200; }
+        if original.monospace != candidate.monospace { score += 100; }
+        
+        score
+    }
+    
+    fn find_fallbacks(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Vec<FontMatchNoFallback> {
+        let mut candidates = Vec::new();
+        
+        // Collect all potential fallbacks (excluding original pattern)
+        for (k, v) in &self.map {
+            if k == pattern { continue; }
+            
+            if let Some(id) = self.id_map.iter()
+                .find(|(_, path)| *path == v)
+                .map(|(id, _)| *id) 
+            {
+                // Check if this font supports any of the unicode ranges
+                if !k.unicode_ranges.is_empty() {
+                    let supports_ranges = pattern.unicode_ranges.iter().any(|p_range| 
+                        k.unicode_ranges.iter().any(|k_range| p_range.overlaps(k_range))
+                    );
+                    
+                    if supports_ranges {
+                        let coverage = Self::calculate_unicode_coverage(&k.unicode_ranges);
+                        let style_score = Self::calculate_style_score(pattern, k);
+                        candidates.push((FontMatchNoFallback {
+                            id: id,
+                            unicode_ranges: k.unicode_ranges.clone(),
+                        }, coverage, style_score, k.clone()));
                     }
                 }
             }
         }
         
-        // Add fonts with overlapping unicode ranges as fallbacks
-        if !pattern.unicode_ranges.is_empty() {
-            for (k, v) in &self.map {
-                if k != pattern && !k.unicode_ranges.is_empty() {
-                    let mut has_overlap = false;
-                    
-                    for p_range in &pattern.unicode_ranges {
-                        for k_range in &k.unicode_ranges {
-                            if p_range.overlaps(k_range) {
-                                has_overlap = true;
-                                break;
-                            }
-                        }
-                        if has_overlap {
-                            break;
-                        }
-                    }
-                    
-                    if has_overlap {
-                        if let Some(id) = self.id_map.iter()
-                            .find(|(_, path)| *path == v)
-                            .map(|(id, _)| *id) {
-                            if !fallbacks.contains(&id) {
-                                fallbacks.push(id);
-                            }
-                        }
-                    }
+        // Sort by coverage (highest first), then by style score (lowest first)
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        
+        // Deduplicate by keeping only the best match per unique unicode range
+        let mut seen_ranges = Vec::new();
+        let mut deduplicated = Vec::new();
+        
+        for (id, _, _, pattern) in candidates {
+            let mut is_new_range = false;
+            
+            for range in &pattern.unicode_ranges {
+                if !seen_ranges.iter().any(|r: &UnicodeRange| r.overlaps(range)) {
+                    seen_ranges.push(*range);
+                    is_new_range = true;
                 }
+            }
+            
+            if is_new_range {
+                deduplicated.push(id);
             }
         }
         
-        fallbacks
+        deduplicated
     }
 
     /// Queries a font from the in-memory `font -> file` mapping, returns the first found font (early return)
-    pub fn query(
-        &self, 
-        pattern: &FcPattern,
-        trace: &mut Vec<TraceMsg>
-    ) -> Option<FontMatch> {
+    pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
+        let mut matches = Vec::new();
+        
         for (k, v) in &self.map {
             if Self::query_matches_internal(k, pattern, trace) {
-                // Get UUID for this font
                 let id = *self.id_map.iter()
                     .find(|(_, path)| *path == v)
                     .map(|(id, _)| id)
-                    .unwrap_or_else(|| {
-                        trace.push(TraceMsg {
-                            level: TraceLevel::Error,
-                            path: v.path.clone(),
-                            reason: MatchReason::Success, // We found a match but no UUID
-                        });
-                        // Should never happen, but use a fallback if it does
-                        &FontId(0)
-                    });
-                
-                // Find fallbacks for this font
-                let fallbacks = self.find_fallbacks(k, trace);
-                
-                return Some(FontMatch {
-                    id,
-                    unicode_ranges: k.unicode_ranges.clone(),
-                    fallbacks,
-                });
+                    .unwrap_or(&FontId(0));
+                    
+                let coverage = Self::calculate_unicode_coverage(&k.unicode_ranges);
+                matches.push((id, coverage, k.clone()));
             }
         }
         
-        None
+        // Sort by unicode coverage (highest first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        matches.first().map(|(id, _, k)| {
+            // Find fallbacks for this font
+            let fallbacks = self.find_fallbacks(k, trace);
+            
+            FontMatch {
+                id: *id,
+                unicode_ranges: k.unicode_ranges.clone(),
+                fallbacks,
+            }
+        })
     }
     
+    /// Queries a font from the in-memory `font -> file` mapping, returns all matching fonts
+    pub fn query_all(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Vec<FontMatch> {
+        let mut matches = Vec::new();
+        
+        for (k, v) in &self.map {
+            if Self::query_matches_internal(k, pattern, trace) {
+                let id = *self.id_map.iter()
+                    .find(|(_, path)| *path == v)
+                    .map(|(id, _)| id)
+                    .unwrap_or(&FontId(0));
+                
+                let coverage = Self::calculate_unicode_coverage(&k.unicode_ranges);
+                matches.push((id, coverage, k.clone()));
+            }
+        }
+        
+        // Sort by unicode coverage (highest first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        matches.into_iter()
+            .map(|(id, _, k)| {
+                let fallbacks = self.find_fallbacks(&k, trace);
+                
+                FontMatch {
+                    id,
+                    unicode_ranges: k.unicode_ranges.clone(),
+                    fallbacks,
+                }
+            })
+            .collect()
+    }
+
     /// Find fonts that can render the given text, considering Unicode ranges
     pub fn query_for_text(
         &self, 
@@ -1105,10 +1139,18 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
                         metadata.preferred_family = get_name_string(&name_data, NAME_ID_PREFERRED_FAMILY);
                         metadata.preferred_subfamily = get_name_string(&name_data, NAME_ID_PREFERRED_SUBFAMILY);
 
+                        let mut name = String::from_utf8_lossy(name.to_bytes()).to_string();
+                        let mut family = String::from_utf8_lossy(family.as_bytes()).to_string();
+                        if name.starts_with(".") {
+                            name = name[1..].to_string();
+                        }
+                        if family.starts_with(".") {
+                            family = family[1..].to_string();
+                        }
                         Some((
                             FcPattern {
-                                name: Some(String::from_utf8_lossy(name.to_bytes()).to_string()),
-                                family: Some(String::from_utf8_lossy(family.as_bytes()).to_string()),
+                                name: Some(name),
+                                family: Some(family),
                                 bold: if is_bold {
                                     PatternMatch::True
                                 } else {

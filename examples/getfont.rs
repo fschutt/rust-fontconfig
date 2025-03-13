@@ -14,5 +14,6 @@ fn main() {
     let end2 = Instant::now();
 
     println!("built cache in: {:?}", end - start);
-    println!("font results: {:?} - queried in {:?}", results, end2 - start2);
+    println!("queried in {:?}", end2 - start2);
+    println!("font results: {results:#?} - ");
 }

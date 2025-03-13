@@ -5,7 +5,7 @@ fn main() {
     let cache = FcFontCache::build();
     println!("cache built!");
     let list = cache.list();
-    println!("{} fonts: {:#?}", list.len(), list);
+    println!("{} fonts:", list.len());
     let fonts = cache.query_all(&FcPattern {
         monospace: PatternMatch::True,
         ..Default::default()
@@ -13,7 +13,7 @@ fn main() {
 
     println!("total fonts: {}", fonts.len());
 
-    for font in fonts {
-        println!("{:?}", font);
+    if let Some(first) = fonts.first() {
+        println!("MATCH: {:#?}", first);
     }
 }
