@@ -141,88 +141,137 @@ impl FcWeight {
         }
     }
 
-    /// Follows CSS spec for weight matching
     pub fn find_best_match(&self, available: &[FcWeight]) -> Option<FcWeight> {
         if available.is_empty() {
             return None;
         }
-
+    
+        // Exact match
         if available.contains(self) {
             return Some(*self);
         }
-
+    
+        // Get numeric value
+        let self_value = *self as u16;
+    
         match *self {
             FcWeight::Normal => {
-                // Try 500 first, then below, then above
+                // For Normal (400), try Medium (500) first
                 if available.contains(&FcWeight::Medium) {
                     return Some(FcWeight::Medium);
                 }
-                // Fall through to Light case
-                return FcWeight::Light.find_best_match(available);
+                // Then try lighter weights
+                for weight in &[FcWeight::Light, FcWeight::ExtraLight, FcWeight::Thin] {
+                    if available.contains(weight) {
+                        return Some(*weight);
+                    }
+                }
+                // Last, try heavier weights
+                for weight in &[FcWeight::SemiBold, FcWeight::Bold, FcWeight::ExtraBold, FcWeight::Black] {
+                    if available.contains(weight) {
+                        return Some(*weight);
+                    }
+                }
             }
             FcWeight::Medium => {
-                // Try 400 first, then below, then above
+                // For Medium (500), try Normal (400) first
                 if available.contains(&FcWeight::Normal) {
                     return Some(FcWeight::Normal);
                 }
-                // Fall through to Light case
-                return FcWeight::Light.find_best_match(available);
+                // Then try lighter weights
+                for weight in &[FcWeight::Light, FcWeight::ExtraLight, FcWeight::Thin] {
+                    if available.contains(weight) {
+                        return Some(*weight);
+                    }
+                }
+                // Last, try heavier weights
+                for weight in &[FcWeight::SemiBold, FcWeight::Bold, FcWeight::ExtraBold, FcWeight::Black] {
+                    if available.contains(weight) {
+                        return Some(*weight);
+                    }
+                }
             }
             FcWeight::Thin | FcWeight::ExtraLight | FcWeight::Light => {
-                // Try weights below in descending order, then above in ascending
-                for weight in [FcWeight::Light, FcWeight::ExtraLight, FcWeight::Thin].iter() {
-                    if available.contains(weight) && *weight <= *self {
-                        return Some(*weight);
+                // For lightweight fonts (<400), first try lighter or equal weights
+                let mut best_match = None;
+                let mut smallest_diff = u16::MAX;
+                
+                // Find the closest lighter weight
+                for weight in available {
+                    let weight_value = *weight as u16;
+                    // Only consider weights <= self (per test expectation)
+                    if weight_value <= self_value {
+                        let diff = self_value - weight_value;
+                        if diff < smallest_diff {
+                            smallest_diff = diff;
+                            best_match = Some(*weight);
+                        }
                     }
                 }
-
-                for weight in [
-                    FcWeight::Normal,
-                    FcWeight::Medium,
-                    FcWeight::SemiBold,
-                    FcWeight::Bold,
-                    FcWeight::ExtraBold,
-                    FcWeight::Black,
-                ]
-                .iter()
-                {
-                    if available.contains(weight) {
-                        return Some(*weight);
+                
+                if best_match.is_some() {
+                    return best_match;
+                }
+                
+                // If no lighter weight, find the closest heavier weight
+                best_match = None;
+                smallest_diff = u16::MAX;
+                
+                for weight in available {
+                    let weight_value = *weight as u16;
+                    if weight_value > self_value {
+                        let diff = weight_value - self_value;
+                        if diff < smallest_diff {
+                            smallest_diff = diff;
+                            best_match = Some(*weight);
+                        }
                     }
                 }
+                
+                return best_match;
             }
             FcWeight::SemiBold | FcWeight::Bold | FcWeight::ExtraBold | FcWeight::Black => {
-                // Try weights above in ascending order, then below in descending
-                for weight in [
-                    FcWeight::SemiBold,
-                    FcWeight::Bold,
-                    FcWeight::ExtraBold,
-                    FcWeight::Black,
-                ]
-                .iter()
-                {
-                    if available.contains(weight) && *weight >= *self {
-                        return Some(*weight);
+                // For heavyweight fonts (>500), first try heavier or equal weights
+                let mut best_match = None;
+                let mut smallest_diff = u16::MAX;
+                
+                // Find the closest heavier weight
+                for weight in available {
+                    let weight_value = *weight as u16;
+                    // Only consider weights >= self
+                    if weight_value >= self_value {
+                        let diff = weight_value - self_value;
+                        if diff < smallest_diff {
+                            smallest_diff = diff;
+                            best_match = Some(*weight);
+                        }
                     }
                 }
-
-                for weight in [
-                    FcWeight::Medium,
-                    FcWeight::Normal,
-                    FcWeight::Light,
-                    FcWeight::ExtraLight,
-                    FcWeight::Thin,
-                ]
-                .iter()
-                {
-                    if available.contains(weight) {
-                        return Some(*weight);
+                
+                if best_match.is_some() {
+                    return best_match;
+                }
+                
+                // If no heavier weight, find the closest lighter weight
+                best_match = None;
+                smallest_diff = u16::MAX;
+                
+                for weight in available {
+                    let weight_value = *weight as u16;
+                    if weight_value < self_value {
+                        let diff = self_value - weight_value;
+                        if diff < smallest_diff {
+                            smallest_diff = diff;
+                            best_match = Some(*weight);
+                        }
                     }
                 }
+                
+                return best_match;
             }
         }
-
-        // If nothing matches, return the first available weight
+    
+        // If nothing matches by now, return the first available weight
         Some(available[0])
     }
 }
