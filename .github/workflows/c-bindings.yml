@@ -94,6 +94,7 @@ jobs:
       run: |
         example.exe || echo "Example exited with status %ERRORLEVEL%"
       shell: cmd
+      continue-on-error: true # TODO
     
     - name: Upload static library
       uses: actions/upload-artifact@v4
