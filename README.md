@@ -48,7 +48,13 @@ fn main() {
         &mut Vec::new() // Trace messages container
     );
     
-    println!("font match: {:?}", results);
+    if let Some(font_match) = results {
+        println!("Font match ID: {:?}", font_match.id);
+        println!("Font unicode ranges: {:?}", font_match.unicode_ranges);
+        println!("Font fallbacks: {:?}", font_match.fallbacks.len());
+    } else {
+        println!("No matching font found");
+    }
 }
 ```
 
@@ -69,7 +75,7 @@ fn main() {
 
     println!("Found {} monospace fonts:", fonts.len());
     for font in fonts {
-        println!("{:?}", font);
+        println!("Font ID: {:?}", font.id);
     }
 }
 ```
@@ -92,6 +98,9 @@ fn main() {
     );
     
     println!("Found {} fonts for the multilingual text", matched_fonts.len());
+    for font in matched_fonts {
+        println!("Font ID: {:?}", font.id);
+    }
 }
 ```
 
