@@ -1,5 +1,5 @@
 /**
- * @file rust-fontconfig.h
+ * @file rust_fontconfig.h
  * @brief C API for rust-fontconfig
  */
 
@@ -310,6 +310,11 @@
  
  /**
   * Create a new in-memory font
+  * @param bytes The font file data (will be copied)
+  * @param bytes_len Length of the font data
+  * @param font_index Index of the font in a collection (0 for single fonts)
+  * @param id Unique identifier for the font
+  * @return A new font object or NULL on error
   */
  FcFont* fc_font_new(const uint8_t* bytes, size_t bytes_len, size_t font_index, const char* id);
  
