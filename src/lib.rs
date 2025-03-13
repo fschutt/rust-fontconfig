@@ -1,5 +1,85 @@
-//! Library for getting and matching system fonts with
-//! minimal dependencies
+//! # rust-fontconfig
+//! 
+//! Pure-Rust rewrite of the Linux fontconfig library (no system dependencies) - using allsorts as a font parser to support `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf`
+//! 
+//! **NOTE**: Also works on Windows, macOS and WASM - without external dependencies!
+//! 
+//! ## Usage
+//! 
+//! ### Basic Font Query
+//! 
+//! ```rust
+//! use rust_fontconfig::{FcFontCache, FcPattern};
+//! 
+//! fn main() {
+//!     // Build the font cache
+//!     let cache = FcFontCache::build();
+//! 
+//!     // Query a font by name
+//!     let results = cache.query(
+//!         &FcPattern {
+//!             name: Some(String::from("Arial")),
+//!             ..Default::default()
+//!         },
+//!         &mut Vec::new() // Trace messages container
+//!     );
+//! 
+//!     if let Some(font_match) = results {
+//!         println!("Font match ID: {:?}", font_match.id);
+//!         println!("Font unicode ranges: {:?}", font_match.unicode_ranges);
+//!         println!("Font fallbacks: {:?}", font_match.fallbacks.len());
+//!     } else {
+//!         println!("No matching font found");
+//!     }
+//! }
+//! ```
+//!
+//! ### Find All Monospace Fonts
+//!
+//! ```rust
+//! use rust_fontconfig::{FcFontCache, FcPattern, PatternMatch};
+//!
+//! fn main() {
+//!     let cache = FcFontCache::build();
+//!     let fonts = cache.query_all(
+//!         &FcPattern {
+//!             monospace: PatternMatch::True,
+//!             ..Default::default()
+//!         },
+//!         &mut Vec::new()
+//!     );
+//! 
+//!     println!("Found {} monospace fonts:", fonts.len());
+//!     for font in fonts {
+//!         println!("Font ID: {:?}", font.id);
+//!     }
+//! }
+//! ```
+//! 
+//! ### Font Matching for Multilingual Text
+//! 
+//! ```rust
+//! use rust_fontconfig::{FcFontCache, FcPattern};
+//! 
+//! fn main() {
+//!     let cache = FcFontCache::build();
+//!     let text = "Hello 你好 Здравствуйте";
+//! 
+//!     // Find fonts that can render the mixed-script text
+//!     let mut trace = Vec::new();
+//!     let matched_fonts = cache.query_for_text(
+//!         &FcPattern::default(),
+//!         text,
+//!         &mut trace
+//!     );
+//! 
+//!     println!("Found {} fonts for the multilingual text", matched_fonts.len());
+//!     for font in matched_fonts {
+//!         println!("Font ID: {:?}", font.id);
+//!     }
+//! }
+//! ```
+
 
 #![allow(non_snake_case)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -22,8 +102,7 @@ use std::path::PathBuf;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
-/// Simple UUID generator for font match IDs
-/// Doesn't use external crates for simplicity
+/// UUID to identify a font (collections are broken up into separate fonts)
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct FontId(pub u128);
 
@@ -86,12 +165,17 @@ impl FontId {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
+/// Whether a field is required to match (yes / no / don't care)
+#[derive(Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub enum PatternMatch {
-    True,
-    False,
+    /// Default: don't particularly care whether the requirement matches
+    #[default]
     DontCare,
+    /// Requirement has to be true for the selected font
+    True,
+    /// Requirement has to be false for the selected font
+    False,
 }
 
 impl PatternMatch {
@@ -105,12 +189,6 @@ impl PatternMatch {
             (_, PatternMatch::DontCare) => true,
             (a, b) => a == b,
         }
-    }
-}
-
-impl Default for PatternMatch {
-    fn default() -> Self {
-        PatternMatch::DontCare
     }
 }
 
@@ -497,6 +575,7 @@ pub struct FcPattern {
     pub metadata: FcFontMetadata,
 }
 
+/// Font metadata from the OS/2 table
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FcFontMetadata {
     pub copyright: Option<String>,
@@ -570,10 +649,13 @@ pub struct FcFont {
 /// Font source enum to represent either disk or memory fonts
 #[derive(Debug, Clone)]
 pub enum FontSource<'a> {
+    /// Font loaded from memory
     Memory(&'a FcFont),
+    /// Font loaded from disk
     Disk(&'a FcFontPath),
 }
 
+/// Font cache, initialized at startup
 #[derive(Debug, Default, Clone)]
 pub struct FcFontCache {
     // Pattern to FontId mapping (query index)
