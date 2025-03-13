@@ -89,25 +89,25 @@ jobs:
       shell: cmd
     
     - name: Upload static library
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }}-${{ matrix.os }}
         path: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }}
     
     - name: Upload dynamic library
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }}-${{ matrix.os }}
         path: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }}
     
     - name: Upload headers
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: headers-${{ matrix.os }}
         path: include/
     
     - name: Upload C example
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: example-${{ matrix.os }}
         path: |
