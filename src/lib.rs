@@ -598,6 +598,14 @@ impl FcFontCache {
         self
     }
 
+    /// Adds a memory font with a specific ID (for testing)
+    pub fn with_memory_font_with_id(&mut self, id: FontId, pattern: FcPattern, font: FcFont) -> &mut Self {
+        self.patterns.insert(pattern.clone(), id);
+        self.metadata.insert(id, pattern);
+        self.memory_fonts.insert(id, font);
+        self
+    }
+    
     /// Get font data for a given font ID
     pub fn get_font_by_id(&self, id: &FontId) -> Option<FontSource> {
         // Check memory fonts first
