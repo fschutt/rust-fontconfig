@@ -69,12 +69,14 @@ jobs:
     
     - name: Set LD_LIBRARY_PATH (Linux)
       if: matrix.os == 'ubuntu-latest'
-      run: export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH
-      
+      run: |
+        echo "LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH" >> $GITHUB_ENV
+    
     - name: Set DYLD_LIBRARY_PATH (macOS)
       if: matrix.os == 'macos-latest'
-      run: export DYLD_LIBRARY_PATH=.:$DYLD_LIBRARY_PATH
-    
+      run: echo "DYLD_LIBRARY_PATH=$(pwd):$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+      shell: bash
+
     - name: Run C example (Unix-like)
       if: matrix.os != 'windows-latest'
       run: |
