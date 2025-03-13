@@ -7,10 +7,13 @@ fn main() {
     let end = Instant::now();
 
     let start2 = Instant::now();
-    let results = cache.query(&FcPattern {
-        name: Some(String::from("Gilroy")),
-        ..Default::default()
-    }, &mut Vec::new());
+    let results = cache.query(
+        &FcPattern {
+            name: Some(String::from("Gilroy")),
+            ..Default::default()
+        },
+        &mut Vec::new(),
+    );
     let end2 = Instant::now();
 
     println!("built cache in: {:?}", end - start);

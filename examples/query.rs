@@ -6,10 +6,13 @@ fn main() {
     println!("cache built!");
     let list = cache.list();
     println!("{} fonts:", list.len());
-    let fonts = cache.query_all(&FcPattern {
-        monospace: PatternMatch::True,
-        ..Default::default()
-    }, &mut Vec::new());
+    let fonts = cache.query_all(
+        &FcPattern {
+            monospace: PatternMatch::True,
+            ..Default::default()
+        },
+        &mut Vec::new(),
+    );
 
     println!("total fonts: {}", fonts.len());
 
