@@ -10,9 +10,15 @@ extern crate alloc;
 mod tests;
 
 use alloc::collections::btree_map::BTreeMap;
-use alloc::string::String;
+use alloc::string::{ToString, String};
 use alloc::vec::Vec;
 use alloc::borrow::ToOwned;
+use alloc::{format, vec};
+use allsorts_subset_browser::binary::read::ReadScope;
+use allsorts_subset_browser::get_name::fontcode_get_name;
+use allsorts_subset_browser::tables::os2::Os2;
+use allsorts_subset_browser::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
+use allsorts_subset_browser::tag;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
@@ -370,6 +376,29 @@ pub struct FcPattern {
     pub stretch: FcStretch,
     // unicode ranges to match
     pub unicode_ranges: Vec<UnicodeRange>,
+    // extended font metadata
+    pub metadata: FcFontMetadata,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FcFontMetadata {
+    pub copyright: Option<String>,
+    pub designer: Option<String>,
+    pub designer_url: Option<String>,
+    pub font_family: Option<String>,
+    pub font_subfamily: Option<String>,
+    pub full_name: Option<String>,
+    pub id_description: Option<String>,
+    pub license: Option<String>,
+    pub license_url: Option<String>,
+    pub manufacturer: Option<String>,
+    pub manufacturer_url: Option<String>,
+    pub postscript_name: Option<String>,
+    pub preferred_family: Option<String>,
+    pub preferred_subfamily: Option<String>,
+    pub trademark: Option<String>,
+    pub unique_id: Option<String>,
+    pub version: Option<String>,
 }
 
 impl FcPattern {
@@ -503,8 +532,8 @@ impl FcFontCache {
             
             let mut cache = FcFontCache {
                 map: FcScanDirectoriesInner(&font_dirs)
-                    .into_iter()
-                    .collect(),
+                .into_iter()
+                .collect(),
                 memory_fonts: BTreeMap::new(),
                 id_map: BTreeMap::new(),
             };
@@ -897,14 +926,26 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
     #[cfg(not(all(not(target_family = "wasm"), feature = "std")))]
     let font_bytes = std::fs::read(filepath).ok()?;
     
+    let max_fonts = if font_bytes.len() >= 12 && &font_bytes[0..4] == b"ttcf" {
+        // Read numFonts from TTC header (offset 8, 4 bytes)
+        let num_fonts = u32::from_be_bytes([
+            font_bytes[8], font_bytes[9], font_bytes[10], font_bytes[11]
+        ]);
+        // Cap at a reasonable maximum as a safety measure
+        std::cmp::min(num_fonts as usize, 100)
+    } else {
+        // Not a collection, just one font
+        1
+    };
+
     let scope = ReadScope::new(&font_bytes[..]);
     let font_file = scope.read::<FontData<'_>>().ok()?;
     
     // Handle collections properly by iterating through all fonts
     let mut results = Vec::new();
-    let mut font_index = 0;
-    while let Some(provider) = font_file.table_provider(font_index).ok() {
-        font_index += 1;
+
+    for font_index in 0..max_fonts {
+        let provider = font_file.table_provider(font_index).ok()?;
         let head_data = provider.table_data(tag::HEAD).ok()??.into_owned();
         let head_table = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
 
@@ -1023,6 +1064,47 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
                     if name.to_bytes().is_empty() {
                         None
                     } else {
+
+                        // Initialize metadata structure
+                        let mut metadata = FcFontMetadata::default();
+                        
+                        const NAME_ID_COPYRIGHT: u16 = 0;
+                        const NAME_ID_FAMILY: u16 = 1;
+                        const NAME_ID_SUBFAMILY: u16 = 2;
+                        const NAME_ID_UNIQUE_ID: u16 = 3;
+                        const NAME_ID_FULL_NAME: u16 = 4;
+                        const NAME_ID_VERSION: u16 = 5;
+                        const NAME_ID_POSTSCRIPT_NAME: u16 = 6;
+                        const NAME_ID_TRADEMARK: u16 = 7;
+                        const NAME_ID_MANUFACTURER: u16 = 8;
+                        const NAME_ID_DESIGNER: u16 = 9;
+                        const NAME_ID_DESCRIPTION: u16 = 10;
+                        const NAME_ID_VENDOR_URL: u16 = 11;
+                        const NAME_ID_DESIGNER_URL: u16 = 12;
+                        const NAME_ID_LICENSE: u16 = 13;
+                        const NAME_ID_LICENSE_URL: u16 = 14;
+                        const NAME_ID_PREFERRED_FAMILY: u16 = 16;
+                        const NAME_ID_PREFERRED_SUBFAMILY: u16 = 17;
+
+                        // Extract metadata from name table
+                        metadata.copyright = get_name_string(&name_data, NAME_ID_COPYRIGHT);
+                        metadata.font_family = get_name_string(&name_data, NAME_ID_FAMILY);
+                        metadata.font_subfamily = get_name_string(&name_data, NAME_ID_SUBFAMILY);
+                        metadata.full_name = get_name_string(&name_data, NAME_ID_FULL_NAME);
+                        metadata.unique_id = get_name_string(&name_data, NAME_ID_UNIQUE_ID);
+                        metadata.version = get_name_string(&name_data, NAME_ID_VERSION);
+                        metadata.postscript_name = get_name_string(&name_data, NAME_ID_POSTSCRIPT_NAME);
+                        metadata.trademark = get_name_string(&name_data, NAME_ID_TRADEMARK);
+                        metadata.manufacturer = get_name_string(&name_data, NAME_ID_MANUFACTURER);
+                        metadata.designer = get_name_string(&name_data, NAME_ID_DESIGNER);
+                        metadata.id_description = get_name_string(&name_data, NAME_ID_DESCRIPTION);
+                        metadata.designer_url = get_name_string(&name_data, NAME_ID_DESIGNER_URL);
+                        metadata.manufacturer_url = get_name_string(&name_data, NAME_ID_VENDOR_URL);
+                        metadata.license = get_name_string(&name_data, NAME_ID_LICENSE);
+                        metadata.license_url = get_name_string(&name_data, NAME_ID_LICENSE_URL);
+                        metadata.preferred_family = get_name_string(&name_data, NAME_ID_PREFERRED_FAMILY);
+                        metadata.preferred_subfamily = get_name_string(&name_data, NAME_ID_PREFERRED_SUBFAMILY);
+
                         Some((
                             FcPattern {
                                 name: Some(String::from_utf8_lossy(name.to_bytes()).to_string()),
@@ -1055,6 +1137,7 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
                                 weight,
                                 stretch,
                                 unicode_ranges: unicode_ranges.clone(),
+                                metadata,
                             },
                             font_index,
                         ))
@@ -1081,9 +1164,9 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
     }
     
     if results.is_empty() {
-        Some(results)
-    } else {
         None
+    } else {
+        Some(results)
     }
 }
 
@@ -1123,6 +1206,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> {
+
     let mut files_to_parse = Vec::new();
     let mut dirs_to_parse = vec![dir];
 
@@ -1265,4 +1349,93 @@ fn process_path(
         }
         None => Some(path),
     }
+}
+
+// Helper function to extract a string from the name table
+fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
+    fontcode_get_name(name_data, name_id)
+        .ok()
+        .flatten()
+        .map(|name| String::from_utf8_lossy(name.to_bytes()).to_string())
+}
+
+// Helper function to extract unicode ranges
+fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
+    let mut unicode_ranges = Vec::new();
+    
+    // Process the 4 Unicode range bitfields from OS/2 table
+    let ranges = [
+        os2_table.ul_unicode_range1,
+        os2_table.ul_unicode_range2,
+        os2_table.ul_unicode_range3,
+        os2_table.ul_unicode_range4,
+    ];
+    
+    // Unicode range bit positions to actual ranges
+    // Based on OpenType spec
+    let range_mappings = [
+        (0, 0x0000, 0x007F),   // Basic Latin
+        (1, 0x0080, 0x00FF),   // Latin-1 Supplement
+        (2, 0x0100, 0x017F),   // Latin Extended-A
+        (7, 0x0370, 0x03FF),   // Greek and Coptic
+        (9, 0x0400, 0x04FF),   // Cyrillic
+        (29, 0x2000, 0x206F),  // General Punctuation
+        (57, 0x4E00, 0x9FFF),  // CJK Unified Ideographs
+        // Add more ranges as needed
+    ];
+    
+    for (bit, start, end) in &range_mappings {
+        let range_idx = bit / 32;
+        let bit_pos = bit % 32;
+        
+        if range_idx < 4 && (ranges[range_idx] & (1 << bit_pos)) != 0 {
+            unicode_ranges.push(UnicodeRange { start: *start, end: *end });
+        }
+    }
+    
+    unicode_ranges
+}
+
+// Helper function to detect if a font is monospace
+fn detect_monospace(
+    provider: &impl FontTableProvider,
+    os2_table: &Os2,
+    detected_monospace: Option<bool>
+) -> Option<bool> {
+    if let Some(is_monospace) = detected_monospace {
+        return Some(is_monospace);
+    }
+
+    // Try using PANOSE classification
+    if os2_table.panose[0] == 2 { // 2 = Latin Text
+        return Some(os2_table.panose[3] == 9); // 9 = Monospaced
+    }
+    
+    // Check glyph widths in hmtx table
+    let hhea_data = provider.table_data(tag::HHEA).ok()??;
+    let hhea_table = ReadScope::new(&hhea_data).read::<HheaTable>().ok()?;
+    let maxp_data = provider.table_data(tag::MAXP).ok()??;
+    let maxp_table = ReadScope::new(&maxp_data).read::<MaxpTable>().ok()?;
+    let hmtx_data = provider.table_data(tag::HMTX).ok()??;
+    let hmtx_table = ReadScope::new(&hmtx_data)
+        .read_dep::<HmtxTable<'_>>((
+            usize::from(maxp_table.num_glyphs),
+            usize::from(hhea_table.num_h_metrics),
+        ))
+        .ok()?;
+
+    let mut monospace = true;
+    let mut last_advance = 0;
+    
+    // Check if all advance widths are the same
+    for i in 0..hhea_table.num_h_metrics as usize {
+        let advance = hmtx_table.h_metrics.read_item(i).ok()?.advance_width;
+        if i > 0 && advance != last_advance {
+            monospace = false;
+            break;
+        }
+        last_advance = advance;
+    }
+
+    Some(monospace)
 }
