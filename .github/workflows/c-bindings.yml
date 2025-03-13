@@ -84,7 +84,7 @@ jobs:
     - name: Run C example (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        .\example.exe || echo "Example exited with status %ERRORLEVEL%"
+        example.exe || echo "Example exited with status %ERRORLEVEL%"
       shell: cmd
     
     - name: Upload static library
