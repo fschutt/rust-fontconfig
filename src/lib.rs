@@ -1258,10 +1258,6 @@ impl FcFontCache {
     }
 
     fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> i32 {
-        println!(
-            "calculating score between original {:#?} and candidate {:#?}",
-            original, candidate
-        );
 
         let mut score = 0_i32;
 
@@ -1313,7 +1309,6 @@ impl FcFontCache {
             }
         }
 
-        println!("score = {}", score);
         score
     }
 }
