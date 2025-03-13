@@ -19,6 +19,9 @@ use allsorts_subset_browser::tag;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 /// Simple UUID generator for font match IDs
 /// Doesn't use external crates for simplicity
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
@@ -83,7 +86,7 @@ impl FontId {
     }
 }
 
-#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub enum PatternMatch {
     True,
@@ -883,7 +886,7 @@ impl FcFontCache {
     fn find_fallbacks(
         &self,
         pattern: &FcPattern,
-        trace: &mut Vec<TraceMsg>,
+        _trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatchNoFallback> {
         let mut candidates = Vec::new();
 

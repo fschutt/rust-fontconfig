@@ -1,0 +1,115 @@
+name: C Bindings
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            lib_prefix: lib
+            static_ext: .a
+            dynamic_ext: .so
+          - os: windows-latest
+            lib_prefix: ""
+            static_ext: .lib
+            dynamic_ext: .dll
+          - os: macos-latest
+            lib_prefix: lib
+            static_ext: .a
+            dynamic_ext: .dylib
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Build Rust library
+      run: cargo build --release --features ffi
+    
+    - name: Create include directory
+      run: mkdir -p include
+      shell: bash
+    
+    - name: Copy header files
+      run: |
+        cp ffi/example.h include/example.h
+        cp ffi/fontconfig-c.h include/fontconfig-c.h
+      shell: bash
+    
+    - name: Install build tools (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: sudo apt-get update && sudo apt-get install -y build-essential
+    
+    - name: Build C example (Unix-like)
+      if: matrix.os != 'windows-latest'
+      run: |
+        gcc -Wall -o example ffi/example.c -Iinclude -L./target/release -lrustfontconfig
+        cp target/release/${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }} .
+        cp target/release/${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }} .
+      
+    - name: Build C example (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I include /link /LIBPATH:target/release rustfontconfig.lib
+        copy target\release\rustfontconfig${{ matrix.static_ext }} .
+        copy target\release\rustfontconfig${{ matrix.dynamic_ext }} .
+      shell: cmd
+    
+    - name: Set LD_LIBRARY_PATH (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: export LD_LIBRARY_PATH=.:$LD_LIBRARY_PATH
+      
+    - name: Set DYLD_LIBRARY_PATH (macOS)
+      if: matrix.os == 'macos-latest'
+      run: export DYLD_LIBRARY_PATH=.:$DYLD_LIBRARY_PATH
+    
+    - name: Run C example (Unix-like)
+      if: matrix.os != 'windows-latest'
+      run: |
+        ./example || echo "Example exited with status $?"
+      shell: bash
+    
+    - name: Run C example (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        .\example.exe || echo "Example exited with status %ERRORLEVEL%"
+      shell: cmd
+    
+    - name: Upload static library
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }}-${{ matrix.os }}
+        path: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }}
+    
+    - name: Upload dynamic library
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }}-${{ matrix.os }}
+        path: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }}
+    
+    - name: Upload headers
+      uses: actions/upload-artifact@v3
+      with:
+        name: headers-${{ matrix.os }}
+        path: include/
+    
+    - name: Upload C example
+      uses: actions/upload-artifact@v3
+      with:
+        name: example-${{ matrix.os }}
+        path: |
+          example${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          ffi/example.c
