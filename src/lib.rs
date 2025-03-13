@@ -1,20 +1,20 @@
 //! # rust-fontconfig
-//! 
+//!
 //! Pure-Rust rewrite of the Linux fontconfig library (no system dependencies) - using allsorts as a font parser to support `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf`
-//! 
+//!
 //! **NOTE**: Also works on Windows, macOS and WASM - without external dependencies!
-//! 
+//!
 //! ## Usage
-//! 
+//!
 //! ### Basic Font Query
-//! 
+//!
 //! ```rust
 //! use rust_fontconfig::{FcFontCache, FcPattern};
-//! 
+//!
 //! fn main() {
 //!     // Build the font cache
 //!     let cache = FcFontCache::build();
-//! 
+//!
 //!     // Query a font by name
 //!     let results = cache.query(
 //!         &FcPattern {
@@ -23,7 +23,7 @@
 //!         },
 //!         &mut Vec::new() // Trace messages container
 //!     );
-//! 
+//!
 //!     if let Some(font_match) = results {
 //!         println!("Font match ID: {:?}", font_match.id);
 //!         println!("Font unicode ranges: {:?}", font_match.unicode_ranges);
@@ -48,23 +48,23 @@
 //!         },
 //!         &mut Vec::new()
 //!     );
-//! 
+//!
 //!     println!("Found {} monospace fonts:", fonts.len());
 //!     for font in fonts {
 //!         println!("Font ID: {:?}", font.id);
 //!     }
 //! }
 //! ```
-//! 
+//!
 //! ### Font Matching for Multilingual Text
-//! 
+//!
 //! ```rust
 //! use rust_fontconfig::{FcFontCache, FcPattern};
-//! 
+//!
 //! fn main() {
 //!     let cache = FcFontCache::build();
 //!     let text = "Hello 你好 Здравствуйте";
-//! 
+//!
 //!     // Find fonts that can render the mixed-script text
 //!     let mut trace = Vec::new();
 //!     let matched_fonts = cache.query_for_text(
@@ -72,14 +72,13 @@
 //!         text,
 //!         &mut trace
 //!     );
-//! 
+//!
 //!     println!("Found {} fonts for the multilingual text", matched_fonts.len());
 //!     for font in matched_fonts {
 //!         println!("Font ID: {:?}", font.id);
 //!     }
 //! }
 //! ```
-
 
 #![allow(non_snake_case)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -681,13 +680,18 @@ impl FcFontCache {
     }
 
     /// Adds a memory font with a specific ID (for testing)
-    pub fn with_memory_font_with_id(&mut self, id: FontId, pattern: FcPattern, font: FcFont) -> &mut Self {
+    pub fn with_memory_font_with_id(
+        &mut self,
+        id: FontId,
+        pattern: FcPattern,
+        font: FcFont,
+    ) -> &mut Self {
         self.patterns.insert(pattern.clone(), id);
         self.metadata.insert(id, pattern);
         self.memory_fonts.insert(id, font);
         self
     }
-    
+
     /// Get font data for a given font ID
     pub fn get_font_by_id(&self, id: &FontId) -> Option<FontSource> {
         // Check memory fonts first
@@ -799,8 +803,10 @@ impl FcFontCache {
             }
         }
 
-        // Sort by unicode coverage (highest first), then by style score (lowest first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        println!("initial matches: {:#?}", matches);
+
+        // Sort by style score (lowest first), then by unicode coverage (highest first)
+        matches.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
 
         matches.first().map(|(id, _, _, metadata)| {
             // Find fallbacks for this font
@@ -827,8 +833,8 @@ impl FcFontCache {
             }
         }
 
-        // Sort by unicode coverage (highest first), then by style score (lowest first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        // Sort by style score (lowest first), then by unicode coverage (highest first)
+        matches.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
 
         matches
             .into_iter()
@@ -885,8 +891,8 @@ impl FcFontCache {
             }
         }
 
-        // Sort by coverage (highest first), then by style score (lowest first)
-        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        // Sort by style score (lowest first), then by coverage (highest first)
+        candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
 
         // Deduplicate by keeping only the best match per unique unicode range
         let mut seen_ranges = Vec::new();
@@ -1187,6 +1193,10 @@ impl FcFontCache {
 
     // Calculate CSS style matching score (lower is better)
     fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> u32 {
+        println!(
+            "calculating score between original {:#?} and candidate {:#?}",
+            original, candidate
+        );
         let mut score = 0;
 
         // Weight difference (0-800)
@@ -1238,6 +1248,7 @@ impl FcFontCache {
             }
         }
 
+        println!("score = {}", score);
         score
     }
 }
