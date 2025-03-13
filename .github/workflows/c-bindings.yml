@@ -45,8 +45,7 @@ jobs:
     
     - name: Copy header files
       run: |
-        cp ffi/example.h include/example.h
-        cp ffi/fontconfig-c.h include/fontconfig-c.h
+        cp ffi/rust_fontconfig.h include/rust_fontconfig.h
       shell: bash
     
     - name: Install build tools (Ubuntu)
