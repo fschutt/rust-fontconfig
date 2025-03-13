@@ -2,7 +2,7 @@
 
 Pure-Rust rewrite of the Linux fontconfig library (no system dependencies) - using allsorts as a font parser to support `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf`
 
-**NOTE**: Also works on Windows and macOS - without external dependencies!
+**NOTE**: Also works on Windows, macOS and WASM - without external dependencies!
 
 ## Motivation
 
@@ -17,8 +17,8 @@ There are a number of reasons why I want to have a pure-Rust version of fontconf
 - Font parsing / loading can be easily multithreaded (parsing font files in parallel)
 - It reduces the number of necessary non-Rust dependencies on Linux for azul to 0
 - fontconfig (or at least the Rust bindings) do not allow you to store an in-memory cache, only an on-disk cache, requiring disk access on every query (= slow)
-- Potential `no_std` support for minimal binaries?
-
+- `no_std` support ("bring your own font files") for WASM
+ 
 Now for the more practical reasons:
 
 - libfontconfig 0.12.x sometimes hangs and crashes ([see issue](https://github.com/maps4print/azul/issues/110))
