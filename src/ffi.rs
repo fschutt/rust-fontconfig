@@ -1015,3 +1015,165 @@ pub extern "C" fn fc_font_id_to_string(
         true
     }
 }
+
+/// Font info for listing fonts
+#[repr(C)]
+pub struct FcFontInfoC {
+    id: FcFontIdC,
+    name: *mut c_char,
+    family: *mut c_char,
+}
+
+/// Get all available fonts in the cache
+#[no_mangle]
+pub extern "C" fn fc_cache_list_fonts(
+    cache: *const FcFontCache,
+    count: *mut usize,
+) -> *mut FcFontInfoC {
+    if cache.is_null() || count.is_null() {
+        return ptr::null_mut();
+    }
+    
+    unsafe {
+        let cache = &*cache;
+        let font_map = cache.list();
+        
+        if font_map.is_empty() {
+            *count = 0;
+            return ptr::null_mut();
+        }
+        
+        let mut font_info = Vec::with_capacity(font_map.len());
+        
+        for (pattern, path) in font_map {
+            let id = match cache
+                .id_map
+                .iter()
+                .find(|(_, p)| *p == path)
+                .map(|(id, _)| *id) {
+                    Some(id) => id,
+                    None => continue, // Skip if ID not found
+                };
+            
+            let name = option_string_to_c_char(pattern.name.as_ref());
+            let family = option_string_to_c_char(pattern.family.as_ref());
+            
+            font_info.push(FcFontInfoC {
+                id: FcFontIdC::from_fontid(&id),
+                name,
+                family,
+            });
+        }
+        
+        *count = font_info.len();
+        let ptr = font_info.as_mut_ptr();
+        mem::forget(font_info);
+        
+        ptr
+    }
+}
+
+/// Free array of font info
+#[no_mangle]
+pub extern "C" fn fc_font_info_free(
+    info: *mut FcFontInfoC,
+    count: usize,
+) {
+    if info.is_null() || count == 0 {
+        return;
+    }
+    
+    unsafe {
+        let info_slice = slice::from_raw_parts_mut(info, count);
+        
+        for item in info_slice {
+            free_c_string(item.name);
+            free_c_string(item.family);
+        }
+        
+        let _ = Vec::from_raw_parts(info, count, count);
+    }
+}
+
+/// Get metadata by font ID
+#[no_mangle]
+pub extern "C" fn fc_cache_get_font_metadata(
+    cache: *const FcFontCache,
+    id: *const FcFontIdC,
+) -> *mut FcFontMetadataC {
+    if cache.is_null() || id.is_null() {
+        return ptr::null_mut();
+    }
+    
+    unsafe {
+        let cache = &*cache;
+        let id_rust = FontId::from_fontid_c(&*id);
+        
+        // Get the font path from the font ID
+        let font_path = match cache.get_font_by_id(&id_rust) {
+            Some(path) => path,
+            None => return ptr::null_mut(),
+        };
+        
+        // Find the pattern for this path
+        let pattern = match cache.map.iter().find(|(_, path_val)| **path_val == *font_path) {
+            Some((pattern, _)) => pattern,
+            None => return ptr::null_mut(),
+        };
+        
+        // Create metadata from pattern
+        let metadata = Box::new(FcFontMetadataC {
+            copyright: option_string_to_c_char(pattern.metadata.copyright.as_ref()),
+            designer: option_string_to_c_char(pattern.metadata.designer.as_ref()),
+            designer_url: option_string_to_c_char(pattern.metadata.designer_url.as_ref()),
+            font_family: option_string_to_c_char(pattern.metadata.font_family.as_ref()),
+            font_subfamily: option_string_to_c_char(pattern.metadata.font_subfamily.as_ref()),
+            full_name: option_string_to_c_char(pattern.metadata.full_name.as_ref()),
+            id_description: option_string_to_c_char(pattern.metadata.id_description.as_ref()),
+            license: option_string_to_c_char(pattern.metadata.license.as_ref()),
+            license_url: option_string_to_c_char(pattern.metadata.license_url.as_ref()),
+            manufacturer: option_string_to_c_char(pattern.metadata.manufacturer.as_ref()),
+            manufacturer_url: option_string_to_c_char(pattern.metadata.manufacturer_url.as_ref()),
+            postscript_name: option_string_to_c_char(pattern.metadata.postscript_name.as_ref()),
+            preferred_family: option_string_to_c_char(pattern.metadata.preferred_family.as_ref()),
+            preferred_subfamily: option_string_to_c_char(pattern.metadata.preferred_subfamily.as_ref()),
+            trademark: option_string_to_c_char(pattern.metadata.trademark.as_ref()),
+            unique_id: option_string_to_c_char(pattern.metadata.unique_id.as_ref()),
+            version: option_string_to_c_char(pattern.metadata.version.as_ref()),
+        });
+        
+        Box::into_raw(metadata)
+    }
+}
+
+/// Free font metadata
+#[no_mangle]
+pub extern "C" fn fc_font_metadata_free(metadata: *mut FcFontMetadataC) {
+    if metadata.is_null() {
+        return;
+    }
+    
+    unsafe {
+        let metadata = &mut *metadata;
+        
+        free_c_string(metadata.copyright);
+        free_c_string(metadata.designer);
+        free_c_string(metadata.designer_url);
+        free_c_string(metadata.font_family);
+        free_c_string(metadata.font_subfamily);
+        free_c_string(metadata.full_name);
+        free_c_string(metadata.id_description);
+        free_c_string(metadata.license);
+        free_c_string(metadata.license_url);
+        free_c_string(metadata.manufacturer);
+        free_c_string(metadata.manufacturer_url);
+        free_c_string(metadata.postscript_name);
+        free_c_string(metadata.preferred_family);
+        free_c_string(metadata.preferred_subfamily);
+        free_c_string(metadata.trademark);
+        free_c_string(metadata.unique_id);
+        free_c_string(metadata.version);
+        
+        let _ = Box::from_raw(metadata);
+    }
+}

@@ -184,6 +184,15 @@
      char* id;
  } FcFont;
  
+ /**
+  * Font info entry with ID and name
+  */
+ typedef struct {
+     FcFontId id;
+     char* name;
+     char* family;
+ } FcFontInfo;
+ 
  /** 
   * Create a new font ID
   */
@@ -341,6 +350,32 @@
   * @return true if successful
   */
  bool fc_font_id_to_string(const FcFontId* id, char* buffer, size_t buffer_size);
+ 
+ /**
+  * Get all available fonts in the cache
+  * @param cache The font cache
+  * @param count Pointer to store the number of fonts found
+  * @return Array of font information or NULL if none found (must be freed)
+  */
+ FcFontInfo* fc_cache_list_fonts(FcFontCache cache, size_t* count);
+ 
+ /**
+  * Free array of font info
+  */
+ void fc_font_info_free(FcFontInfo* info, size_t count);
+ 
+ /**
+  * Get metadata by font ID
+  * @param cache The font cache
+  * @param id The font ID
+  * @return Metadata or NULL if not found (must be freed)
+  */
+ FcFontMetadata* fc_cache_get_font_metadata(FcFontCache cache, const FcFontId* id);
+ 
+ /**
+  * Free font metadata
+  */
+ void fc_font_metadata_free(FcFontMetadata* metadata);
  
  #ifdef __cplusplus
  }
