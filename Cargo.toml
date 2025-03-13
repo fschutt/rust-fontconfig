@@ -10,6 +10,13 @@ keywords = ["fontconfig", "font-loader", "font", "system-fonts"]
 categories = ["gui"]
 readme = "README.md"
 
+[lib]
+name = "rust_fontconfig"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[build-dependencies]
+cbindgen = "0.24"
+
 [dependencies]
 xmlparser = { version = "0.13.3", default-features = false }
 rayon = { version = "1.5.0", default-features = false, optional = true }

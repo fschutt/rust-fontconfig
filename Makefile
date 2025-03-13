@@ -1,48 +1,74 @@
 CC = gcc
 CFLAGS = -Wall -Werror -g
-LDFLAGS = -L. -lrustfontconfig
+LDFLAGS = -L. -lrust_fontconfig
 RUST_FLAGS = --release --features ffi
 INCLUDE_DIR = include
+LIB_NAME = rust_fontconfig
 
-.PHONY: all clean
+# Detect OS
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Linux)
+  STATIC_EXT = .a
+  DYNAMIC_EXT = .so
+  LIB_PREFIX = lib
+endif
+ifeq ($(UNAME_S),Darwin)
+  STATIC_EXT = .a
+  DYNAMIC_EXT = .dylib
+  LIB_PREFIX = lib
+endif
+ifneq ($(findstring MINGW,$(UNAME_S)),)
+  STATIC_EXT = .lib
+  DYNAMIC_EXT = .dll
+  LIB_PREFIX = 
+endif
 
-all: librustfontconfig.a librustfontconfig.so example
+# Default target based on OS
+ifeq ($(OS),Windows_NT)
+  all: win
+else
+  ifeq ($(UNAME_S),Darwin)
+    all: mac
+  else
+    all: linux
+  endif
+endif
 
-librustfontconfig.a librustfontconfig.so: ffi.rs
+.PHONY: all clean linux mac win
+
+linux: $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) example
+
+mac: $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) example
+
+win: $(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT) example.exe
+
+# Linux build
+$(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT): src/ffi.rs
 	cargo build $(RUST_FLAGS)
-	cp target/release/librustfontconfig.a .
-	cp target/release/librustfontconfig.so .
+	cp target/release/$(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) .
+	cp target/release/$(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) .
 
-example: ffi/example.c include/fontconfig-c.h librustfontconfig.a
+# Windows build
+$(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT): src/ffi.rs
+	cargo build $(RUST_FLAGS)
+	copy target\release\$(LIB_NAME)$(STATIC_EXT) .
+	copy target\release\$(LIB_NAME)$(DYNAMIC_EXT) .
+
+# Example build - Unix
+example: ffi/example.c include/rust_fontconfig.h $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT)
 	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -o $@ $< $(LDFLAGS)
 
-include/fontconfig-c.h:
+# Example build - Windows
+example.exe: ffi/example.c include/rust_fontconfig.h $(LIB_NAME)$(STATIC_EXT)
+	cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I$(INCLUDE_DIR) /link /LIBPATH:. $(LIB_NAME)$(STATIC_EXT)
+
+# Header file
+include/rust_fontconfig.h: ffi/rust_fontconfig.h
 	mkdir -p include
-	cp ffi/fontconfig-c.h include/
+	cp ffi/rust_fontconfig.h include/
 
 clean:
-	rm -f example
-	rm -f librustfontconfig.a librustfontconfig.so
+	rm -f example example.exe
+	rm -f $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT)
+	rm -f $(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT)
 	cargo clean
-
-# Windows-specific targets
-.PHONY: win
-
-win: rustfontconfig.lib rustfontconfig.dll example.exe
-
-rustfontconfig.lib rustfontconfig.dll:
-	cargo build $(RUST_FLAGS)
-	copy target\release\rustfontconfig.lib .
-	copy target\release\rustfontconfig.dll .
-
-example.exe: ffi/example.c include/fontconfig-c.h rustfontconfig.lib
-	cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I$(INCLUDE_DIR) /link /LIBPATH:. rustfontconfig.lib
-
-# macOS-specific targets
-.PHONY: mac
-
-mac: librustfontconfig.a librustfontconfig.dylib example
-
-librustfontconfig.dylib:
-	cargo build $(RUST_FLAGS)
-	cp target/release/librustfontconfig.dylib .

@@ -2,3 +2,10 @@
 Cargo.lock
 .DS_Store
 out.txt
+/include
+example
+*.a
+*.so
+*.dll 
+*.dylib
+/example.dSYM
