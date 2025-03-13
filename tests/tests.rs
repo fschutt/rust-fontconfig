@@ -117,8 +117,6 @@ fn test_unicode_range_matching() {
     // Query for text that needs multiple fonts
     let text = "Hello Привет 你好"; // Latin, Cyrillic, and CJK
     let matches = cache.query_for_text(&FcPattern::default(), text, &mut trace);
-    println!("matches: {matches:#?}");
-    println!("trace: {trace:#?}");
     assert_eq!(
         matches.len(),
         3,

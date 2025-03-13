@@ -529,6 +529,9 @@ impl FcFontCache {
             self.map.insert(pattern, font_path);
         }
 
+        // Add this line to rebuild the ID map after adding fonts
+        self.build_id_map();
+
         self
     }
 
