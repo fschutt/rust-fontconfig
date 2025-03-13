@@ -55,16 +55,16 @@ jobs:
     - name: Build C example (Unix-like)
       if: matrix.os != 'windows-latest'
       run: |
-        gcc -Wall -o example ffi/example.c -Iinclude -L./target/release -lrustfontconfig
-        cp target/release/${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }} .
-        cp target/release/${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }} .
+        gcc -Wall -o example ffi/example.c -Iinclude -L./target/release -lrust_fontconfig
+        cp target/release/${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }} .
+        cp target/release/${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }} .
       
     - name: Build C example (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I include /link /LIBPATH:target/release rustfontconfig.lib
-        copy target\release\rustfontconfig${{ matrix.static_ext }} .
-        copy target\release\rustfontconfig${{ matrix.dynamic_ext }} .
+        cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I include /link /LIBPATH:target/release rust_fontconfig.lib
+        copy target\release\rust_fontconfig${{ matrix.static_ext }} .
+        copy target\release\rust_fontconfig${{ matrix.dynamic_ext }} .
       shell: cmd
     
     - name: Set LD_LIBRARY_PATH (Linux)
@@ -90,14 +90,14 @@ jobs:
     - name: Upload static library
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }}-${{ matrix.os }}
-        path: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.static_ext }}
+        name: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }}-${{ matrix.os }}
+        path: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }}
     
     - name: Upload dynamic library
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }}-${{ matrix.os }}
-        path: ${{ matrix.lib_prefix }}rustfontconfig${{ matrix.dynamic_ext }}
+        name: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }}-${{ matrix.os }}
+        path: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }}
     
     - name: Upload headers
       uses: actions/upload-artifact@v4
