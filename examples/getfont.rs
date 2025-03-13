@@ -6,6 +6,8 @@ fn main() {
     let cache = FcFontCache::build();
     let end = Instant::now();
 
+    println!("cache list: found {} fonts", cache.list().len());
+
     let start2 = Instant::now();
     let results = cache.query(
         &FcPattern {
@@ -18,5 +20,4 @@ fn main() {
 
     println!("built cache in: {:?}", end - start);
     println!("queried in {:?}", end2 - start2);
-    println!("font results: {results:#?} - ");
 }

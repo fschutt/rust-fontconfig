@@ -557,44 +557,62 @@ pub struct FcFont {
     pub id: String, // For identification in tests
 }
 
+/// Font source enum to represent either disk or memory fonts
+#[derive(Debug, Clone)]
+pub enum FontSource<'a> {
+    Memory(&'a FcFont),
+    Disk(&'a FcFontPath),
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct FcFontCache {
-    // Pattern to path mapping
-    map: BTreeMap<FcPattern, FcFontPath>,
-    // Memory fonts (id to font bytes)
-    memory_fonts: BTreeMap<String, FcFont>,
-    // UUID to font path mapping
-    id_map: BTreeMap<FontId, FcFontPath>,
+    // Pattern to FontId mapping (query index)
+    patterns: BTreeMap<FcPattern, FontId>,
+    // On-disk font paths
+    disk_fonts: BTreeMap<FontId, FcFontPath>,
+    // In-memory fonts
+    memory_fonts: BTreeMap<FontId, FcFont>,
+    // Metadata cache (patterns stored by ID for quick lookup)
+    metadata: BTreeMap<FontId, FcPattern>,
 }
 
 impl FcFontCache {
     /// Adds in-memory font files
     pub fn with_memory_fonts(&mut self, fonts: Vec<(FcPattern, FcFont)>) -> &mut Self {
         for (pattern, font) in fonts {
-            let font_id = font.id.clone();
-            let font_path = FcFontPath {
-                path: format!("memory:{}", font_id),
-                font_index: font.font_index,
-            };
-
-            self.memory_fonts.insert(font_id, font);
-            self.map.insert(pattern, font_path);
+            let id = FontId::new();
+            self.patterns.insert(pattern.clone(), id);
+            self.metadata.insert(id, pattern);
+            self.memory_fonts.insert(id, font);
         }
-
-        // Add this line to rebuild the ID map after adding fonts
-        self.build_id_map();
-
         self
     }
 
     /// Get font data for a given font ID
-    pub fn get_font_by_id(&self, id: &FontId) -> Option<&FcFontPath> {
-        self.id_map.get(id)
+    pub fn get_font_by_id(&self, id: &FontId) -> Option<FontSource> {
+        // Check memory fonts first
+        if let Some(font) = self.memory_fonts.get(id) {
+            return Some(FontSource::Memory(font));
+        }
+        // Then check disk fonts
+        if let Some(path) = self.disk_fonts.get(id) {
+            return Some(FontSource::Disk(path));
+        }
+        None
     }
 
-    /// Get in-memory font data
-    pub fn get_memory_font(&self, id: &str) -> Option<&FcFont> {
-        self.memory_fonts.get(id)
+    /// Get metadata directly from an ID
+    pub fn get_metadata_by_id(&self, id: &FontId) -> Option<&FcPattern> {
+        self.metadata.get(id)
+    }
+
+    /// Get font bytes (either from disk or memory)
+    #[cfg(feature = "std")]
+    pub fn get_font_bytes(&self, id: &FontId) -> Option<Vec<u8>> {
+        match self.get_font_by_id(id)? {
+            FontSource::Memory(font) => Some(font.bytes.clone()),
+            FontSource::Disk(path) => std::fs::read(&path.path).ok(),
+        }
     }
 
     /// Builds a new font cache
@@ -606,18 +624,18 @@ impl FcFontCache {
     /// Builds a new font cache from all fonts discovered on the system
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
+        let mut cache = FcFontCache::default();
+        
         #[cfg(target_os = "linux")]
         {
-            let mut cache = FcFontCache {
-                map: FcScanDirectories()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect(),
-                memory_fonts: BTreeMap::new(),
-                id_map: BTreeMap::new(),
-            };
-            cache.build_id_map();
-            cache
+            if let Some(font_entries) = FcScanDirectories() {
+                for (pattern, path) in font_entries {
+                    let id = FontId::new();
+                    cache.patterns.insert(pattern.clone(), id);
+                    cache.metadata.insert(id, pattern);
+                    cache.disk_fonts.insert(id, path);
+                }
+            }
         }
 
         #[cfg(target_os = "windows")]
@@ -625,19 +643,16 @@ impl FcFontCache {
             // `~` isn't actually valid on Windows, but it will be converted by `process_path`
             let font_dirs = vec![
                 (None, "C:\\Windows\\Fonts\\".to_owned()),
-                (
-                    None,
-                    "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned(),
-                ),
+                (None, "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned()),
             ];
 
-            let mut cache = FcFontCache {
-                map: FcScanDirectoriesInner(&font_dirs).into_iter().collect(),
-                memory_fonts: BTreeMap::new(),
-                id_map: BTreeMap::new(),
-            };
-            cache.build_id_map();
-            cache
+            let font_entries = FcScanDirectoriesInner(&font_dirs);
+            for (pattern, path) in font_entries {
+                let id = FontId::new();
+                cache.patterns.insert(pattern.clone(), id);
+                cache.metadata.insert(id, pattern);
+                cache.disk_fonts.insert(id, path);
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -648,36 +663,228 @@ impl FcFontCache {
                 (None, "/Library/Fonts".to_owned()),
             ];
 
-            let mut cache = FcFontCache {
-                map: FcScanDirectoriesInner(&font_dirs).into_iter().collect(),
-                memory_fonts: BTreeMap::new(),
-                id_map: BTreeMap::new(),
-            };
-            cache.build_id_map();
-            cache
+            let font_entries = FcScanDirectoriesInner(&font_dirs);
+            for (pattern, path) in font_entries {
+                let id = FontId::new();
+                cache.patterns.insert(pattern.clone(), id);
+                cache.metadata.insert(id, pattern);
+                cache.disk_fonts.insert(id, path);
+            }
         }
 
-        #[cfg(target_family = "wasm")]
-        {
-            Self::default()
-        }
-    }
-
-    /// Build the ID map for quick lookups
-    fn build_id_map(&mut self) {
-        let mut id_map = BTreeMap::new();
-
-        for (_, path) in &self.map {
-            let id = FontId::new();
-            id_map.insert(id, path.clone());
-        }
-
-        self.id_map = id_map;
+        cache
     }
 
     /// Returns the list of fonts and font patterns
-    pub fn list(&self) -> &BTreeMap<FcPattern, FcFontPath> {
-        &self.map
+    pub fn list(&self) -> Vec<(&FcPattern, FontId)> {
+        self.patterns.iter().map(|(pattern, id)| (pattern, *id)).collect()
+    }
+
+    /// Queries a font from the in-memory cache, returns the first found font (early return)
+    pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
+        let mut matches = Vec::new();
+
+        for (stored_pattern, id) in &self.patterns {
+            if Self::query_matches_internal(stored_pattern, pattern, trace) {
+                let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
+                let coverage = Self::calculate_unicode_coverage(&metadata.unicode_ranges);
+                matches.push((*id, coverage, metadata.clone()));
+            }
+        }
+
+        // Sort by unicode coverage (highest first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+        matches.first().map(|(id, _, metadata)| {
+            // Find fallbacks for this font
+            let fallbacks = self.find_fallbacks(metadata, trace);
+
+            FontMatch {
+                id: *id,
+                unicode_ranges: metadata.unicode_ranges.clone(),
+                fallbacks,
+            }
+        })
+    }
+
+    /// Queries all fonts matching a pattern
+    pub fn query_all(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Vec<FontMatch> {
+        let mut matches = Vec::new();
+
+        for (stored_pattern, id) in &self.patterns {
+            if Self::query_matches_internal(stored_pattern, pattern, trace) {
+                let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
+                let coverage = Self::calculate_unicode_coverage(&metadata.unicode_ranges);
+                matches.push((*id, coverage, metadata.clone()));
+            }
+        }
+
+        // Sort by unicode coverage (highest first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+        matches
+            .into_iter()
+            .map(|(id, _, metadata)| {
+                let fallbacks = self.find_fallbacks(&metadata, trace);
+
+                FontMatch {
+                    id,
+                    unicode_ranges: metadata.unicode_ranges.clone(),
+                    fallbacks,
+                }
+            })
+            .collect()
+    }
+
+    fn find_fallbacks(
+        &self,
+        pattern: &FcPattern,
+        _trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatchNoFallback> {
+        let mut candidates = Vec::new();
+
+        // Collect all potential fallbacks (excluding original pattern)
+        let original_id = self.patterns.get(pattern);
+        
+        for (stored_pattern, id) in &self.patterns {
+            // Skip if this is the original pattern
+            if original_id.is_some() && original_id.unwrap() == id {
+                continue;
+            }
+
+            // Check if this font supports any of the unicode ranges
+            if !stored_pattern.unicode_ranges.is_empty() {
+                let supports_ranges = pattern.unicode_ranges.iter().any(|p_range| {
+                    stored_pattern.unicode_ranges
+                        .iter()
+                        .any(|k_range| p_range.overlaps(k_range))
+                });
+
+                if supports_ranges {
+                    let coverage = Self::calculate_unicode_coverage(&stored_pattern.unicode_ranges);
+                    let style_score = Self::calculate_style_score(pattern, stored_pattern);
+                    candidates.push((
+                        FontMatchNoFallback {
+                            id: *id,
+                            unicode_ranges: stored_pattern.unicode_ranges.clone(),
+                        },
+                        coverage,
+                        style_score,
+                        stored_pattern.clone(),
+                    ));
+                }
+            }
+        }
+
+        // Sort by coverage (highest first), then by style score (lowest first)
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+
+        // Deduplicate by keeping only the best match per unique unicode range
+        let mut seen_ranges = Vec::new();
+        let mut deduplicated = Vec::new();
+
+        for (id, _, _, pattern) in candidates {
+            let mut is_new_range = false;
+
+            for range in &pattern.unicode_ranges {
+                if !seen_ranges.iter().any(|r: &UnicodeRange| r.overlaps(range)) {
+                    seen_ranges.push(*range);
+                    is_new_range = true;
+                }
+            }
+
+            if is_new_range {
+                deduplicated.push(id);
+            }
+        }
+
+        deduplicated
+    }
+
+    /// Find fonts that can render the given text, considering Unicode ranges
+    pub fn query_for_text(
+        &self,
+        pattern: &FcPattern,
+        text: &str,
+        trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatch> {
+        let base_matches = self.query_all(pattern, trace);
+
+        // Early return if no matches or text is empty
+        if base_matches.is_empty() || text.is_empty() {
+            return base_matches;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+        let mut required_fonts = Vec::new();
+        let mut covered_chars = vec![false; chars.len()];
+
+        // First try with the matches we already have
+        for font_match in &base_matches {
+            let metadata = match self.metadata.get(&font_match.id) {
+                Some(metadata) => metadata,
+                None => continue,
+            };
+
+            for (i, &c) in chars.iter().enumerate() {
+                if !covered_chars[i] && metadata.contains_char(c) {
+                    covered_chars[i] = true;
+                }
+            }
+
+            // Check if this font covers any characters
+            let covers_some = covered_chars.iter().any(|&covered| covered);
+            if covers_some {
+                required_fonts.push(font_match.clone());
+            }
+        }
+
+        // Handle uncovered characters by creating a fallback pattern
+        let all_covered = covered_chars.iter().all(|&covered| covered);
+        if !all_covered {
+            let mut fallback_pattern = FcPattern::default();
+
+            // Add uncovered characters as Unicode ranges
+            for (i, &c) in chars.iter().enumerate() {
+                if !covered_chars[i] {
+                    let c_value = c as u32;
+                    fallback_pattern.unicode_ranges.push(UnicodeRange {
+                        start: c_value,
+                        end: c_value,
+                    });
+
+                    trace.push(TraceMsg {
+                        level: TraceLevel::Warning,
+                        path: "<fallback search>".to_string(),
+                        reason: MatchReason::UnicodeRangeMismatch {
+                            character: c,
+                            ranges: Vec::new(),
+                        },
+                    });
+                }
+            }
+
+            // Add fallback fonts that weren't already selected
+            let fallback_matches = self.query_all(&fallback_pattern, trace);
+            for font_match in fallback_matches {
+                if !required_fonts.iter().any(|m| m.id == font_match.id) {
+                    required_fonts.push(font_match);
+                }
+            }
+        }
+
+        required_fonts
+    }
+
+    /// Get in-memory font data
+    pub fn get_memory_font(&self, id: &FontId) -> Option<&FcFont> {
+        self.memory_fonts.get(id)
+    }
+
+    /// Builds a new font cache
+    #[cfg(not(all(feature = "std", feature = "parsing")))]
+    pub fn build() -> Self {
+        Self::default()
     }
 
     /// Check if a pattern matches the query, with detailed tracing
@@ -882,228 +1089,185 @@ impl FcFontCache {
 
         score
     }
+}
 
-    fn find_fallbacks(
-        &self,
-        pattern: &FcPattern,
-        _trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatchNoFallback> {
-        let mut candidates = Vec::new();
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
+    use std::fs;
+    use std::path::Path;
 
-        // Collect all potential fallbacks (excluding original pattern)
-        for (k, v) in &self.map {
-            if k == pattern {
-                continue;
-            }
+    const BASE_FONTCONFIG_PATH: &str = "/etc/fonts/fonts.conf";
 
-            if let Some(id) = self
-                .id_map
-                .iter()
-                .find(|(_, path)| *path == v)
-                .map(|(id, _)| *id)
-            {
-                // Check if this font supports any of the unicode ranges
-                if !k.unicode_ranges.is_empty() {
-                    let supports_ranges = pattern.unicode_ranges.iter().any(|p_range| {
-                        k.unicode_ranges
-                            .iter()
-                            .any(|k_range| p_range.overlaps(k_range))
-                    });
-
-                    if supports_ranges {
-                        let coverage = Self::calculate_unicode_coverage(&k.unicode_ranges);
-                        let style_score = Self::calculate_style_score(pattern, k);
-                        candidates.push((
-                            FontMatchNoFallback {
-                                id: id,
-                                unicode_ranges: k.unicode_ranges.clone(),
-                            },
-                            coverage,
-                            style_score,
-                            k.clone(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Sort by coverage (highest first), then by style score (lowest first)
-        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
-
-        // Deduplicate by keeping only the best match per unique unicode range
-        let mut seen_ranges = Vec::new();
-        let mut deduplicated = Vec::new();
-
-        for (id, _, _, pattern) in candidates {
-            let mut is_new_range = false;
-
-            for range in &pattern.unicode_ranges {
-                if !seen_ranges.iter().any(|r: &UnicodeRange| r.overlaps(range)) {
-                    seen_ranges.push(*range);
-                    is_new_range = true;
-                }
-            }
-
-            if is_new_range {
-                deduplicated.push(id);
-            }
-        }
-
-        deduplicated
+    if !Path::new(BASE_FONTCONFIG_PATH).exists() {
+        return None;
     }
 
-    /// Queries a font from the in-memory `font -> file` mapping, returns the first found font (early return)
-    pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
-        let mut matches = Vec::new();
+    let mut font_paths = Vec::with_capacity(32);
+    let mut paths_to_visit = vec![(None, PathBuf::from(BASE_FONTCONFIG_PATH))];
 
-        for (k, v) in &self.map {
-            if Self::query_matches_internal(k, pattern, trace) {
-                let id = *self
-                    .id_map
-                    .iter()
-                    .find(|(_, path)| *path == v)
-                    .map(|(id, _)| id)
-                    .unwrap_or(&FontId(0));
+    while let Some((prefix, path_to_visit)) = paths_to_visit.pop() {
+        let path = match process_path(&prefix, path_to_visit, true) {
+            Some(path) => path,
+            None => continue
+        };
 
-                let coverage = Self::calculate_unicode_coverage(&k.unicode_ranges);
-                matches.push((id, coverage, k.clone()));
-            }
-        }
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue
+        };
 
-        // Sort by unicode coverage (highest first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
-
-        matches.first().map(|(id, _, k)| {
-            // Find fallbacks for this font
-            let fallbacks = self.find_fallbacks(k, trace);
-
-            FontMatch {
-                id: *id,
-                unicode_ranges: k.unicode_ranges.clone(),
-                fallbacks,
-            }
-        })
-    }
-
-    /// Queries a font from the in-memory `font -> file` mapping, returns all matching fonts
-    pub fn query_all(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Vec<FontMatch> {
-        let mut matches = Vec::new();
-
-        for (k, v) in &self.map {
-            if Self::query_matches_internal(k, pattern, trace) {
-                let id = *self
-                    .id_map
-                    .iter()
-                    .find(|(_, path)| *path == v)
-                    .map(|(id, _)| id)
-                    .unwrap_or(&FontId(0));
-
-                let coverage = Self::calculate_unicode_coverage(&k.unicode_ranges);
-                matches.push((id, coverage, k.clone()));
-            }
-        }
-
-        // Sort by unicode coverage (highest first)
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
-
-        matches
-            .into_iter()
-            .map(|(id, _, k)| {
-                let fallbacks = self.find_fallbacks(&k, trace);
-
-                FontMatch {
-                    id,
-                    unicode_ranges: k.unicode_ranges.clone(),
-                    fallbacks,
-                }
-            })
-            .collect()
-    }
-
-    /// Find fonts that can render the given text, considering Unicode ranges
-    pub fn query_for_text(
-        &self,
-        pattern: &FcPattern,
-        text: &str,
-        trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatch> {
-        let base_matches = self.query_all(pattern, trace);
-
-        // Early return if no matches or text is empty
-        if base_matches.is_empty() || text.is_empty() {
-            return base_matches;
-        }
-
-        let chars: Vec<char> = text.chars().collect();
-        let mut required_fonts = Vec::new();
-        let mut covered_chars = vec![false; chars.len()];
-
-        // First try with the matches we already have
-        for font_match in &base_matches {
-            let font_path = match self.id_map.get(&font_match.id) {
-                Some(path) => path,
-                None => continue,
+        if metadata.is_file() {
+            let xml_utf8 = match fs::read_to_string(&path) {
+                Ok(xml_utf8) => xml_utf8,
+                Err(_) => continue
             };
 
-            let pattern = self
-                .map
-                .iter()
-                .find(|(_, path)| path == &font_path)
-                .map(|(pattern, _)| pattern);
+            if ParseFontsConf(&xml_utf8, &mut paths_to_visit, &mut font_paths).is_none() {
+                continue;
+            }
+        } else if metadata.is_dir() {
+            let dir_entries = match fs::read_dir(&path) {
+                Ok(dir_entries) => dir_entries,
+                Err(_) => continue
+            };
 
-            if let Some(pattern) = pattern {
-                for (i, &c) in chars.iter().enumerate() {
-                    if !covered_chars[i] && pattern.contains_char(c) {
-                        covered_chars[i] = true;
-                    }
+            for entry_result in dir_entries {
+                let entry = match entry_result {
+                    Ok(entry) => entry,
+                    Err(_) => continue
+                };
+                
+                let entry_path = entry.path();
+                
+                // `fs::metadata` traverses symbolic links
+                let entry_metadata = match fs::metadata(&entry_path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue
+                };
+
+                if !entry_metadata.is_file() {
+                    continue;
                 }
-            }
 
-            // Check if this font covers any characters
-            let covers_some = covered_chars.iter().any(|&covered| covered);
-            if covers_some {
-                required_fonts.push(font_match.clone());
-            }
-        }
+                let file_name = match entry_path.file_name() {
+                    Some(name) => name,
+                    None => continue
+                };
 
-        // If there are still uncovered characters, look for additional fonts
-        let all_covered = covered_chars.iter().all(|&covered| covered);
-        if !all_covered {
-            // Create a pattern that matches any font that supports the uncovered characters
-            let mut fallback_pattern = FcPattern::default();
-
-            // Add the uncovered characters as Unicode ranges
-            for (i, &c) in chars.iter().enumerate() {
-                if !covered_chars[i] {
-                    let c_value = c as u32;
-                    fallback_pattern.unicode_ranges.push(UnicodeRange {
-                        start: c_value,
-                        end: c_value,
-                    });
-
-                    trace.push(TraceMsg {
-                        level: TraceLevel::Warning,
-                        path: "<fallback search>".to_string(),
-                        reason: MatchReason::UnicodeRangeMismatch {
-                            character: c,
-                            ranges: Vec::new(), // We don't know which fonts to report here
-                        },
-                    });
-                }
-            }
-
-            // Find fonts that support these uncovered characters
-            let fallback_matches = self.query_all(&fallback_pattern, trace);
-
-            for font_match in fallback_matches {
-                if !required_fonts.iter().any(|m| m.id == font_match.id) {
-                    required_fonts.push(font_match);
+                let file_name_str = file_name.to_string_lossy();
+                if file_name_str.starts_with(|c: char| c.is_ascii_digit()) && file_name_str.ends_with(".conf") {
+                    paths_to_visit.push((None, entry_path));
                 }
             }
         }
-
-        required_fonts
     }
+
+    if font_paths.is_empty() {
+        return None;
+    }
+
+    Some(FcScanDirectoriesInner(&font_paths))
+}
+
+// Parses the fonts.conf file
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn ParseFontsConf(
+    input: &str,
+    paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
+    font_paths: &mut Vec<(Option<String>, String)>,
+) -> Option<()> {
+    use xmlparser::Token::*;
+    use xmlparser::Tokenizer;
+
+    const TAG_INCLUDE: &str = "include";
+    const TAG_DIR: &str = "dir";
+    const ATTRIBUTE_PREFIX: &str = "prefix";
+
+    let mut current_prefix: Option<&str> = None;
+    let mut current_path: Option<&str> = None;
+    let mut is_in_include = false;
+    let mut is_in_dir = false;
+
+    for token_result in Tokenizer::from(input) {
+        let token = match token_result {
+            Ok(token) => token,
+            Err(_) => return None
+        };
+        
+        match token {
+            ElementStart { local, .. } => {
+                if is_in_include || is_in_dir {
+                    return None; /* error: nested tags */
+                }
+
+                match local.as_str() {
+                    TAG_INCLUDE => {
+                        is_in_include = true;
+                    }
+                    TAG_DIR => {
+                        is_in_dir = true;
+                    }
+                    _ => continue
+                }
+
+                current_path = None;
+            }
+            Text { text, .. } => {
+                let text = text.as_str().trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if is_in_include || is_in_dir {
+                    current_path = Some(text);
+                }
+            }
+            Attribute { local, value, .. } => {
+                if !is_in_include && !is_in_dir {
+                    continue;
+                }
+                // attribute on <include> or <dir> node
+                if local.as_str() == ATTRIBUTE_PREFIX {
+                    current_prefix = Some(value.as_str());
+                }
+            }
+            ElementEnd { end, .. } => {
+                let end_tag = match end {
+                    xmlparser::ElementEnd::Close(_, a) => a,
+                    _ => continue,
+                };
+
+                match end_tag.as_str() {
+                    TAG_INCLUDE => {
+                        if !is_in_include {
+                            continue;
+                        }
+
+                        if let Some(current_path) = current_path.as_ref() {
+                            paths_to_visit.push((current_prefix.map(ToOwned::to_owned), PathBuf::from(*current_path)));
+                        }
+                    }
+                    TAG_DIR => {
+                        if !is_in_dir {
+                            continue;
+                        }
+
+                        if let Some(current_path) = current_path.as_ref() {
+                            font_paths.push((current_prefix.map(ToOwned::to_owned), (*current_path).to_owned()));
+                        }
+                    }
+                    _ => continue
+                }
+
+                is_in_include = false;
+                is_in_dir = false;
+                current_path = None;
+                current_prefix = None;
+            }
+            _ => {}
+        }
+    }
+
+    Some(())
 }
 
 // Remaining implementation for font scanning, parsing, etc.

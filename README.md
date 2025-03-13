@@ -95,6 +95,112 @@ fn main() {
 }
 ```
 
+## Using from C
+
+### Linking with the C API
+
+The rust-fontconfig library provides C-compatible bindings that can be used from C/C++ applications.
+
+#### Binary Downloads
+
+You can download pre-built binary files from the [latest GitHub release](https://github.com/maps4print/rust-fontconfig/releases/latest):
+- Windows: `rust_fontconfig.dll` and `rust_fontconfig.lib`
+- macOS: `librust_fontconfig.dylib` and `librust_fontconfig.a`
+- Linux: `librust_fontconfig.so` and `librust_fontconfig.a`
+
+#### Building from Source
+
+Alternatively, you can build the library from source:
+
+```bash
+# Clone the repository
+git clone https://github.com/maps4print/rust-fontconfig.git
+cd rust-fontconfig
+
+# Build with FFI support
+cargo build --release --features ffi
+
+# The generated libraries will be in target/release
+```
+
+#### Including in Your C Project
+
+1. Copy the header file from `ffi/rust_fontconfig.h` to your include directory
+2. Link against the static or dynamic library
+3. Include the header file in your C code:
+
+```c
+#include "rust_fontconfig.h"
+```
+
+### Minimal C Example
+
+```c
+#include <stdio.h>
+#include "rust_fontconfig.h"
+
+int main() {
+    // Build the font cache
+    FcFontCache cache = fc_cache_build();
+    if (!cache) {
+        fprintf(stderr, "Failed to build font cache\n");
+        return 1;
+    }
+    
+    // Create a pattern to search for Arial
+    FcPattern* pattern = fc_pattern_new();
+    fc_pattern_set_name(pattern, "Arial");
+    
+    // Search for the font
+    FcTraceMsg* trace = NULL;
+    size_t trace_count = 0;
+    FcFontMatch* match = fc_cache_query(cache, pattern, &trace, &trace_count);
+    
+    if (match) {
+        char id_str[40];
+        fc_font_id_to_string(&match->id, id_str, sizeof(id_str));
+        printf("Found font! ID: %s\n", id_str);
+        
+        // Get the font path
+        FcFontPath* font_path = fc_cache_get_font_path(cache, &match->id);
+        if (font_path) {
+            printf("Font path: %s (index: %zu)\n", font_path->path, font_path->font_index);
+            fc_font_path_free(font_path);
+        }
+        
+        fc_font_match_free(match);
+    } else {
+        printf("Font not found\n");
+    }
+    
+    // Clean up
+    fc_pattern_free(pattern);
+    if (trace) fc_trace_free(trace, trace_count);
+    fc_cache_free(cache);
+    
+    return 0;
+}
+```
+
+For a more comprehensive example, see the [example.c](ffi/example.c) file included in the repository.
+
+#### Compiling the C Example
+
+On Linux:
+```bash
+gcc -I./include -L. -o font_example example.c -lrust_fontconfig
+```
+
+On macOS:
+```bash
+clang -I./include -L. -o font_example example.c -lrust_fontconfig
+```
+
+On Windows:
+```bash
+cl.exe /I./include /Fe:font_example.exe example.c rust_fontconfig.lib
+```
+
 ## Performance
 
 - cache building: ~90ms for ~530 fonts
@@ -108,6 +214,7 @@ fn main() {
 - Multilingual text support with automatic font fallback
 - In-memory font loading and caching
 - Optional `no_std` support
+- C API for integration with non-Rust languages
 
 ## License
 
