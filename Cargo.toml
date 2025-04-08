@@ -12,7 +12,6 @@ readme = "README.md"
 
 [lib]
 name = "rust_fontconfig"
-crate-type = ["rlib", "staticlib", "cdylib"]
 
 [build-dependencies]
 cbindgen = "0.24"
