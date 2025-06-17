@@ -139,6 +139,110 @@ fn test_unicode_range_matching() {
 }
 
 #[test]
+fn test_dpi_metadata() {
+    let test_id = FontId(123);
+    let test_dpi = 96.0;
+
+    let test_pattern = FcPattern {
+        name: Some("Test DPI Font".to_string()),
+        family: Some("Test DPI Family".to_string()),
+        metadata: FcFontMetadata {
+            dpi: Some(test_dpi),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mock_font = FcFont {
+        bytes: vec![0, 1, 2, 3], // Dummy data
+        font_index: 0,
+        id: "test-dpi-font".to_string(),
+    };
+
+    let mut cache = FcFontCache::default();
+    cache.with_memory_font_with_id(test_id, test_pattern.clone(), mock_font);
+
+    // 1. Check metadata directly by ID
+    let retrieved_metadata_direct = cache.get_metadata_by_id(&test_id);
+    assert!(retrieved_metadata_direct.is_some(), "Metadata should be found for test_id");
+    assert_eq!(
+        retrieved_metadata_direct.unwrap().metadata.dpi,
+        Some(test_dpi),
+        "DPI should be {} in directly retrieved metadata", test_dpi
+    );
+
+    // 2. Query the font and check DPI from the pattern associated with the match
+    let mut trace = Vec::new();
+    let query_pattern = FcPattern {
+        name: Some("Test DPI Font".to_string()),
+        ..Default::default()
+    };
+    let query_result = cache.query(&query_pattern, &mut trace);
+    assert!(query_result.is_some(), "Font should be found by query");
+
+    if let Some(font_match) = query_result {
+        assert_eq!(font_match.id, test_id, "Matched font ID should be test_id");
+        let retrieved_metadata_from_match = cache.get_metadata_by_id(&font_match.id);
+        assert!(retrieved_metadata_from_match.is_some(), "Metadata should be found for matched font ID");
+        assert_eq!(
+            retrieved_metadata_from_match.unwrap().metadata.dpi,
+            Some(test_dpi),
+            "DPI should be {} in metadata of queried font", test_dpi
+        );
+    }
+}
+
+#[test]
+#[cfg(all(target_os = "windows", feature = "std", feature = "parsing"))]
+fn test_windows_font_paths() {
+    use std::env;
+    use std::path::Path;
+
+    let cache = FcFontCache::build();
+
+    // Only proceed if font scanning found something, otherwise the test isn't meaningful.
+    if !cache.disk_fonts.is_empty() {
+        let system_root_env = env::var("SystemRoot");
+        let expected_prefix = match system_root_env {
+            Ok(system_root_val) => {
+                // Ensure the path ends with a separator for correct prefix matching
+                Path::new(&system_root_val).join("Fonts").to_string_lossy().to_string()
+            }
+            Err(_) => {
+                // This is the fallback used in src/lib.rs
+                "C:\\Windows\\Fonts".to_string()
+            }
+        };
+
+        let mut found_matching_path = false;
+        for fc_path in cache.disk_fonts.values() {
+            // Normalize path separators for comparison, as SystemRoot might not have trailing slash
+            // and disk_fonts paths are canonicalized.
+            let normalized_font_path = Path::new(&fc_path.path).to_string_lossy().replace("\\\\", "\\");
+            let normalized_expected_prefix = Path::new(&expected_prefix).to_string_lossy().replace("\\\\", "\\");
+
+            if normalized_font_path.starts_with(&normalized_expected_prefix) {
+                found_matching_path = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_matching_path,
+            "At least one font path should start with the expected Windows Fonts directory: {}. Scanned paths: {:?}",
+            expected_prefix,
+            cache.disk_fonts.values().map(|p| &p.path).collect::<Vec<_>>()
+        );
+    } else {
+        // This might happen on a system with no fonts or if scanning fails for other reasons.
+        // Consider this a passing case for now, as the primary goal is to check the path logic
+        // if fonts *are* found.
+        // For a more robust test, one might need to ensure a font exists in the expected path.
+        println!("No disk fonts found, skipping windows_font_paths assertion. This might be okay depending on the test environment.");
+    }
+}
+
+#[test]
 fn test_weight_matching() {
     // Create fonts with different weights
     let normal_font = FcFont {

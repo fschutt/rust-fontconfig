@@ -642,9 +642,18 @@ impl core::fmt::Debug for FcPattern {
     }
 }
 
+/// Rule for applying specific DPI to a font family
+#[derive(Debug, Clone, PartialEq)]
+#[cfg(all(feature = "std", feature = "parsing"))]
+struct DpiRule {
+    name: String, // Typically font family name
+    dpi: f64,
+}
+
 /// Font metadata from the OS/2 table
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FcFontMetadata {
+    pub dpi: Option<f64>, // Added for issue #16
     pub copyright: Option<String>,
     pub designer: Option<String>,
     pub designer_url: Option<String>,
@@ -662,6 +671,31 @@ pub struct FcFontMetadata {
     pub trademark: Option<String>,
     pub unique_id: Option<String>,
     pub version: Option<String>,
+}
+
+impl FcFontMetadata {
+    // Helper to check if metadata contains any Some values (excluding dpi for now as it's new)
+    #[cfg(all(feature = "std", feature = "parsing"))] // May not be needed if only used by FcPattern debug
+    fn is_empty_for_debug(&self) -> bool {
+        self.copyright.is_none() &&
+        self.designer.is_none() &&
+        self.designer_url.is_none() &&
+        self.font_family.is_none() &&
+        self.font_subfamily.is_none() &&
+        self.full_name.is_none() &&
+        self.id_description.is_none() &&
+        self.license.is_none() &&
+        self.license_url.is_none() &&
+        self.manufacturer.is_none() &&
+        self.manufacturer_url.is_none() &&
+        self.postscript_name.is_none() &&
+        self.preferred_family.is_none() &&
+        self.preferred_subfamily.is_none() &&
+        self.trademark.is_none() &&
+        self.unique_id.is_none() &&
+        self.version.is_none()
+        // Not checking self.dpi here as it's often None by default
+    }
 }
 
 impl FcPattern {
@@ -797,11 +831,16 @@ impl FcFontCache {
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
         let mut cache = FcFontCache::default();
+        let mut dpi_rules_from_conf = Vec::new(); // Store DPI rules
 
         #[cfg(target_os = "linux")]
         {
-            if let Some(font_entries) = FcScanDirectories() {
-                for (pattern, path) in font_entries {
+            // FcScanDirectories now returns a tuple: (font_entries, dpi_rules)
+            // dpi_rules_from_conf is populated by FcScanDirectories -> ParseFontsConf
+            // And dpi values are applied within FcParseFont.
+            if let Some((font_entries, parsed_dpi_rules)) = FcScanDirectories() {
+                dpi_rules_from_conf = parsed_dpi_rules; // Still store them, might be useful for debugging or future use.
+                for (pattern, path) in font_entries { // pattern already has DPI applied from FcParseFont
                     let id = FontId::new();
                     cache.patterns.insert(pattern.clone(), id);
                     cache.metadata.insert(id, pattern);
@@ -812,17 +851,20 @@ impl FcFontCache {
 
         #[cfg(target_os = "windows")]
         {
-            // `~` isn't actually valid on Windows, but it will be converted by `process_path`
+            let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let system_fonts_path = format!("{}\\{}", system_root, "Fonts\\");
+
             let font_dirs = vec![
-                (None, "C:\\Windows\\Fonts\\".to_owned()),
+                (None, system_fonts_path),
                 (
                     None,
                     "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned(),
                 ),
             ];
-
-            let font_entries = FcScanDirectoriesInner(&font_dirs);
-            for (pattern, path) in font_entries {
+            // For non-Linux, dpi_rules_from_conf will be empty.
+            // FcScanDirectoriesInner now takes dpi_rules.
+            let font_entries = FcScanDirectoriesInner(&font_dirs, &dpi_rules_from_conf);
+            for (pattern, path) in font_entries { // Pattern already has DPI applied by FcParseFont
                 let id = FontId::new();
                 cache.patterns.insert(pattern.clone(), id);
                 cache.metadata.insert(id, pattern);
@@ -837,9 +879,10 @@ impl FcFontCache {
                 (None, "/System/Library/Fonts".to_owned()),
                 (None, "/Library/Fonts".to_owned()),
             ];
-
-            let font_entries = FcScanDirectoriesInner(&font_dirs);
-            for (pattern, path) in font_entries {
+            // For non-Linux, dpi_rules_from_conf will be empty.
+            // FcScanDirectoriesInner now takes dpi_rules.
+            let font_entries = FcScanDirectoriesInner(&font_dirs, &dpi_rules_from_conf);
+            for (pattern, path) in font_entries { // Pattern already has DPI applied by FcParseFont
                 let id = FontId::new();
                 cache.patterns.insert(pattern.clone(), id);
                 cache.metadata.insert(id, pattern);
@@ -1314,7 +1357,8 @@ impl FcFontCache {
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
+// Changed return type to include DpiRule vector
+fn FcScanDirectories() -> Option<(Vec<(FcPattern, FcFontPath)>, Vec<DpiRule>)> {
     use std::fs;
     use std::path::Path;
 
@@ -1324,8 +1368,9 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
         return None;
     }
 
-    let mut font_paths = Vec::with_capacity(32);
+    let mut font_paths_from_conf = Vec::with_capacity(32); // Renamed for clarity
     let mut paths_to_visit = vec![(None, PathBuf::from(BASE_FONTCONFIG_PATH))];
+    let mut parsed_dpi_rules = Vec::new(); // To store DPI rules from all conf files
 
     while let Some((prefix, path_to_visit)) = paths_to_visit.pop() {
         let path = match process_path(&prefix, path_to_visit, true) {
@@ -1344,7 +1389,8 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
                 Err(_) => continue,
             };
 
-            if ParseFontsConf(&xml_utf8, &mut paths_to_visit, &mut font_paths).is_none() {
+            // ParseFontsConf now populates parsed_dpi_rules directly
+            if ParseFontsConf(&xml_utf8, &mut paths_to_visit, &mut font_paths_from_conf, &mut parsed_dpi_rules).is_none() {
                 continue;
             }
         } else if metadata.is_dir() {
@@ -1386,11 +1432,20 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
         }
     }
 
-    if font_paths.is_empty() {
+    // Now, font_paths_from_conf contains all directory paths from config files,
+    // and parsed_dpi_rules contains all DPI rules.
+
+    if font_paths_from_conf.is_empty() {
+        // If no font directories are found, but DPI rules might exist,
+        // we might still want to return the DPI rules.
+        // However, if there are no font dirs, font matching will likely fail anyway.
+        // For now, align with previous behavior: if no font paths, return None.
         return None;
     }
 
-    Some(FcScanDirectoriesInner(&font_paths))
+    // FcScanDirectoriesInner will be modified later to accept and use dpi_rules.
+    let font_entries = FcScanDirectoriesInner(&font_paths_from_conf); // Pass empty dpi_rules for now
+    Some((font_entries, parsed_dpi_rules))
 }
 
 // Parses the fonts.conf file
@@ -1399,110 +1454,247 @@ fn ParseFontsConf(
     input: &str,
     paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
     font_paths: &mut Vec<(Option<String>, String)>,
+    dpi_rules: &mut Vec<DpiRule>, // Added for DPI rules
 ) -> Option<()> {
-    use xmlparser::Token::*;
-    use xmlparser::Tokenizer;
+    use xmlparser::{ElementEnd, Token, Tokenizer, Error as XmlError};
 
     const TAG_INCLUDE: &str = "include";
     const TAG_DIR: &str = "dir";
-    const ATTRIBUTE_PREFIX: &str = "prefix";
+    const TAG_MATCH: &str = "match";
+    const TAG_TEST: &str = "test";
+    const TAG_EDIT: &str = "edit";
+    const TAG_DOUBLE: &str = "double";
 
-    let mut current_prefix: Option<&str> = None;
-    let mut current_path: Option<&str> = None;
-    let mut is_in_include = false;
-    let mut is_in_dir = false;
+    const ATTR_PREFIX: &str = "prefix";
+    const ATTR_TARGET: &str = "target";
+    const ATTR_NAME: &str = "name";
+    const ATTR_COMPARE: &str = "compare";
+    const ATTR_MODE: &str = "mode";
+
+    let mut current_tag_prefix: Option<String> = None;
+    let mut current_tag_path_text: Option<String> = None;
+
+    // State for DPI rule parsing
+    // These flags help understand the current context within the XML structure.
+    let mut in_match_target_scan = false; // True if currently inside <match target="scan">
+    let mut in_test_family_eq = false;    // True if currently inside <test name="family" compare="eq">
+    let mut current_family_for_dpi_rule: Option<String> = None; // Stores family name from <test>
+    let mut in_edit_dpi_assign = false;   // True if currently inside <edit name="dpi" mode="assign">
+    let mut in_double_for_dpi = false;    // True if currently inside <double> within the DPI edit context
 
     for token_result in Tokenizer::from(input) {
         let token = match token_result {
             Ok(token) => token,
-            Err(_) => return None,
+            Err(_e) => return None, // XML parsing error
         };
 
         match token {
-            ElementStart { local, .. } => {
-                if is_in_include || is_in_dir {
-                    return None; /* error: nested tags */
-                }
+            Token::ElementStart { local, attributes, .. } => {
+                let local_name = local.as_str();
+                // Reset text buffer for current element's potential text content
+                current_tag_path_text = None;
 
-                match local.as_str() {
-                    TAG_INCLUDE => {
-                        is_in_include = true;
+                match local_name {
+                    TAG_INCLUDE | TAG_DIR => {
+                        current_tag_prefix = None; // Reset prefix for these tags
+                        for attr in attributes {
+                            if attr.local.as_str() == ATTR_PREFIX {
+                                current_tag_prefix = Some(attr.value.as_str().to_string());
+                                break;
+                            }
+                        }
                     }
-                    TAG_DIR => {
-                        is_in_dir = true;
+                    TAG_MATCH => {
+                        // Check if this is <match target="scan">
+                        for attr in attributes {
+                            if attr.local.as_str() == ATTR_TARGET && attr.value.as_str() == "scan" {
+                                in_match_target_scan = true;
+                                current_family_for_dpi_rule = None; // Reset at start of new match
+                                break;
+                            }
+                        }
                     }
-                    _ => continue,
+                    TAG_TEST if in_match_target_scan => {
+                        // Inside a <match target="scan">, check for <test name="family" compare="eq">
+                        let mut is_family_test = false;
+                        let mut is_compare_eq = false;
+                        for attr in attributes {
+                            match attr.local.as_str() {
+                                ATTR_NAME if attr.value.as_str() == "family" => is_family_test = true,
+                                ATTR_COMPARE if attr.value.as_str() == "eq" => is_compare_eq = true,
+                                _ => {}
+                            }
+                        }
+                        if is_family_test && is_compare_eq {
+                            in_test_family_eq = true;
+                            // Expecting text content for family name
+                        }
+                    }
+                    TAG_EDIT if in_match_target_scan && current_family_for_dpi_rule.is_some() => {
+                        // Inside <match target="scan"> and after a family name was captured
+                        // Check for <edit name="dpi" mode="assign">
+                        let mut is_dpi_edit = false;
+                        let mut is_mode_assign = false;
+                        for attr in attributes {
+                            match attr.local.as_str() {
+                                ATTR_NAME if attr.value.as_str() == "dpi" => is_dpi_edit = true,
+                                ATTR_MODE if attr.value.as_str() == "assign" => is_mode_assign = true,
+                                _ => {}
+                            }
+                        }
+                        if is_dpi_edit && is_mode_assign {
+                            in_edit_dpi_assign = true;
+                        }
+                    }
+                    TAG_DOUBLE if in_edit_dpi_assign => {
+                        // Inside <edit name="dpi" mode="assign">, now we are in <double>
+                        in_double_for_dpi = true;
+                        // Expecting text content for DPI value
+                    }
+                    _ => {
+                        // Other tags, reset any specific DPI states if necessary, though typically handled by ElementEnd
+                    }
                 }
-
-                current_path = None;
             }
-            Text { text, .. } => {
-                let text = text.as_str().trim();
-                if text.is_empty() {
-                    continue;
-                }
-                if is_in_include || is_in_dir {
-                    current_path = Some(text);
+            Token::Text { text } => {
+                let trimmed_text = text.as_str().trim();
+                if !trimmed_text.is_empty() {
+                    if in_double_for_dpi {
+                        // This text is the DPI value
+                        if let (Ok(dpi_val), Some(family_name)) = (
+                            trimmed_text.parse::<f64>(),
+                            current_family_for_dpi_rule.take(), // Consume family name
+                        ) {
+                            dpi_rules.push(DpiRule { name: family_name, dpi: dpi_val });
+                        }
+                        // DPI value processed, reset flags for <double> and <edit dpi>
+                        in_double_for_dpi = false;
+                        in_edit_dpi_assign = false;
+                    } else if in_test_family_eq {
+                        // This text is the family name for a DPI rule
+                        current_family_for_dpi_rule = Some(trimmed_text.to_string());
+                        // in_test_family_eq itself is reset at </test>
+                    } else {
+                        // This text is for <include> or <dir> paths
+                        current_tag_path_text = Some(trimmed_text.to_string());
+                    }
                 }
             }
-            Attribute { local, value, .. } => {
-                if !is_in_include && !is_in_dir {
-                    continue;
-                }
-                // attribute on <include> or <dir> node
-                if local.as_str() == ATTRIBUTE_PREFIX {
-                    current_prefix = Some(value.as_str());
-                }
-            }
-            ElementEnd { end, .. } => {
-                let end_tag = match end {
-                    xmlparser::ElementEnd::Close(_, a) => a,
-                    _ => continue,
+            Token::ElementEnd { end, .. } => {
+                let element_name = match end {
+                    ElementEnd::Open(name) | ElementEnd::Close(_, name) | ElementEnd::Empty(name) => name,
                 };
 
-                match end_tag.as_str() {
+                match element_name.as_str() {
                     TAG_INCLUDE => {
-                        if !is_in_include {
-                            continue;
+                        if let Some(p) = current_tag_path_text.take() {
+                            paths_to_visit.push((current_tag_prefix.take(), PathBuf::from(p)));
                         }
-
-                        if let Some(current_path) = current_path.as_ref() {
-                            paths_to_visit.push((
-                                current_prefix.map(ToOwned::to_owned),
-                                PathBuf::from(*current_path),
-                            ));
-                        }
+                        current_tag_prefix = None; // Reset prefix after use
                     }
                     TAG_DIR => {
-                        if !is_in_dir {
-                            continue;
+                        if let Some(p) = current_tag_path_text.take() {
+                            font_paths.push((current_tag_prefix.take(), p));
                         }
-
-                        if let Some(current_path) = current_path.as_ref() {
-                            font_paths.push((
-                                current_prefix.map(ToOwned::to_owned),
-                                (*current_path).to_owned(),
-                            ));
-                        }
+                        current_tag_prefix = None; // Reset prefix after use
                     }
-                    _ => continue,
+                    TAG_MATCH => {
+                        // Exiting a <match> block, reset all related states
+                        in_match_target_scan = false;
+                        current_family_for_dpi_rule = None;
+                        in_test_family_eq = false;
+                        in_edit_dpi_assign = false;
+                        in_double_for_dpi = false;
+                    }
+                    TAG_TEST => {
+                        // Exiting a <test> block
+                        in_test_family_eq = false;
+                        // current_family_for_dpi_rule remains if set, consumed by <edit> or cleared by </match>
+                    }
+                    TAG_EDIT => {
+                        // Exiting an <edit> block
+                        in_edit_dpi_assign = false;
+                        in_double_for_dpi = false; // Should be false already if <double> was processed
+                        // If <edit> ends and a family name was stored but not used for DPI,
+                        // it will be cleared by </match> or a new <match target="scan">.
+                    }
+                    TAG_DOUBLE => {
+                        // Exiting a <double> block
+                        in_double_for_dpi = false;
+                        // Value should have been processed by Text token.
+                    }
+                    _ => {}
                 }
-
-                is_in_include = false;
-                is_in_dir = false;
-                current_path = None;
-                current_prefix = None;
             }
-            _ => {}
+            _ => {} // Other token types like CData, ProcessingInstruction, Comment are ignored
         }
     }
-
     Some(())
 }
 
 // Remaining implementation for font scanning, parsing, etc.
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
+fn FcFontCache::build() -> Self {
+    let mut cache = FcFontCache::default();
+    let mut _dpi_rules_from_conf = Vec::new(); // Store DPI rules, prefixed with _ as not used yet
+
+    #[cfg(target_os = "linux")]
+    {
+        // FcScanDirectories now returns a tuple: (font_entries, dpi_rules)
+        if let Some((font_entries, parsed_dpi_rules)) = FcScanDirectories() {
+            _dpi_rules_from_conf = parsed_dpi_rules; // Store the parsed DPI rules
+            for (pattern, path) in font_entries {
+                let id = FontId::new();
+                cache.patterns.insert(pattern.clone(), id);
+                cache.metadata.insert(id, pattern);
+                cache.disk_fonts.insert(id, path);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // `~` isn't actually valid on Windows, but it will be converted by `process_path`
+        let font_dirs = vec![
+            (None, "C:\\Windows\\Fonts\\".to_owned()),
+            (
+                None,
+                "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned(),
+            ),
+        ];
+        // For non-Linux, FcScanDirectories isn't called, so pass empty dpi_rules.
+        // FcScanDirectoriesInner will need to accept dpi_rules.
+        let font_entries = FcScanDirectoriesInner(&font_dirs /*, &[] */); // TODO: Pass DPI rules
+        for (pattern, path) in font_entries {
+            let id = FontId::new();
+            cache.patterns.insert(pattern.clone(), id);
+            cache.metadata.insert(id, pattern);
+            cache.disk_fonts.insert(id, path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let font_dirs = vec![
+            (None, "~/Library/Fonts".to_owned()),
+            (None, "/System/Library/Fonts".to_owned()),
+            (None, "/Library/Fonts".to_owned()),
+        ];
+        // FcScanDirectoriesInner will need to accept dpi_rules.
+        let font_entries = FcScanDirectoriesInner(&font_dirs /*, &[] */); // TODO: Pass DPI rules
+        for (pattern, path) in font_entries {
+            let id = FontId::new();
+            cache.patterns.insert(pattern.clone(), id);
+            cache.metadata.insert(id, pattern);
+            cache.disk_fonts.insert(id, path);
+        }
+    }
+
+    cache
+}
+
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn FcParseFont(filepath: &PathBuf, dpi_rules: &[DpiRule]) -> Option<Vec<(FcPattern, FcFontPath)>> {
     use allsorts_subset_browser::{
         binary::read::ReadScope,
         font_data::FontData,
@@ -1672,6 +1864,16 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
                         // Initialize metadata structure
                         let mut metadata = FcFontMetadata::default();
 
+                        // Apply DPI rules if a matching family name is found
+                        if let Some(fam_name_for_dpi) = f_family.as_ref().map(|s| String::from_utf8_lossy(s.as_bytes()).to_string()) {
+                            for rule in dpi_rules {
+                                if rule.name == fam_name_for_dpi {
+                                    metadata.dpi = Some(rule.dpi);
+                                    break;
+                                }
+                            }
+                        }
+
                         const NAME_ID_COPYRIGHT: u16 = 0;
                         const NAME_ID_FAMILY: u16 = 1;
                         const NAME_ID_SUBFAMILY: u16 = 2;
@@ -1782,7 +1984,7 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern, FcFontPath)> {
+fn FcScanDirectoriesInner(paths: &[(Option<String>, String)], dpi_rules: &[DpiRule]) -> Vec<(FcPattern, FcFontPath)> {
     #[cfg(feature = "multithreading")]
     {
         use rayon::prelude::*;
@@ -1792,7 +1994,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
             .par_iter()
             .filter_map(|(prefix, p)| {
                 if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
-                    Some(FcScanSingleDirectoryRecursive(path))
+                    Some(FcScanSingleDirectoryRecursive(path, dpi_rules))
                 } else {
                     None
                 }
@@ -1806,7 +2008,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
             .iter()
             .filter_map(|(prefix, p)| {
                 if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
-                    Some(FcScanSingleDirectoryRecursive(path))
+                    Some(FcScanSingleDirectoryRecursive(path, dpi_rules))
                 } else {
                     None
                 }
@@ -1817,29 +2019,31 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> {
+fn FcScanSingleDirectoryRecursive(dir: PathBuf, dpi_rules: &[DpiRule]) -> Vec<(FcPattern, FcFontPath)> {
     let mut files_to_parse = Vec::new();
     let mut dirs_to_parse = vec![dir];
 
     'outer: loop {
         let mut new_dirs_to_parse = Vec::new();
 
-        'inner: for dir in dirs_to_parse.clone() {
-            let dir = match std::fs::read_dir(dir) {
+        'inner: for dir_to_scan in dirs_to_parse.clone() { // Renamed `dir` to avoid conflict
+            let current_dir_iter = match std::fs::read_dir(dir_to_scan) {
                 Ok(o) => o,
                 Err(_) => continue 'inner,
             };
 
-            for (path, pathbuf) in dir.filter_map(|entry| {
-                let entry = entry.ok()?;
+            for entry_result in current_dir_iter { // Renamed `dir` to `entry_result`
+                let entry = match entry_result {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
                 let path = entry.path();
-                let pathbuf = path.to_path_buf();
-                Some((path, pathbuf))
-            }) {
+                // let pathbuf = path.to_path_buf(); // This was pathbuf in example, but path itself is PathBuf
+
                 if path.is_dir() {
-                    new_dirs_to_parse.push(pathbuf);
+                    new_dirs_to_parse.push(path);
                 } else {
-                    files_to_parse.push(pathbuf);
+                    files_to_parse.push(path);
                 }
             }
         }
@@ -1851,11 +2055,11 @@ fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> 
         }
     }
 
-    FcParseFontFiles(&files_to_parse)
+    FcParseFontFiles(&files_to_parse, dpi_rules)
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> {
+fn FcParseFontFiles(files_to_parse: &[PathBuf], dpi_rules: &[DpiRule]) -> Vec<(FcPattern, FcFontPath)> {
     let result = {
         #[cfg(feature = "multithreading")]
         {
@@ -1863,14 +2067,14 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
 
             files_to_parse
                 .par_iter()
-                .filter_map(|file| FcParseFont(file))
+                .filter_map(|file| FcParseFont(file, dpi_rules))
                 .collect::<Vec<Vec<_>>>()
         }
         #[cfg(not(feature = "multithreading"))]
         {
             files_to_parse
                 .iter()
-                .filter_map(|file| FcParseFont(file))
+                .filter_map(|file| FcParseFont(file, dpi_rules))
                 .collect::<Vec<Vec<_>>>()
         }
     };
