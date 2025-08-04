@@ -68,7 +68,7 @@
 //!     // Find fonts that can render the mixed-script text
 //!     let mut trace = Vec::new();
 //!     let matched_fonts = cache.query_for_text(
-//!         &FcPattern::default(),
+//!         &mut FcPattern::default(),
 //!         text,
 //!         &mut trace
 //!     );
@@ -561,7 +561,7 @@ pub struct TraceMsg {
 }
 
 /// Font pattern for matching
-#[derive(Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcPattern {
     // font name
@@ -584,8 +584,29 @@ pub struct FcPattern {
     pub stretch: FcStretch,
     // unicode ranges to match
     pub unicode_ranges: Vec<UnicodeRange>,
+    // codepoints to match
+    pub codepoints: Vec<u32>,
     // extended font metadata
     pub metadata: FcFontMetadata,
+}
+
+impl Default for FcPattern {
+    fn default() -> Self {
+        Self {
+            name: None,
+            family: None,
+            italic: PatternMatch::default(),
+            oblique: PatternMatch::default(),
+            bold: PatternMatch::default(),
+            monospace: PatternMatch::default(),
+            condensed: PatternMatch::default(),
+            weight: FcWeight::default(),
+            stretch: FcStretch::default(),
+            unicode_ranges: Vec::new(),
+            codepoints: Vec::new(),
+            metadata: FcFontMetadata::default(),
+        }
+    }
 }
 
 impl core::fmt::Debug for FcPattern {
@@ -632,6 +653,10 @@ impl core::fmt::Debug for FcPattern {
             d.field("unicode_ranges", &self.unicode_ranges);
         }
 
+        if !self.codepoints.is_empty() {
+            d.field("codepoints", &self.codepoints);
+        }
+
         // Only show non-empty metadata fields
         let empty_metadata = FcFontMetadata::default();
         if self.metadata != empty_metadata {
@@ -667,17 +692,23 @@ pub struct FcFontMetadata {
 impl FcPattern {
     /// Check if this pattern would match the given character
     pub fn contains_char(&self, c: char) -> bool {
-        if self.unicode_ranges.is_empty() {
-            return true; // No ranges specified means match all characters
+        // If specific codepoints are provided, check against them
+        if !self.codepoints.is_empty() {
+            return self.codepoints.contains(&(c as u32));
         }
 
-        for range in &self.unicode_ranges {
-            if range.contains(c) {
-                return true;
+        // If no codepoints are specified, check against unicode ranges
+        if !self.unicode_ranges.is_empty() {
+            for range in &self.unicode_ranges {
+                if range.contains(c) {
+                    return true;
+                }
             }
+            return false;
         }
 
-        false
+        // If neither codepoints nor ranges are specified, assume the font supports the character
+        true
     }
 }
 
@@ -985,72 +1016,56 @@ impl FcFontCache {
     /// Find fonts that can render the given text, considering Unicode ranges
     pub fn query_for_text(
         &self,
-        pattern: &FcPattern,
+        pattern: &mut FcPattern,
         text: &str,
         trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatch> {
-        let base_matches = self.query_all(pattern, trace);
-
-        // Early return if no matches or text is empty
-        if base_matches.is_empty() || text.is_empty() {
-            return base_matches;
+        // Early return if no text is provided
+        if text.is_empty() {
+            return self.query_all(pattern, trace);
         }
 
-        let chars: Vec<char> = text.chars().collect();
+        // First, try to find a font that supports the entire text as a single grapheme cluster.
+        let mut full_text_pattern = pattern.clone();
+        full_text_pattern.codepoints = text.chars().map(|c| c as u32).collect();
+        let full_text_matches = self.query_all(&full_text_pattern, trace);
+
+        if !full_text_matches.is_empty() {
+            // Check if any of the matched fonts contain all the codepoints.
+            for font_match in &full_text_matches {
+                let metadata = self.get_metadata_by_id(&font_match.id).unwrap();
+                if !metadata.codepoints.is_empty() && text.chars().all(|c| metadata.contains_char(c)) {
+                    return vec![font_match.clone()];
+                }
+            }
+        }
+
+        // If no single font supports the entire text, fall back to character-by-character matching.
         let mut required_fonts = Vec::new();
-        let mut covered_chars = vec![false; chars.len()];
+        let mut uncovered: Vec<char> = text.chars().collect();
 
-        // First try with the matches we already have
-        for font_match in &base_matches {
-            let metadata = match self.metadata.get(&font_match.id) {
-                Some(metadata) => metadata,
-                None => continue,
-            };
+        while !uncovered.is_empty() {
+            let current_char = uncovered[0];
+            let mut best_font_for_char: Option<FontMatch> = None;
 
-            for (i, &c) in chars.iter().enumerate() {
-                if !covered_chars[i] && metadata.contains_char(c) {
-                    covered_chars[i] = true;
-                }
+            let mut char_pattern = pattern.clone();
+            char_pattern.codepoints = vec![current_char as u32];
+            let matches = self.query_all(&char_pattern, trace);
+
+            if let Some(first_match) = matches.first() {
+                best_font_for_char = Some(first_match.clone());
             }
 
-            // Check if this font covers any characters
-            let covers_some = covered_chars.iter().any(|&covered| covered);
-            if covers_some {
-                required_fonts.push(font_match.clone());
-            }
-        }
-
-        // Handle uncovered characters by creating a fallback pattern
-        let all_covered = covered_chars.iter().all(|&covered| covered);
-        if !all_covered {
-            let mut fallback_pattern = FcPattern::default();
-
-            // Add uncovered characters as Unicode ranges
-            for (i, &c) in chars.iter().enumerate() {
-                if !covered_chars[i] {
-                    let c_value = c as u32;
-                    fallback_pattern.unicode_ranges.push(UnicodeRange {
-                        start: c_value,
-                        end: c_value,
-                    });
-
-                    trace.push(TraceMsg {
-                        level: TraceLevel::Warning,
-                        path: "<fallback search>".to_string(),
-                        reason: MatchReason::UnicodeRangeMismatch {
-                            character: c,
-                            ranges: Vec::new(),
-                        },
-                    });
+            if let Some(best_match) = best_font_for_char {
+                if !required_fonts.iter().any(|m: &FontMatch| m.id == best_match.id) {
+                    required_fonts.push(best_match.clone());
                 }
-            }
 
-            // Add fallback fonts that weren't already selected
-            let fallback_matches = self.query_all(&fallback_pattern, trace);
-            for font_match in fallback_matches {
-                if !required_fonts.iter().any(|m| m.id == font_match.id) {
-                    required_fonts.push(font_match);
-                }
+                let metadata = self.get_metadata_by_id(&best_match.id).unwrap();
+                uncovered.retain(|c| !metadata.contains_char(*c));
+            } else {
+                // No font found for the current character, so we stop.
+                break;
             }
         }
 
@@ -1243,6 +1258,15 @@ impl FcFontCache {
                     },
                 });
                 return false;
+            }
+        }
+
+        // Check codepoints if specified
+        if !pattern.codepoints.is_empty() {
+            for &cp in &pattern.codepoints {
+                if !k.contains_char(std::char::from_u32(cp).unwrap_or_default()) {
+                    return false;
+                }
             }
         }
 
@@ -1752,6 +1776,7 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
                                 weight,
                                 stretch,
                                 unicode_ranges: unicode_ranges.clone(),
+                                codepoints: Vec::new(),
                                 metadata,
                             },
                             font_index,
@@ -1968,87 +1993,3 @@ fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
         .map(|name| String::from_utf8_lossy(name.to_bytes()).to_string())
 }
 
-// Helper function to extract unicode ranges
-fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
-    let mut unicode_ranges = Vec::new();
-
-    // Process the 4 Unicode range bitfields from OS/2 table
-    let ranges = [
-        os2_table.ul_unicode_range1,
-        os2_table.ul_unicode_range2,
-        os2_table.ul_unicode_range3,
-        os2_table.ul_unicode_range4,
-    ];
-
-    // Unicode range bit positions to actual ranges
-    // Based on OpenType spec
-    let range_mappings = [
-        (0, 0x0000, 0x007F),  // Basic Latin
-        (1, 0x0080, 0x00FF),  // Latin-1 Supplement
-        (2, 0x0100, 0x017F),  // Latin Extended-A
-        (7, 0x0370, 0x03FF),  // Greek and Coptic
-        (9, 0x0400, 0x04FF),  // Cyrillic
-        (29, 0x2000, 0x206F), // General Punctuation
-        (57, 0x4E00, 0x9FFF), // CJK Unified Ideographs
-                              // Add more ranges as needed
-    ];
-
-    for (bit, start, end) in &range_mappings {
-        let range_idx = bit / 32;
-        let bit_pos = bit % 32;
-
-        if range_idx < 4 && (ranges[range_idx] & (1 << bit_pos)) != 0 {
-            unicode_ranges.push(UnicodeRange {
-                start: *start,
-                end: *end,
-            });
-        }
-    }
-
-    unicode_ranges
-}
-
-// Helper function to detect if a font is monospace
-fn detect_monospace(
-    provider: &impl FontTableProvider,
-    os2_table: &Os2,
-    detected_monospace: Option<bool>,
-) -> Option<bool> {
-    if let Some(is_monospace) = detected_monospace {
-        return Some(is_monospace);
-    }
-
-    // Try using PANOSE classification
-    if os2_table.panose[0] == 2 {
-        // 2 = Latin Text
-        return Some(os2_table.panose[3] == 9); // 9 = Monospaced
-    }
-
-    // Check glyph widths in hmtx table
-    let hhea_data = provider.table_data(tag::HHEA).ok()??;
-    let hhea_table = ReadScope::new(&hhea_data).read::<HheaTable>().ok()?;
-    let maxp_data = provider.table_data(tag::MAXP).ok()??;
-    let maxp_table = ReadScope::new(&maxp_data).read::<MaxpTable>().ok()?;
-    let hmtx_data = provider.table_data(tag::HMTX).ok()??;
-    let hmtx_table = ReadScope::new(&hmtx_data)
-        .read_dep::<HmtxTable<'_>>((
-            usize::from(maxp_table.num_glyphs),
-            usize::from(hhea_table.num_h_metrics),
-        ))
-        .ok()?;
-
-    let mut monospace = true;
-    let mut last_advance = 0;
-
-    // Check if all advance widths are the same
-    for i in 0..hhea_table.num_h_metrics as usize {
-        let advance = hmtx_table.h_metrics.read_item(i).ok()?.advance_width;
-        if i > 0 && advance != last_advance {
-            monospace = false;
-            break;
-        }
-        last_advance = advance;
-    }
-
-    Some(monospace)
-}
