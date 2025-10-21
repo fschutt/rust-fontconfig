@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "1.0.2"
+version = "1.0.3"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"

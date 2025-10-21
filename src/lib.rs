@@ -192,7 +192,7 @@ impl PatternMatch {
 }
 
 /// Font weight values as defined in CSS specification
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub enum FcWeight {
     Thin = 100,
@@ -373,7 +373,7 @@ impl Default for FcWeight {
 }
 
 /// CSS font-stretch values
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub enum FcStretch {
     UltraCondensed = 1,
@@ -491,7 +491,7 @@ impl Default for FcStretch {
 }
 
 /// Unicode range representation for font matching
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UnicodeRange {
     pub start: u32,
     pub end: u32,
@@ -513,7 +513,7 @@ impl UnicodeRange {
 }
 
 /// Log levels for trace messages
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub enum TraceLevel {
     Debug,
     Info,
@@ -522,7 +522,7 @@ pub enum TraceLevel {
 }
 
 /// Reason for font matching failure or success
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MatchReason {
     NameMismatch {
         requested: Option<String>,
