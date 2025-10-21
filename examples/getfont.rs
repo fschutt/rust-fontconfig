@@ -9,7 +9,7 @@ fn main() {
     println!("cache list: found {} fonts", cache.list().len());
 
     let start2 = Instant::now();
-    let results = cache.query(
+    let _results = cache.query(
         &FcPattern {
             name: Some(String::from("Gilroy")),
             ..Default::default()
