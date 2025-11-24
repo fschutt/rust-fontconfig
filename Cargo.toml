@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "1.0.3"
+version = "1.0.4"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -16,7 +16,7 @@ name = "rust_fontconfig"
 [dependencies]
 xmlparser = { version = "0.13.3", default-features = false }
 rayon = { version = "1.5.0", default-features = false, optional = true }
-allsorts-subset-browser = { version = "0.16.0", default-features = false, features = ["flate2_rust"], optional = true }
+allsorts = { version = "0.16.1", default-features = false, features = ["flate2_rust"], optional = true }
 base64 = "0.22.1"
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
@@ -26,5 +26,5 @@ mmapio = { version = "0.9.1", default-features = false, optional = true }
 default = ["std", "parsing", "multithreading"]
 std = ["mmapio"]
 multithreading = ["rayon"]
-parsing = ["allsorts-subset-browser"]
+parsing = ["allsorts"]
 ffi = ["parsing", "std"]

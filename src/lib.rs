@@ -90,11 +90,11 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
-use allsorts_subset_browser::binary::read::ReadScope;
-use allsorts_subset_browser::get_name::fontcode_get_name;
-use allsorts_subset_browser::tables::os2::Os2;
-use allsorts_subset_browser::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
-use allsorts_subset_browser::tag;
+use allsorts::binary::read::ReadScope;
+use allsorts::get_name::fontcode_get_name;
+use allsorts::tables::os2::Os2;
+use allsorts::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
+use allsorts::tag;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
@@ -1503,7 +1503,7 @@ fn ParseFontsConf(
 // Remaining implementation for font scanning, parsing, etc.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
-    use allsorts_subset_browser::{
+    use allsorts::{
         binary::read::ReadScope,
         font_data::FontData,
         get_name::fontcode_get_name,
@@ -1571,7 +1571,7 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
         // Extract additional style information
         let is_oblique = os2_table
             .fs_selection
-            .contains(allsorts_subset_browser::tables::os2::FsSelection::OBLIQUE);
+            .contains(allsorts::tables::os2::FsSelection::OBLIQUE);
         let weight = FcWeight::from_u16(os2_table.us_weight_class);
         let stretch = FcStretch::from_u16(os2_table.us_width_class);
 
