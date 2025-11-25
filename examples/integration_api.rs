@@ -131,6 +131,6 @@ fn main() {
     println!("");
     println!("1. FcFontCache::build() - once at startup");
     println!("2. cache.resolve_font_chain() - per CSS font-family declaration");
-    println!("3. chain.resolve_text(\”abc\”) -> [Run { font, glyphs: }] -”\" per text string to shape");
+    println!("3. chain.resolve_text(\"abc\") -> [Run {{ font, glyphs: \"abc\" }}] - per text string to shape");
     println!("4. Load font bytes and shape each run with its font");
 }
