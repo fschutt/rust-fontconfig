@@ -71,10 +71,15 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
+#[cfg(feature = "parsing")]
 use allsorts::binary::read::ReadScope;
+#[cfg(feature = "parsing")]
 use allsorts::get_name::fontcode_get_name;
+#[cfg(feature = "parsing")]
 use allsorts::tables::os2::Os2;
+#[cfg(feature = "parsing")]
 use allsorts::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
+#[cfg(feature = "parsing")]
 use allsorts::tag;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
@@ -1733,8 +1738,6 @@ impl FcFontCache {
         trace: &mut Vec<TraceMsg>,
         os: OperatingSystem,
     ) -> FontFallbackChain {
-        eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_with_os: families={:?}", font_families);
-        
         // Check cache FIRST - key uses original (unexpanded) families
         // This ensures all text nodes with same CSS properties share one chain
         let cache_key = FontChainCacheKey {
@@ -1746,16 +1749,12 @@ impl FcFontCache {
         
         if let Ok(cache) = self.chain_cache.lock() {
             if let Some(cached) = cache.get(&cache_key) {
-                eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_with_os: cache HIT");
                 return cached.clone();
             }
         }
         
-        eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_with_os: cache MISS, building chain...");
-        
         // Expand generic CSS families to OS-specific fonts (no unicode ranges needed anymore)
         let expanded_families = expand_font_families(font_families, os, &[]);
-        eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_with_os: expanded to {} families", expanded_families.len());
         
         // Build the chain
         let chain = self.resolve_font_chain_uncached(
@@ -1779,6 +1778,7 @@ impl FcFontCache {
     /// Note: This function no longer takes text/unicode_ranges as input.
     /// Instead, the returned FontFallbackChain has a query_for_text() method
     /// that can be called to resolve which fonts to use for specific text.
+    #[cfg(feature = "std")]
     fn resolve_font_chain_uncached(
         &self,
         font_families: &[String],
@@ -1787,13 +1787,10 @@ impl FcFontCache {
         oblique: PatternMatch,
         trace: &mut Vec<TraceMsg>,
     ) -> FontFallbackChain {
-        let total_start = std::time::Instant::now();
-        eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_uncached: {} families", font_families.len());
         let mut css_fallbacks = Vec::new();
         
         // Resolve each CSS font-family to its system fallbacks
-        for (i, family) in font_families.iter().enumerate() {
-            eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_uncached: processing family {}/{}: {}", i+1, font_families.len(), family);
+        for (_i, family) in font_families.iter().enumerate() {
             // Check if this is a generic font family
             let (pattern, is_generic) = if Self::is_generic_family(family) {
                 // For generic families, don't filter by name, use font properties instead
@@ -1850,17 +1847,12 @@ impl FcFontCache {
             
             // Use fuzzy matching for specific fonts (fast token-based lookup)
             // For generic families, use query (slower but necessary for property matching)
-            let start = std::time::Instant::now();
             let mut matches = if is_generic {
                 // Generic families need full pattern matching
-                let r = self.query_internal(&pattern, trace);
-                eprintln!("[DEBUG rust-fontconfig] query_internal for '{}' took {:?}, found {} fonts", family, start.elapsed(), r.len());
-                r
+                self.query_internal(&pattern, trace)
             } else {
                 // Specific font names: use fast token-based fuzzy matching
-                let r = self.fuzzy_query_by_name(family, weight, italic, oblique, &[], trace);
-                eprintln!("[DEBUG rust-fontconfig] fuzzy_query for '{}' took {:?}, found {} fonts", family, start.elapsed(), r.len());
-                r
+                self.fuzzy_query_by_name(family, weight, italic, oblique, &[], trace)
             };
             
             // For generic families, limit to top 5 fonts to avoid too many matches
@@ -1875,8 +1867,6 @@ impl FcFontCache {
                 fonts: matches,
             });
         }
-        
-        eprintln!("[DEBUG rust-fontconfig] resolve_font_chain_uncached: DONE, {} css_fallbacks, total time={:?}", css_fallbacks.len(), total_start.elapsed());
         
         // Unicode fallbacks are now resolved lazily in query_for_text()
         // This avoids the expensive unicode coverage check during chain building
@@ -3177,6 +3167,7 @@ fn process_path(
 }
 
 // Helper function to extract a string from the name table
+#[cfg(feature = "parsing")]
 fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
     fontcode_get_name(name_data, name_id)
         .ok()
@@ -3466,6 +3457,7 @@ fn analyze_cmap_coverage(provider: &impl FontTableProvider) -> Option<Vec<Unicod
 }
 
 // Helper function to extract unicode ranges (unused, kept for reference)
+#[cfg(feature = "parsing")]
 #[allow(dead_code)]
 fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
     let mut unicode_ranges = Vec::new();
@@ -3507,6 +3499,7 @@ fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
 }
 
 // Helper function to detect if a font is monospace
+#[cfg(feature = "parsing")]
 #[allow(dead_code)]
 fn detect_monospace(
     provider: &impl FontTableProvider,
