@@ -66,6 +66,7 @@
 
 extern crate alloc;
 
+#[cfg(all(feature = "std", feature = "parsing"))]
 use alloc::borrow::ToOwned;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
@@ -73,7 +74,7 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 #[cfg(feature = "parsing")]
 use allsorts::binary::read::ReadScope;
-#[cfg(feature = "parsing")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::get_name::fontcode_get_name;
 #[cfg(feature = "parsing")]
 use allsorts::tables::os2::Os2;
@@ -81,7 +82,7 @@ use allsorts::tables::os2::Os2;
 use allsorts::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
 #[cfg(feature = "parsing")]
 use allsorts::tag;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 use std::path::PathBuf;
 
 #[cfg(feature = "ffi")]
@@ -1070,6 +1071,7 @@ pub struct CssFallbackGroup {
 /// IMPORTANT: This key intentionally does NOT include unicode_ranges.
 /// Font chains should be cached by CSS properties only, not by text content.
 /// Different texts with the same CSS font-stack should share the same chain.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FontChainCacheKey {
     /// CSS font stack (expanded to OS-specific fonts)
@@ -1503,12 +1505,6 @@ impl FcFontCache {
         self.memory_fonts.get(id)
     }
 
-    /// Builds a new font cache
-    #[cfg(not(all(feature = "std", feature = "parsing")))]
-    pub fn build() -> Self {
-        Self::default()
-    }
-
     /// Check if a pattern matches the query, with detailed tracing
     fn query_matches_internal(
         k: &FcPattern,
@@ -1908,6 +1904,7 @@ impl FcFontCache {
     }
     
     /// Check if a font family name is a generic CSS family
+    #[cfg(feature = "std")]
     fn is_generic_family(family: &str) -> bool {
         matches!(
             family.to_lowercase().as_str(),
@@ -1921,6 +1918,7 @@ impl FcFontCache {
     /// 2. Use token_index to find candidate fonts via BTreeSet intersection
     /// 3. Score only the candidate fonts (instead of all 800+ patterns)
     /// 4. Prioritize fonts matching more tokens + Unicode coverage
+    #[cfg(feature = "std")]
     fn fuzzy_query_by_name(
         &self,
         requested_name: &str,
@@ -3084,7 +3082,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
     result.into_iter().flat_map(|f| f.into_iter()).collect()
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 /// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
 ///
 /// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
@@ -3167,7 +3165,7 @@ fn process_path(
 }
 
 // Helper function to extract a string from the name table
-#[cfg(feature = "parsing")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
     fontcode_get_name(name_data, name_id)
         .ok()
