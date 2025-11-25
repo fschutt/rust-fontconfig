@@ -1273,12 +1273,21 @@ impl FcFontCache {
 
         #[cfg(target_os = "windows")]
         {
-            // `~` isn't actually valid on Windows, but it will be converted by `process_path`
+            // Get the Windows system root directory from environment variable
+            // Falls back to C:\Windows if not found
+            let system_root = std::env::var("SystemRoot")
+                .or_else(|_| std::env::var("WINDIR"))
+                .unwrap_or_else(|_| "C:\\Windows".to_string());
+            
+            // Get user profile directory for user-installed fonts
+            let user_profile = std::env::var("USERPROFILE")
+                .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
+            
             let font_dirs = vec![
-                (None, "C:\\Windows\\Fonts\\".to_owned()),
+                (None, format!("{}\\Fonts\\", system_root)),
                 (
                     None,
-                    "~\\AppData\\Local\\Microsoft\\Windows\\Fonts\\".to_owned(),
+                    format!("{}\\AppData\\Local\\Microsoft\\Windows\\Fonts\\", user_profile),
                 ),
             ];
 

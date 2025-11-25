@@ -12,11 +12,11 @@ env:
 jobs:
   # Test all feature combinations
   feature-matrix:
-    name: Feature Matrix
-    runs-on: ubuntu-latest
+    name: Feature Matrix (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         features:
           - ""  # No features (uses default)
           - "--no-default-features --features std"
@@ -25,6 +25,7 @@ jobs:
           - "--no-default-features --features std,multithreading"
           - "--no-default-features --features std,parsing,multithreading"
           - "--all-features"
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
     - name: Set up Rust
