@@ -1,194 +1,103 @@
-use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch, OperatingSystem};
+//! Example demonstrating unicode-aware font resolution
+//! 
+//! This shows how to resolve font chains and then query them for specific text.
+
+use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 
 fn main() {
     // Initialize font cache
     let cache = FcFontCache::build();
-    let os = OperatingSystem::current();
     
     println!("=== Unicode-Aware Font Selection ===\n");
     
-    // Example 1: Latin text with sans-serif
-    println!("Example 1: Latin text with 'sans-serif'");
+    // Step 1: Create a font chain for sans-serif fonts
+    println!("Step 1: Resolve font chain for 'sans-serif'");
+    let mut trace = Vec::new();
+    let chain = cache.resolve_font_chain(
+        &vec!["sans-serif".to_string()],
+        FcWeight::Normal,
+        PatternMatch::False,  // italic
+        PatternMatch::False,  // oblique
+        &mut trace,
+    );
+    
+    println!("  Font chain has {} CSS fallbacks and {} unicode fallbacks\n", 
+             chain.css_fallbacks.len(),
+             chain.unicode_fallbacks.len());
+    
+    // Step 2: Resolve different texts against the chain
+    println!("Step 2: Resolve various texts against the font chain\n");
+    
+    // Latin text
     let latin_text = "Hello World";
-    let chain = cache.resolve_font_chain(
-        &vec!["sans-serif".to_string()],
-        latin_text,
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
+    println!("Latin text: '{}'", latin_text);
+    print_text_resolution(&cache, &chain, latin_text);
     
-    println!("  Text: '{}'", latin_text);
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
-    }
-    println!("\n");
-    
-    // Example 2: CJK text with sans-serif
-    println!("Example 2: CJK (Chinese) text with 'sans-serif'");
+    // CJK (Chinese) text
     let cjk_text = "你好世界";
-    let chain = cache.resolve_font_chain(
-        &vec!["sans-serif".to_string()],
-        cjk_text,
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
+    println!("\nCJK text: '{}'", cjk_text);
+    print_text_resolution(&cache, &chain, cjk_text);
     
-    println!("  Text: '{}'", cjk_text);
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
-    }
-    println!("\n");
-    
-    // Example 3: Japanese text with sans-serif
-    println!("Example 3: Japanese text with 'sans-serif'");
+    // Japanese text
     let japanese_text = "こんにちは世界";
-    let chain = cache.resolve_font_chain(
-        &vec!["sans-serif".to_string()],
-        japanese_text,
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
+    println!("\nJapanese text: '{}'", japanese_text);
+    print_text_resolution(&cache, &chain, japanese_text);
     
-    println!("  Text: '{}'", japanese_text);
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
-    }
-    println!("\n");
-    
-    // Example 4: Arabic text with sans-serif
-    println!("Example 4: Arabic text with 'sans-serif'");
+    // Arabic text
     let arabic_text = "مرحبا بالعالم";
-    let chain = cache.resolve_font_chain(
-        &vec!["sans-serif".to_string()],
-        arabic_text,
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
+    println!("\nArabic text: '{}'", arabic_text);
+    print_text_resolution(&cache, &chain, arabic_text);
     
-    println!("  Text: '{}'", arabic_text);
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
-    }
-    println!("\n");
-    
-    // Example 5: Cyrillic text with sans-serif
-    println!("Example 5: Cyrillic text with 'sans-serif'");
+    // Cyrillic text
     let cyrillic_text = "Привет мир";
-    let chain = cache.resolve_font_chain(
-        &vec!["sans-serif".to_string()],
-        cyrillic_text,
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
+    println!("\nCyrillic text: '{}'", cyrillic_text);
+    print_text_resolution(&cache, &chain, cyrillic_text);
     
-    println!("  Text: '{}'", cyrillic_text);
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
+    // Mixed text
+    let mixed_text = "Hello 世界 Привет";
+    println!("\nMixed text: '{}'", mixed_text);
+    print_text_resolution(&cache, &chain, mixed_text);
+    
+    println!("\n=== Summary ===");
+    println!("The workflow is:");
+    println!("1. resolve_font_chain() - creates a fallback chain from CSS font-family");
+    println!("2. chain.resolve_text() - maps each character to a font in the chain");
+    println!("3. Use the font IDs to load and render glyphs");
+}
+
+fn print_text_resolution(
+    cache: &FcFontCache,
+    chain: &rust_fontconfig::FontFallbackChain,
+    text: &str,
+) {
+    let resolved = chain.resolve_text(cache, text);
+    
+    // Group consecutive characters by font
+    let mut current_font: Option<String> = None;
+    let mut current_segment = String::new();
+    
+    for (ch, font_info) in resolved {
+        let font_name = font_info.map(|(id, _)| {
+            cache.get_metadata_by_id(&id)
+                .and_then(|p| p.name.clone().or(p.family.clone()))
+                .unwrap_or_else(|| format!("{:?}", id))
+        });
+        
+        if font_name != current_font {
+            if !current_segment.is_empty() {
+                println!("  '{}' -> {}", 
+                         current_segment, 
+                         current_font.as_deref().unwrap_or("[NO FONT]"));
+                current_segment.clear();
+            }
+            current_font = font_name;
         }
+        current_segment.push(ch);
     }
-    println!("\n");
     
-    // Example 6: Mixed Latin + CJK text
-    println!("Example 6: Mixed Latin + CJK text with 'sans-serif'");
-    let mixed_text = "Hello 世界";
-    let chain = cache.resolve_font_chain(
-        &vec!["sans-serif".to_string()],
-        mixed_text,
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
-    
-    println!("  Text: '{}'", mixed_text);
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
+    if !current_segment.is_empty() {
+        println!("  '{}' -> {}", 
+                 current_segment, 
+                 current_font.as_deref().unwrap_or("[NO FONT]"));
     }
-    println!("\n");
-    
-    // Example 7: Cross-platform - Windows with CJK text
-    println!("Example 7: Cross-platform - Windows with CJK text");
-    let chain = cache.resolve_font_chain_with_os(
-        &vec!["sans-serif".to_string()],
-        "你好世界",
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-        OperatingSystem::Windows,
-    );
-    
-    println!("  Text: '你好世界'");
-    println!("  OS: Windows");
-    println!("  Expected fonts (prioritized): Microsoft YaHei (CJK), then Segoe UI (Latin)");
-    print!("  Actual font IDs: ");
-    for (i, group) in chain.css_fallbacks.iter().take(3).enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
-    }
-    println!("\n  Note: Actual fonts depend on system installation\n");
-    
-    // Example 8: Monospace with CJK
-    println!("Example 8: Monospace with CJK text");
-    let chain = cache.resolve_font_chain(
-        &vec!["monospace".to_string()],
-        "代码示例",
-        FcWeight::Normal,
-        PatternMatch::False,
-        PatternMatch::False,
-        &mut Vec::new(),
-    );
-    
-    println!("  Text: '代码示例' (code example)");
-    print!("  Fonts: ");
-    for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        if i > 0 { print!(", "); }
-        if let Some(font_match) = group.fonts.first() {
-            print!("{}", font_match.id);
-        }
-    }
-    println!("\n");
-    
-    println!("=== Summary ===");
-    println!("Unicode-aware font selection prioritizes fonts based on the text content:");
-    println!("- Latin text (U+0000-U+007F) → Standard system fonts (Helvetica, Arial, etc.)");
-    println!("- CJK text (U+4E00-U+9FFF, U+3040-U+30FF, U+AC00-U+D7AF) → CJK fonts first");
-    println!("- Arabic text (U+0600-U+06FF) → Arabic-capable fonts first");
-    println!("- Cyrillic text (U+0400-U+04FF) → Cyrillic-capable fonts first");
-    println!("\nThis ensures better text rendering for multilingual content!");
 }

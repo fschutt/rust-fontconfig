@@ -36,70 +36,138 @@ Now for the more practical reasons:
 use rust_fontconfig::{FcFontCache, FcPattern};
 
 fn main() {
-    // Build the font cache
+    // Build the font cache (scans system fonts)
     let cache = FcFontCache::build();
     
     // Query a font by name
+    let mut trace = Vec::new();
     let results = cache.query(
         &FcPattern {
             name: Some(String::from("Arial")),
             ..Default::default()
         },
-        &mut Vec::new() // Trace messages container
+        &mut trace
     );
     
     if let Some(font_match) = results {
         println!("Font match ID: {:?}", font_match.id);
         println!("Font unicode ranges: {:?}", font_match.unicode_ranges);
-        println!("Font fallbacks: {:?}", font_match.fallbacks.len());
+        
+        // Get font metadata
+        if let Some(meta) = cache.get_metadata_by_id(&font_match.id) {
+            println!("Family: {:?}", meta.family);
+        }
+        
+        // Get font file path
+        if let Some(source) = cache.get_font_by_id(&font_match.id) {
+            match source {
+                rust_fontconfig::FontSource::Disk(path) => {
+                    println!("Path: {}", path.path);
+                }
+                rust_fontconfig::FontSource::Memory(font) => {
+                    println!("Memory font: {}", font.id);
+                }
+            }
+        }
     } else {
         println!("No matching font found");
     }
 }
 ```
 
-### Find All Monospace Fonts
+### Font Fallback Chain for CSS font-family
+
+The new API separates font chain resolution from text querying:
+
+1. **`resolve_font_chain()`** - Create a fallback chain from CSS font-family (without text)
+2. **`chain.resolve_text()`** - Query which fonts to use for specific text
 
 ```rust
-use rust_fontconfig::{FcFontCache, FcPattern, PatternMatch};
+use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 
 fn main() {
     let cache = FcFontCache::build();
-    let fonts = cache.query_all(
-        &FcPattern {
-            monospace: PatternMatch::True,
-            ..Default::default()
-        },
-        &mut Vec::new()
+    
+    // Step 1: Build font fallback chain (without text parameter)
+    let mut trace = Vec::new();
+    let font_chain = cache.resolve_font_chain(
+        &["Arial".to_string(), "sans-serif".to_string()],
+        FcWeight::Normal,
+        PatternMatch::DontCare,  // italic
+        PatternMatch::DontCare,  // oblique
+        &mut trace,
     );
-
-    println!("Found {} monospace fonts:", fonts.len());
-    for font in fonts {
-        println!("Font ID: {:?}", font.id);
+    
+    println!("CSS fallback groups: {}", font_chain.css_fallbacks.len());
+    for group in &font_chain.css_fallbacks {
+        println!("  CSS '{}' resolved to {} fonts", group.css_name, group.fonts.len());
+    }
+    
+    // Step 2: Query which fonts to use for specific text
+    let text = "Hello 你好 Здравствуйте";
+    let font_runs = font_chain.query_for_text(&cache, text);
+    
+    println!("\nText '{}' split into {} font runs:", text, font_runs.len());
+    for run in &font_runs {
+        println!("  '{}' -> font {:?}", run.text, run.font_id);
     }
 }
 ```
 
-### Font Matching for Multilingual Text
+### Character-by-Character Font Resolution
+
+For fine-grained control, use `resolve_text()` to get per-character font assignments:
 
 ```rust
-use rust_fontconfig::{FcFontCache, FcPattern};
+use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 
 fn main() {
     let cache = FcFontCache::build();
-    let text = "Hello 你好 Здравствуйте";
     
-    // Find fonts that can render the mixed-script text
-    let mut trace = Vec::new();
-    let matched_fonts = cache.query_for_text(
-        &FcPattern::default(),
-        text,
-        &mut trace
+    let chain = cache.resolve_font_chain(
+        &["sans-serif".to_string()],
+        FcWeight::Normal,
+        PatternMatch::False,
+        PatternMatch::False,
+        &mut Vec::new(),
     );
     
-    println!("Found {} fonts for the multilingual text", matched_fonts.len());
-    for font in matched_fonts {
-        println!("Font ID: {:?}", font.id);
+    // Get font assignment for each character
+    let text = "Hello 世界";
+    let resolved = chain.resolve_text(&cache, text);
+    
+    for (ch, font_info) in resolved {
+        match font_info {
+            Some((font_id, css_source)) => {
+                let font_name = cache.get_metadata_by_id(&font_id)
+                    .and_then(|m| m.name.clone().or(m.family.clone()))
+                    .unwrap_or_default();
+                println!("'{}' -> {} (from CSS '{}')", ch, font_name, css_source);
+            }
+            None => println!("'{}' -> NO FONT FOUND", ch),
+        }
+    }
+}
+```
+
+### List All Fonts Matching a Pattern
+
+```rust
+use rust_fontconfig::{FcFontCache, FcWeight};
+
+fn main() {
+    let cache = FcFontCache::build();
+    
+    // List all fonts - filter by properties
+    let bold_fonts: Vec<_> = cache.list().into_iter()
+        .filter(|(pattern, _id)| {
+            matches!(pattern.weight, FcWeight::Bold | FcWeight::ExtraBold)
+        })
+        .collect();
+
+    println!("Found {} bold fonts:", bold_fonts.len());
+    for (pattern, id) in bold_fonts.iter().take(5) {
+        println!("  {:?}: {:?}", id, pattern.name.as_ref().or(pattern.family.as_ref()));
     }
 }
 ```
@@ -217,12 +285,14 @@ cl.exe /I./include /Fe:font_example.exe example.c rust_fontconfig.lib
 
 ## Features
 
-- Font matching by name, family, style properties, or Unicode ranges
+- **Font matching** by name, family, style properties, or Unicode ranges
+- **CSS font-family resolution** with `resolve_font_chain()` for proper fallback handling
+- **Per-character font resolution** with `chain.resolve_text()` for multilingual text
+- **Font run grouping** with `chain.query_for_text()` for text shaping pipelines
 - Support for font weights (thin, light, normal, bold, etc.)
 - Support for font stretches (condensed, normal, expanded, etc.)
-- Multilingual text support with automatic font fallback
 - In-memory font loading and caching
-- Optional `no_std` support
+- Optional `no_std` support ("bring your own fonts" for WASM)
 - C API for integration with non-Rust languages
 
 ## License

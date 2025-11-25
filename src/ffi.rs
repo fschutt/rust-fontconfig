@@ -1083,105 +1083,327 @@ pub extern "C" fn fc_cache_add_memory_fonts(
     }
 }
 
-/// Query all fonts matching a pattern
+/// C-compatible representation of a resolved font run
+#[repr(C)]
+pub struct FcResolvedFontRunC {
+    /// The text for this run
+    pub text: *mut c_char,
+    /// Start byte offset in original text
+    pub start_byte: usize,
+    /// End byte offset in original text
+    pub end_byte: usize,
+    /// Font ID for this run (or null if no font found)
+    pub font_id: FcFontIdC,
+    /// Whether font_id is valid
+    pub has_font: bool,
+    /// CSS source name
+    pub css_source: *mut c_char,
+}
+
+/// C-compatible representation of a CSS fallback group
+#[repr(C)]
+pub struct FcCssFallbackGroupC {
+    /// The CSS font name
+    pub css_name: *mut c_char,
+    /// Array of font matches
+    pub fonts: *mut FcFontMatchNoFallbackC,
+    /// Number of fonts
+    pub fonts_count: usize,
+}
+
+/// C-compatible font fallback chain (opaque type)
+pub struct FcFontFallbackChainC {
+    inner: FontFallbackChain,
+}
+
+/// Resolve a font chain from CSS font families
+/// 
+/// This is the first step in the two-step font resolution process.
+/// 
+/// @param cache The font cache
+/// @param families Array of CSS font family names (e.g., ["Arial", "sans-serif"])
+/// @param families_count Number of family names
+/// @param weight Font weight
+/// @param italic Whether to match italic fonts
+/// @param oblique Whether to match oblique fonts
+/// @param trace Array to store trace messages
+/// @param trace_count Pointer to trace count (will be updated)
+/// @return Font fallback chain or NULL on error
 #[no_mangle]
-pub extern "C" fn fc_cache_query_all(
+pub extern "C" fn fc_resolve_font_chain(
     cache: *const FcFontCache,
-    pattern: *const FcPatternC,
+    families: *const *const c_char,
+    families_count: usize,
+    weight: FcWeight,
+    italic: PatternMatch,
+    oblique: PatternMatch,
     trace: *mut *mut FcTraceMsgC,
     trace_count: *mut usize,
-    matches_count: *mut usize,
-) -> *mut *mut FcFontMatchC {
-    if cache.is_null()
-        || pattern.is_null()
-        || trace.is_null()
-        || trace_count.is_null()
-        || matches_count.is_null()
-    {
+) -> *mut FcFontFallbackChainC {
+    if cache.is_null() || families.is_null() || trace.is_null() || trace_count.is_null() {
         return ptr::null_mut();
     }
 
     unsafe {
         let cache = &*cache;
-        let pattern_rust = c_to_pattern(pattern);
+        
+        // Convert C string array to Vec<String>
+        let families_slice = slice::from_raw_parts(families, families_count);
+        let families_rust: Vec<String> = families_slice
+            .iter()
+            .filter_map(|&s| {
+                if s.is_null() {
+                    None
+                } else {
+                    Some(CStr::from_ptr(s).to_string_lossy().into_owned())
+                }
+            })
+            .collect();
 
         let mut trace_msgs = Vec::new();
-        let results = cache.query_all(&pattern_rust, &mut trace_msgs);
+        let chain = cache.resolve_font_chain(&families_rust, weight, italic, oblique, &mut trace_msgs);
 
         // Convert trace messages
         let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
         *trace = trace_c;
         *trace_count = count;
 
-        if results.is_empty() {
-            *matches_count = 0;
+        Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
+    }
+}
+
+/// Free a font fallback chain
+#[no_mangle]
+pub extern "C" fn fc_font_chain_free(chain: *mut FcFontFallbackChainC) {
+    if !chain.is_null() {
+        unsafe {
+            let _ = Box::from_raw(chain);
+        }
+    }
+}
+
+/// Query which fonts should be used for a text string
+/// 
+/// This is the second step in the two-step font resolution process.
+/// Returns runs of consecutive characters that use the same font.
+/// 
+/// @param chain The font fallback chain (from fc_resolve_font_chain)
+/// @param cache The font cache
+/// @param text The text to find fonts for
+/// @param runs_count Pointer to store number of runs (will be updated)
+/// @return Array of font runs or NULL on error (must be freed with fc_resolved_runs_free)
+#[no_mangle]
+pub extern "C" fn fc_chain_query_for_text(
+    chain: *const FcFontFallbackChainC,
+    cache: *const FcFontCache,
+    text: *const c_char,
+    runs_count: *mut usize,
+) -> *mut FcResolvedFontRunC {
+    if chain.is_null() || cache.is_null() || text.is_null() || runs_count.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let chain = &*chain;
+        let cache = &*cache;
+        let text_rust = CStr::from_ptr(text).to_string_lossy().into_owned();
+
+        let runs = chain.inner.query_for_text(cache, &text_rust);
+
+        if runs.is_empty() {
+            *runs_count = 0;
             return ptr::null_mut();
         }
 
-        // Convert results to C representation
-        let mut matches_c = Vec::with_capacity(results.len());
-        for match_obj in &results {
-            let match_c = font_match_to_c(cache, match_obj);
-            matches_c.push(Box::into_raw(Box::new(match_c)));
+        let mut runs_c = Vec::with_capacity(runs.len());
+        for run in &runs {
+            let text_c = CString::new(run.text.as_str()).unwrap_or_default().into_raw();
+            let css_source_c = CString::new(run.css_source.as_str()).unwrap_or_default().into_raw();
+            
+            let (font_id, has_font) = match &run.font_id {
+                Some(id) => (FcFontIdC::from_fontid(id), true),
+                None => (FcFontIdC { high: 0, low: 0 }, false),
+            };
+
+            runs_c.push(FcResolvedFontRunC {
+                text: text_c,
+                start_byte: run.start_byte,
+                end_byte: run.end_byte,
+                font_id,
+                has_font,
+                css_source: css_source_c,
+            });
         }
 
-        *matches_count = matches_c.len();
-        let ptr = matches_c.as_mut_ptr();
-        mem::forget(matches_c);
+        *runs_count = runs_c.len();
+        let ptr = runs_c.as_mut_ptr();
+        mem::forget(runs_c);
 
         ptr
     }
 }
 
-/// Query fonts for text
+/// Free an array of resolved font runs
 #[no_mangle]
-pub extern "C" fn fc_cache_query_for_text(
-    cache: *const FcFontCache,
-    pattern: *const FcPatternC,
-    text: *const c_char,
-    trace: *mut *mut FcTraceMsgC,
-    trace_count: *mut usize,
-    matches_count: *mut usize,
-) -> *mut *mut FcFontMatchC {
-    if cache.is_null()
-        || pattern.is_null()
-        || text.is_null()
-        || trace.is_null()
-        || trace_count.is_null()
-        || matches_count.is_null()
-    {
+pub extern "C" fn fc_resolved_runs_free(runs: *mut FcResolvedFontRunC, count: usize) {
+    if runs.is_null() || count == 0 {
+        return;
+    }
+
+    unsafe {
+        let runs_slice = slice::from_raw_parts_mut(runs, count);
+
+        for run in runs_slice {
+            free_c_string(run.text);
+            free_c_string(run.css_source);
+        }
+
+        let _ = Vec::from_raw_parts(runs, count, count);
+    }
+}
+
+/// Get the original CSS font stack from a font chain
+#[no_mangle]
+pub extern "C" fn fc_chain_get_original_stack(
+    chain: *const FcFontFallbackChainC,
+    stack_count: *mut usize,
+) -> *mut *mut c_char {
+    if chain.is_null() || stack_count.is_null() {
         return ptr::null_mut();
     }
 
     unsafe {
-        let cache = &*cache;
-        let pattern_rust = c_to_pattern(pattern);
-        let text_rust = CStr::from_ptr(text).to_string_lossy().into_owned();
+        let chain = &*chain;
+        let stack = &chain.inner.original_stack;
 
-        let mut trace_msgs = Vec::new();
-        let results = cache.query_for_text(&pattern_rust, &text_rust, &mut trace_msgs);
-
-        // Convert trace messages
-        let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
-        *trace = trace_c;
-        *trace_count = count;
-
-        if results.is_empty() {
-            *matches_count = 0;
+        if stack.is_empty() {
+            *stack_count = 0;
             return ptr::null_mut();
         }
 
-        // Convert results to C representation
-        let mut matches_c = Vec::with_capacity(results.len());
-        for match_obj in &results {
-            let match_c = font_match_to_c(cache, match_obj);
-            matches_c.push(Box::into_raw(Box::new(match_c)));
+        let mut stack_c = Vec::with_capacity(stack.len());
+        for name in stack {
+            let name_c = CString::new(name.as_str()).unwrap_or_default().into_raw();
+            stack_c.push(name_c);
         }
 
-        *matches_count = matches_c.len();
-        let ptr = matches_c.as_mut_ptr();
-        mem::forget(matches_c);
+        *stack_count = stack_c.len();
+        let ptr = stack_c.as_mut_ptr();
+        mem::forget(stack_c);
 
         ptr
+    }
+}
+
+/// Free a string array (from fc_chain_get_original_stack)
+#[no_mangle]
+pub extern "C" fn fc_string_array_free(arr: *mut *mut c_char, count: usize) {
+    if arr.is_null() || count == 0 {
+        return;
+    }
+
+    unsafe {
+        let arr_slice = slice::from_raw_parts_mut(arr, count);
+        for s in arr_slice {
+            free_c_string(*s);
+        }
+        let _ = Vec::from_raw_parts(arr, count, count);
+    }
+}
+
+/// Get CSS fallback groups from a font chain
+#[no_mangle]
+pub extern "C" fn fc_chain_get_css_fallbacks(
+    chain: *const FcFontFallbackChainC,
+    groups_count: *mut usize,
+) -> *mut FcCssFallbackGroupC {
+    if chain.is_null() || groups_count.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let chain = &*chain;
+        let fallbacks = &chain.inner.css_fallbacks;
+
+        if fallbacks.is_empty() {
+            *groups_count = 0;
+            return ptr::null_mut();
+        }
+
+        let mut groups_c = Vec::with_capacity(fallbacks.len());
+        for group in fallbacks {
+            let css_name = CString::new(group.css_name.as_str()).unwrap_or_default().into_raw();
+            
+            let fonts_count = group.fonts.len();
+            let fonts = if fonts_count > 0 {
+                let mut fonts_c = Vec::with_capacity(fonts_count);
+                for font in &group.fonts {
+                    let ranges_count = font.unicode_ranges.len();
+                    let ranges = if ranges_count > 0 {
+                        let mut ranges_vec: Vec<UnicodeRange> = font.unicode_ranges.clone();
+                        let ptr = ranges_vec.as_mut_ptr();
+                        mem::forget(ranges_vec);
+                        ptr
+                    } else {
+                        ptr::null_mut()
+                    };
+
+                    fonts_c.push(FcFontMatchNoFallbackC {
+                        id: FcFontIdC::from_fontid(&font.id),
+                        unicode_ranges: ranges,
+                        unicode_ranges_count: ranges_count,
+                    });
+                }
+                let ptr = fonts_c.as_mut_ptr();
+                mem::forget(fonts_c);
+                ptr
+            } else {
+                ptr::null_mut()
+            };
+
+            groups_c.push(FcCssFallbackGroupC {
+                css_name,
+                fonts,
+                fonts_count,
+            });
+        }
+
+        *groups_count = groups_c.len();
+        let ptr = groups_c.as_mut_ptr();
+        mem::forget(groups_c);
+
+        ptr
+    }
+}
+
+/// Free CSS fallback groups
+#[no_mangle]
+pub extern "C" fn fc_css_fallback_groups_free(groups: *mut FcCssFallbackGroupC, count: usize) {
+    if groups.is_null() || count == 0 {
+        return;
+    }
+
+    unsafe {
+        let groups_slice = slice::from_raw_parts_mut(groups, count);
+
+        for group in groups_slice {
+            free_c_string(group.css_name);
+
+            if !group.fonts.is_null() && group.fonts_count > 0 {
+                let fonts_slice = slice::from_raw_parts_mut(group.fonts, group.fonts_count);
+                for font in fonts_slice {
+                    if !font.unicode_ranges.is_null() && font.unicode_ranges_count > 0 {
+                        let _ = Vec::from_raw_parts(
+                            font.unicode_ranges,
+                            font.unicode_ranges_count,
+                            font.unicode_ranges_count,
+                        );
+                    }
+                }
+                let _ = Vec::from_raw_parts(group.fonts, group.fonts_count, group.fonts_count);
+            }
+        }
+
+        let _ = Vec::from_raw_parts(groups, count, count);
     }
 }

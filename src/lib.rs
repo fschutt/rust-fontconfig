@@ -27,7 +27,6 @@
 //!     if let Some(font_match) = results {
 //!         println!("Font match ID: {:?}", font_match.id);
 //!         println!("Font unicode ranges: {:?}", font_match.unicode_ranges);
-//!         println!("Font fallbacks: {:?}", font_match.fallbacks.len());
 //!     } else {
 //!         println!("No matching font found");
 //!     }
@@ -37,12 +36,12 @@
 //! ### Resolve Font Chain and Query for Text
 //!
 //! ```rust,no_run
-//! use rust_fontconfig::{FcFontCache, FcPattern, FcWeight, PatternMatch};
+//! use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 //!
 //! fn main() {
 //!     let cache = FcFontCache::build();
 //!     
-//!     // Build font fallback chain (without text)
+//!     // Build font fallback chain (without text parameter)
 //!     let font_chain = cache.resolve_font_chain(
 //!         &["Arial".to_string(), "sans-serif".to_string()],
 //!         FcWeight::Normal,
@@ -122,7 +121,7 @@ impl OperatingSystem {
         });
         
         let has_arabic = unicode_ranges.iter().any(|r| r.start >= 0x0600 && r.start <= 0x06FF);
-        let has_cyrillic = unicode_ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF);
+        let _has_cyrillic = unicode_ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF);
         
         match self {
             OperatingSystem::Windows => {
@@ -176,7 +175,7 @@ impl OperatingSystem {
         });
         
         let has_arabic = unicode_ranges.iter().any(|r| r.start >= 0x0600 && r.start <= 0x06FF);
-        let has_cyrillic = unicode_ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF);
+        let _has_cyrillic = unicode_ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF);
         let has_hebrew = unicode_ranges.iter().any(|r| r.start >= 0x0590 && r.start <= 0x05FF);
         let has_thai = unicode_ranges.iter().any(|r| r.start >= 0x0E00 && r.start <= 0x0E7F);
         
@@ -1706,7 +1705,7 @@ impl FcFontCache {
     /// # use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
     /// let cache = FcFontCache::build();
     /// let families = vec!["Arial".to_string(), "sans-serif".to_string()];
-    /// let chain = cache.resolve_font_chain(&families, "Hello", FcWeight::Normal, 
+    /// let chain = cache.resolve_font_chain(&families, FcWeight::Normal, 
     ///                                       PatternMatch::DontCare, PatternMatch::DontCare, 
     ///                                       &mut Vec::new());
     /// // On macOS: families expanded to ["Arial", "San Francisco", "Helvetica Neue", "Lucida Grande"]
@@ -1889,6 +1888,7 @@ impl FcFontCache {
     }
     
     /// Extract Unicode ranges from text
+    #[allow(dead_code)]
     fn extract_unicode_ranges(text: &str) -> Vec<UnicodeRange> {
         let mut chars: Vec<char> = text.chars().collect();
         chars.sort_unstable();
@@ -1938,7 +1938,7 @@ impl FcFontCache {
         italic: PatternMatch,
         oblique: PatternMatch,
         unicode_ranges: &[UnicodeRange],
-        trace: &mut Vec<TraceMsg>,
+        _trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatch> {
         // Extract tokens from the requested name (e.g., "NotoSansJP" -> ["noto", "sans", "jp"])
         let tokens = Self::extract_font_name_tokens(requested_name);
@@ -2122,6 +2122,7 @@ impl FcFontCache {
     
     /// Normalize font name for comparison (remove spaces, lowercase, keep only ASCII alphanumeric)
     /// This ensures we only compare Latin-script names, ignoring localized names
+    #[allow(dead_code)]
     fn normalize_font_name(name: &str) -> String {
         name.chars()
             .filter(|c| c.is_ascii_alphanumeric())
@@ -2130,6 +2131,7 @@ impl FcFontCache {
     }
     
     /// Calculate Levenshtein distance between two strings
+    #[allow(dead_code)]
     fn levenshtein_distance(s1: &str, s2: &str) -> usize {
         let len1 = s1.chars().count();
         let len2 = s2.chars().count();
@@ -2163,6 +2165,7 @@ impl FcFontCache {
     /// Find fonts to cover missing Unicode ranges
     /// Uses intelligent matching: prefers fonts with similar names to existing ones
     /// Early quits once all Unicode ranges are covered for performance
+    #[allow(dead_code)]
     fn find_unicode_fallbacks(
         &self,
         unicode_ranges: &[UnicodeRange],
@@ -2272,6 +2275,7 @@ impl FcFontCache {
     
     /// Calculate similarity score between a font and existing font prefixes
     /// Higher score = more similar
+    #[allow(dead_code)]
     fn calculate_font_similarity_score(
         font_meta: Option<&FcPattern>,
         existing_prefixes: &[String],
@@ -2387,7 +2391,7 @@ impl FcFontCache {
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing"))]
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
 fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
     use std::fs;
     use std::path::Path;
@@ -2468,7 +2472,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 }
 
 // Parses the fonts.conf file
-#[cfg(all(feature = "std", feature = "parsing"))]
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
 fn ParseFontsConf(
     input: &str,
     paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
@@ -3503,6 +3507,7 @@ fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
 }
 
 // Helper function to detect if a font is monospace
+#[allow(dead_code)]
 fn detect_monospace(
     provider: &impl FontTableProvider,
     os2_table: &Os2,

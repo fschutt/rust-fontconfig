@@ -1,149 +1,136 @@
+//! Character resolution example
+//! 
+//! Demonstrates how to resolve individual characters to fonts,
+//! useful for debugging font coverage issues.
+
 use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 
 fn main() {
     let cache = FcFontCache::build();
-
-    // Example 1: Bold Japanese text with Latin fallback
-    println!("=== Example 1: Bold Japanese + Latin ===");
-    let text = "日本語 and English";
-    let font_families = vec![
-        "Hiragino Sans".to_string(),
+        
+    // Create a font chain with typical web defaults
+    let families = vec![
+        "system-ui".to_string(),
         "sans-serif".to_string(),
     ];
     
-    resolve_and_print_text(&cache, &font_families, text, FcWeight::Bold, PatternMatch::DontCare);
-    println!();
-
-    // Example 2: Italic serif text
-    println!("=== Example 2: Italic Serif ===");
-    let text = "The Quick Brown Fox";
-    let font_families = vec!["serif".to_string()];
-    
-    resolve_and_print_text(&cache, &font_families, text, FcWeight::Normal, PatternMatch::True);
-    println!();
-
-    // Example 3: Bold monospace
-    println!("=== Example 3: Bold Monospace ===");
-    let text = "code_example() { }";
-    let font_families = vec!["monospace".to_string()];
-    
-    resolve_and_print_text(&cache, &font_families, text, FcWeight::Bold, PatternMatch::DontCare);
-    println!();
-
-    // Example 4: Sans-serif with specific font
-    println!("=== Example 4: Arial Bold ===");
-    let text = "Bold Text Example";
-    let font_families = vec!["Arial".to_string(), "sans-serif".to_string()];
-    
-    resolve_and_print_text(&cache, &font_families, text, FcWeight::Bold, PatternMatch::DontCare);
-    println!();
-
-    // Example 5: Mixed scripts with bold
-    println!("=== Example 5: Bold Mixed Scripts ===");
-    let text = "Cyrillic: Привет Japanese: こんにちは";
-    let font_families = vec!["Helvetica".to_string(), "sans-serif".to_string()];
-    
-    resolve_and_print_text(&cache, &font_families, text, FcWeight::Bold, PatternMatch::DontCare);
-}
-
-fn resolve_and_print_text(
-    cache: &FcFontCache,
-    font_families: &[String],
-    text: &str,
-    weight: FcWeight,
-    italic: PatternMatch,
-) {
-    println!("Font stack: {:?}", font_families.iter().take(3).collect::<Vec<_>>());
-    println!("Text: \"{}\"", text);
-    println!("Weight: {:?}, Italic: {:?}\n", weight, italic);
-    
+    let mut trace = Vec::new();
     let chain = cache.resolve_font_chain(
-        font_families,
-        text,
-        weight,
-        italic,
-        PatternMatch::DontCare,
-        &mut Vec::new(),
+        &families,
+        FcWeight::Normal,
+        PatternMatch::False,
+        PatternMatch::False,
+        &mut trace,
     );
     
-    let resolved = chain.resolve_text(cache, text);
+    // Test characters from different Unicode blocks
+    let test_chars = vec![
+        ('A', "Latin Capital Letter A"),
+        ('a', "Latin Small Letter A"),
+        ('0', "Digit Zero"),
+        ('€', "Euro Sign"),
+        ('→', "Rightwards Arrow"),
+        ('中', "CJK Ideograph - China"),
+        ('日', "CJK Ideograph - Sun/Day"),
+        ('あ', "Hiragana Letter A"),
+        ('ア', "Katakana Letter A"),
+        ('한', "Hangul Syllable Han"),
+        ('א', "Hebrew Letter Alef"),
+        ('ا', "Arabic Letter Alef"),
+        ('α', "Greek Small Letter Alpha"),
+        ('Σ', "Greek Capital Letter Sigma"),
+        ('я', "Cyrillic Small Letter Ya"),
+        ('🙂', "Slightly Smiling Face"),
+        ('♠', "Black Spade Suit"),
+        ('∑', "N-ary Summation"),
+        ('∞', "Infinity"),
+        ('℃', "Degree Celsius"),
+    ];
     
-    let mut current_font: Option<(String, String)> = None;
-    let mut current_segment = String::new();
+    println!("Character resolution results:\n");
+    println!("{:<6} {:<30} {:<40}", "Char", "Description", "Font");
+    println!("{}", "-".repeat(80));
     
-    for (ch, font_info) in resolved {
-        match font_info {
-            Some((font_id, css_source)) => {
-                let font_key = (font_id.to_string(), css_source.clone());
-                
-                if current_font.as_ref() != Some(&font_key) {
-                    if !current_segment.is_empty() {
-                        if let Some((ref prev_id, ref prev_source)) = current_font {
-                            print_font_segment(cache, &current_segment, &parse_font_id(prev_id), prev_source);
-                        }
-                        current_segment.clear();
-                    }
-                    
-                    current_font = Some(font_key);
-                }
-                
-                current_segment.push(ch);
-            }
-            None => {
-                if !current_segment.is_empty() {
-                    if let Some((ref prev_id, ref prev_source)) = current_font {
-                        print_font_segment(cache, &current_segment, &parse_font_id(prev_id), prev_source);
-                    }
-                    current_segment.clear();
-                }
-                
-                println!("  '{}' -> [NO FONT]", ch);
-                current_font = None;
-            }
-        }
-    }
-    
-    if !current_segment.is_empty() {
-        if let Some((ref prev_id, ref prev_source)) = current_font {
-            print_font_segment(cache, &current_segment, &parse_font_id(prev_id), prev_source);
-        }
-    }
-}
-
-fn print_font_segment(
-    cache: &FcFontCache, 
-    text: &str, 
-    font_id: &rust_fontconfig::FontId,
-    css_source: &str,
-) {
-    if let Some(font_source) = cache.get_font_by_id(font_id) {
-        let font_index = match font_source {
-            rust_fontconfig::FontSource::Memory(m) => m.font_index,
-            rust_fontconfig::FontSource::Disk(d) => d.font_index,
-        };
+    for (ch, description) in test_chars {
+        let text = ch.to_string();
+        let resolved = chain.resolve_text(&cache, &text);
         
-        if let Some(pattern) = cache.get_metadata_by_id(font_id) {
-            let font_name = pattern.name.as_ref()
-                .or(pattern.family.as_ref())
-                .map(|s| s.as_str())
-                .unwrap_or("<unknown>");
-            println!("  '{}' -> {} [index: {}] (CSS: '{}')", 
-                     text, font_name, font_index, css_source);
+        let font_name = resolved.first()
+            .and_then(|(_, info)| info.as_ref())
+            .and_then(|(id, _)| cache.get_metadata_by_id(id))
+            .and_then(|m| m.name.clone().or(m.family.clone()))
+            .unwrap_or_else(|| "⚠ NOT FOUND".to_string());
+        
+        println!("{:<6} {:<30} {}", ch, description, font_name);
+    }
+    
+    // Show how to check if a specific font covers a character
+    println!("\n\nFont Coverage Check\n");
+    
+    let pattern = rust_fontconfig::FcPattern {
+        family: Some("Arial".to_string()),
+        ..Default::default()
+    };
+    
+    if let Some(match_result) = cache.query(&pattern, &mut Vec::new()) {
+        println!("Checking Arial coverage:");
+        
+        // Create a chain just for Arial
+        let arial_chain = cache.resolve_font_chain(
+            &vec!["Arial".to_string()],
+            FcWeight::Normal,
+            PatternMatch::False,
+            PatternMatch::False,
+            &mut Vec::new(),
+        );
+        
+        let check_chars = ['A', '中', '🙂', '→'];
+        for ch in check_chars {
+            let resolved = arial_chain.resolve_text(&cache, &ch.to_string());
+            let found_in_arial = resolved.first()
+                .and_then(|(_, info)| info.as_ref())
+                .map(|(id, _)| id == &match_result.id)
+                .unwrap_or(false);
+            
+            let status = if found_in_arial { "✓" } else { "✗" };
+            println!("  {} '{}' (U+{:04X})", status, ch, ch as u32);
         }
     }
-}
-
-fn parse_font_id(id_str: &str) -> rust_fontconfig::FontId {
-    let parts: Vec<&str> = id_str.split('-').collect();
-    if parts.len() != 5 {
-        return rust_fontconfig::FontId(0);
+    
+    // Show codepoint ranges supported
+    println!("\n\nUnicode Block Coverage Summary\n");
+    
+    let blocks = [
+        ("Basic Latin", 0x0020..0x007F),
+        ("Latin Extended-A", 0x0100..0x017F),
+        ("Greek", 0x0370..0x03FF),
+        ("Cyrillic", 0x0400..0x04FF),
+        ("Arabic", 0x0600..0x06FF),
+        ("CJK Unified Ideographs", 0x4E00..0x9FFF),
+        ("Hiragana", 0x3040..0x309F),
+        ("Katakana", 0x30A0..0x30FF),
+    ];
+    
+    for (name, range) in blocks {
+        // Sample a few codepoints from each block
+        let sample_points: Vec<char> = range.clone()
+            .step_by(range.len() / 5)
+            .take(5)
+            .filter_map(|cp| char::from_u32(cp))
+            .collect();
+        
+        let sample_text: String = sample_points.iter().collect();
+        let resolved = chain.resolve_text(&cache, &sample_text);
+        
+        let fonts_used: std::collections::HashSet<_> = resolved.iter()
+            .filter_map(|(_, info)| info.as_ref())
+            .map(|(id, _)| id.clone())
+            .collect();
+        
+        let coverage = resolved.iter()
+            .filter(|(_, info)| info.is_some())
+            .count() as f32 / resolved.len() as f32 * 100.0;
+        
+        println!("{:<30} {:>6.1}% coverage ({} fonts)", name, coverage, fonts_used.len());
     }
-    
-    let part1 = u128::from_str_radix(parts[0], 16).unwrap_or(0) << 96;
-    let part2 = u128::from_str_radix(parts[1], 16).unwrap_or(0) << 80;
-    let part3 = u128::from_str_radix(parts[2], 16).unwrap_or(0) << 64;
-    let part4 = u128::from_str_radix(parts[3], 16).unwrap_or(0) << 48;
-    let part5 = u128::from_str_radix(parts[4], 16).unwrap_or(0);
-    
-    rust_fontconfig::FontId(part1 | part2 | part3 | part4 | part5)
 }
