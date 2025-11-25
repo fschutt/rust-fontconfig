@@ -1,6 +1,68 @@
 use rust_fontconfig::*;
 
 #[test]
+fn test_operating_system_font_expansion() {
+    // Test Windows font expansion (without Unicode ranges = default fonts)
+    let windows_os = OperatingSystem::Windows;
+    let no_ranges: &[UnicodeRange] = &[];
+    
+    assert_eq!(windows_os.get_serif_fonts(no_ranges), vec!["Times New Roman".to_string()]);
+    assert_eq!(
+        windows_os.get_sans_serif_fonts(no_ranges),
+        vec!["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"]
+            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        windows_os.get_monospace_fonts(no_ranges),
+        vec!["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"]
+            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+    
+    // Test macOS font expansion
+    let macos_os = OperatingSystem::MacOS;
+    assert_eq!(
+        macos_os.get_serif_fonts(no_ranges),
+        vec!["Times", "New York", "Palatino"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        macos_os.get_sans_serif_fonts(no_ranges),
+        vec!["San Francisco", "Helvetica Neue", "Lucida Grande"]
+            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        macos_os.get_monospace_fonts(no_ranges),
+        vec!["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"]
+            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+    
+    // Test Linux font expansion
+    let linux_os = OperatingSystem::Linux;
+    assert_eq!(
+        linux_os.get_serif_fonts(no_ranges).len(),
+        8,
+        "Linux should have 8 serif fonts"
+    );
+    assert_eq!(
+        linux_os.get_sans_serif_fonts(no_ranges),
+        vec!["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"]
+            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+    );
+    
+    // Test generic family expansion
+    let families = vec!["Arial".to_string(), "sans-serif".to_string()];
+    let expanded = expand_font_families(&families, OperatingSystem::MacOS, no_ranges);
+    assert_eq!(expanded[0], "Arial");
+    assert_eq!(expanded[1], "San Francisco");
+    assert_eq!(expanded[2], "Helvetica Neue");
+    assert_eq!(expanded[3], "Lucida Grande");
+    
+    // Test non-generic family (should pass through unchanged)
+    let specific = vec!["MyCustomFont".to_string()];
+    let expanded = expand_font_families(&specific, OperatingSystem::Windows, no_ranges);
+    assert_eq!(expanded, vec!["MyCustomFont".to_string()]);
+}
+
+#[test]
 fn test_unicode_range_matching() {
     // Create mock fonts with different Unicode ranges
     let latin_font = FcFont {

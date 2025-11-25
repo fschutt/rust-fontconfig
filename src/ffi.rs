@@ -318,7 +318,7 @@ unsafe fn free_pattern_c(pattern: *mut FcPatternC) {
 }
 
 /// Convert Rust font match to C representation
-fn font_match_to_c(match_obj: &FontMatch) -> FcFontMatchC {
+fn font_match_to_c(cache: &FcFontCache, match_obj: &FontMatch) -> FcFontMatchC {
     let id = FcFontIdC::from_fontid(&match_obj.id);
 
     let unicode_ranges_count = match_obj.unicode_ranges.len();
@@ -334,10 +334,13 @@ fn font_match_to_c(match_obj: &FontMatch) -> FcFontMatchC {
         ptr::null_mut()
     };
 
-    let fallbacks_count = match_obj.fallbacks.len();
+    // Compute fallbacks lazily for FFI (expensive operation)
+    let mut trace = Vec::new();
+    let computed_fallbacks = cache.compute_fallbacks(&match_obj.id, &mut trace);
+    let fallbacks_count = computed_fallbacks.len();
     let fallbacks = if fallbacks_count > 0 {
         let mut fb = Vec::with_capacity(fallbacks_count);
-        for fallback in &match_obj.fallbacks {
+        for fallback in &computed_fallbacks {
             let fallback_ranges_count = fallback.unicode_ranges.len();
             let fallback_ranges = if fallback_ranges_count > 0 {
                 let mut ranges = Vec::with_capacity(fallback_ranges_count);
@@ -912,7 +915,7 @@ pub extern "C" fn fc_cache_query(
 
         match result {
             Some(match_obj) => {
-                let match_c = font_match_to_c(&match_obj);
+                let match_c = font_match_to_c(cache, &match_obj);
                 Box::into_raw(Box::new(match_c))
             }
             None => ptr::null_mut(),
@@ -1118,7 +1121,7 @@ pub extern "C" fn fc_cache_query_all(
         // Convert results to C representation
         let mut matches_c = Vec::with_capacity(results.len());
         for match_obj in &results {
-            let match_c = font_match_to_c(match_obj);
+            let match_c = font_match_to_c(cache, match_obj);
             matches_c.push(Box::into_raw(Box::new(match_c)));
         }
 
@@ -1171,7 +1174,7 @@ pub extern "C" fn fc_cache_query_for_text(
         // Convert results to C representation
         let mut matches_c = Vec::with_capacity(results.len());
         for match_obj in &results {
-            let match_c = font_match_to_c(match_obj);
+            let match_c = font_match_to_c(cache, match_obj);
             matches_c.push(Box::into_raw(Box::new(match_c)));
         }
 

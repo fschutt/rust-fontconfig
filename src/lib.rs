@@ -64,7 +64,6 @@
 //! fn main() {
 //!     let cache = FcFontCache::build();
 //!     let text = "Hello 你好 Здравствуйте";
-//!
 //!     // Find fonts that can render the mixed-script text
 //!     let mut trace = Vec::new();
 //!     let matched_fonts = cache.query_for_text(
@@ -100,6 +99,237 @@ use std::path::PathBuf;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
+
+/// Operating system type for generic font family resolution
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperatingSystem {
+    Windows,
+    Linux,
+    MacOS,
+    Wasm,
+}
+
+impl OperatingSystem {
+    /// Detect the current operating system at compile time
+    pub fn current() -> Self {
+        #[cfg(target_os = "windows")]
+        return OperatingSystem::Windows;
+        
+        #[cfg(target_os = "linux")]
+        return OperatingSystem::Linux;
+        
+        #[cfg(target_os = "macos")]
+        return OperatingSystem::MacOS;
+        
+        #[cfg(target_family = "wasm")]
+        return OperatingSystem::Wasm;
+        
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos", target_family = "wasm")))]
+        return OperatingSystem::Linux; // Default fallback
+    }
+    
+    /// Get system-specific fonts for the "serif" generic family
+    /// Prioritizes fonts based on Unicode range coverage
+    pub fn get_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+        let has_cjk = unicode_ranges.iter().any(|r| {
+            (r.start >= 0x4E00 && r.start <= 0x9FFF) || // CJK Unified Ideographs
+            (r.start >= 0x3040 && r.start <= 0x309F) || // Hiragana
+            (r.start >= 0x30A0 && r.start <= 0x30FF) || // Katakana
+            (r.start >= 0xAC00 && r.start <= 0xD7AF)    // Hangul
+        });
+        
+        let has_arabic = unicode_ranges.iter().any(|r| r.start >= 0x0600 && r.start <= 0x06FF);
+        let has_cyrillic = unicode_ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF);
+        
+        match self {
+            OperatingSystem::Windows => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["MS Mincho", "SimSun", "MingLiU"]);
+                }
+                if has_arabic {
+                    fonts.push("Traditional Arabic");
+                }
+                fonts.push("Times New Roman");
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Linux => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Noto Serif CJK SC", "Noto Serif CJK JP", "Noto Serif CJK KR"]);
+                }
+                if has_arabic {
+                    fonts.push("Noto Serif Arabic");
+                }
+                fonts.extend_from_slice(&[
+                    "Times", "Times New Roman", "DejaVu Serif", "Free Serif", 
+                    "Noto Serif", "Bitstream Vera Serif", "Roman", "Regular"
+                ]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::MacOS => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Hiragino Mincho ProN", "STSong", "AppleMyungjo"]);
+                }
+                if has_arabic {
+                    fonts.push("Geeza Pro");
+                }
+                fonts.extend_from_slice(&["Times", "New York", "Palatino"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Wasm => Vec::new(),
+        }
+    }
+    
+    /// Get system-specific fonts for the "sans-serif" generic family
+    /// Prioritizes fonts based on Unicode range coverage
+    pub fn get_sans_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+        let has_cjk = unicode_ranges.iter().any(|r| {
+            (r.start >= 0x4E00 && r.start <= 0x9FFF) || // CJK Unified Ideographs
+            (r.start >= 0x3040 && r.start <= 0x309F) || // Hiragana
+            (r.start >= 0x30A0 && r.start <= 0x30FF) || // Katakana
+            (r.start >= 0xAC00 && r.start <= 0xD7AF)    // Hangul
+        });
+        
+        let has_arabic = unicode_ranges.iter().any(|r| r.start >= 0x0600 && r.start <= 0x06FF);
+        let has_cyrillic = unicode_ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF);
+        let has_hebrew = unicode_ranges.iter().any(|r| r.start >= 0x0590 && r.start <= 0x05FF);
+        let has_thai = unicode_ranges.iter().any(|r| r.start >= 0x0E00 && r.start <= 0x0E7F);
+        
+        match self {
+            OperatingSystem::Windows => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "SimHei"]);
+                }
+                if has_arabic {
+                    fonts.push("Segoe UI Arabic");
+                }
+                if has_hebrew {
+                    fonts.push("Segoe UI Hebrew");
+                }
+                if has_thai {
+                    fonts.push("Leelawadee UI");
+                }
+                fonts.extend_from_slice(&["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Linux => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&[
+                        "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR",
+                        "WenQuanYi Micro Hei", "Droid Sans Fallback"
+                    ]);
+                }
+                if has_arabic {
+                    fonts.push("Noto Sans Arabic");
+                }
+                if has_hebrew {
+                    fonts.push("Noto Sans Hebrew");
+                }
+                if has_thai {
+                    fonts.push("Noto Sans Thai");
+                }
+                fonts.extend_from_slice(&["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::MacOS => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&[
+                        "Hiragino Sans", "Hiragino Kaku Gothic ProN", 
+                        "PingFang SC", "PingFang TC", "Apple SD Gothic Neo"
+                    ]);
+                }
+                if has_arabic {
+                    fonts.push("Geeza Pro");
+                }
+                if has_hebrew {
+                    fonts.push("Arial Hebrew");
+                }
+                if has_thai {
+                    fonts.push("Thonburi");
+                }
+                fonts.extend_from_slice(&["San Francisco", "Helvetica Neue", "Lucida Grande"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Wasm => Vec::new(),
+        }
+    }
+    
+    /// Get system-specific fonts for the "monospace" generic family
+    /// Prioritizes fonts based on Unicode range coverage
+    pub fn get_monospace_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+        let has_cjk = unicode_ranges.iter().any(|r| {
+            (r.start >= 0x4E00 && r.start <= 0x9FFF) || // CJK Unified Ideographs
+            (r.start >= 0x3040 && r.start <= 0x309F) || // Hiragana
+            (r.start >= 0x30A0 && r.start <= 0x30FF) || // Katakana
+            (r.start >= 0xAC00 && r.start <= 0xD7AF)    // Hangul
+        });
+        
+        match self {
+            OperatingSystem::Windows => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["MS Gothic", "SimHei"]);
+                }
+                fonts.extend_from_slice(&["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Linux => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Noto Sans Mono CJK SC", "Noto Sans Mono CJK JP", "WenQuanYi Zen Hei Mono"]);
+                }
+                fonts.extend_from_slice(&[
+                    "Source Code Pro", "Cantarell", "DejaVu Sans Mono", 
+                    "Roboto Mono", "Ubuntu Monospace", "Droid Sans Mono"
+                ]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::MacOS => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Hiragino Sans", "PingFang SC"]);
+                }
+                fonts.extend_from_slice(&["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Wasm => Vec::new(),
+        }
+    }
+    
+    /// Expand a generic CSS font family to system-specific font names
+    /// Returns the original name if not a generic family
+    /// Prioritizes fonts based on Unicode range coverage
+    pub fn expand_generic_family(&self, family: &str, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+        match family.to_lowercase().as_str() {
+            "serif" => self.get_serif_fonts(unicode_ranges),
+            "sans-serif" => self.get_sans_serif_fonts(unicode_ranges),
+            "monospace" => self.get_monospace_fonts(unicode_ranges),
+            "cursive" | "fantasy" | "system-ui" => {
+                // Use sans-serif as fallback for these
+                self.get_sans_serif_fonts(unicode_ranges)
+            }
+            _ => vec![family.to_string()],
+        }
+    }
+}
+
+/// Expand a CSS font-family stack with generic families resolved to OS-specific fonts
+/// Prioritizes fonts based on Unicode range coverage
+/// Example: ["Arial", "sans-serif"] on macOS with CJK ranges -> ["Arial", "PingFang SC", "Hiragino Sans", ...]
+pub fn expand_font_families(families: &[String], os: OperatingSystem, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+    let mut expanded = Vec::new();
+    
+    for family in families {
+        expanded.extend(os.expand_generic_family(family, unicode_ranges));
+    }
+    
+    expanded
+}
 
 /// UUID to identify a font (collections are broken up into separate fonts)
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
@@ -165,7 +395,7 @@ impl FontId {
 }
 
 /// Whether a field is required to match (yes / no / don't care)
-#[derive(Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub enum PatternMatch {
     /// Default: don't particularly care whether the requirement matches
@@ -696,6 +926,98 @@ pub struct FontMatchNoFallback {
     pub unicode_ranges: Vec<UnicodeRange>,
 }
 
+/// Resolved font fallback chain for a CSS font-family stack
+/// This represents the complete chain of fonts to use for rendering text
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFallbackChain {
+    /// CSS-based fallbacks: Each CSS font expanded to its system fallbacks
+    /// Example: ["NotoSansJP" -> [Hiragino Sans, PingFang SC], "sans-serif" -> [Helvetica]]
+    pub css_fallbacks: Vec<CssFallbackGroup>,
+    
+    /// Unicode-based fallbacks: Fonts added to cover missing Unicode ranges
+    /// Only populated if css_fallbacks don't cover all requested characters
+    pub unicode_fallbacks: Vec<FontMatch>,
+    
+    /// The original CSS font-family stack that was requested
+    pub original_stack: Vec<String>,
+}
+
+impl FontFallbackChain {
+    /// Resolve which font should be used for a specific character
+    /// Returns (FontId, css_source_name) where css_source_name indicates which CSS font matched
+    /// Returns None if no font in the chain can render this character
+    pub fn resolve_char(&self, cache: &FcFontCache, ch: char) -> Option<(FontId, String)> {
+        let codepoint = ch as u32;
+        
+        // First check CSS fallbacks in order
+        for group in &self.css_fallbacks {
+            for font in &group.fonts {
+                if let Some(meta) = cache.get_metadata_by_id(&font.id) {
+                    // Check if this font's unicode ranges cover the character
+                    if meta.unicode_ranges.is_empty() {
+                        // Font claims to cover everything - use it
+                        return Some((font.id, group.css_name.clone()));
+                    } else {
+                        // Check if character is in any of the font's ranges
+                        for range in &meta.unicode_ranges {
+                            if codepoint >= range.start && codepoint <= range.end {
+                                return Some((font.id, group.css_name.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If not found in CSS fallbacks, check Unicode fallbacks
+        for font in &self.unicode_fallbacks {
+            if let Some(meta) = cache.get_metadata_by_id(&font.id) {
+                // Check if this font's unicode ranges cover the character
+                for range in &meta.unicode_ranges {
+                    if codepoint >= range.start && codepoint <= range.end {
+                        return Some((font.id, "(unicode-fallback)".to_string()));
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// Resolve all characters in a text string to their fonts
+    /// Returns a vector of (character, FontId, css_source) tuples
+    pub fn resolve_text(&self, cache: &FcFontCache, text: &str) -> Vec<(char, Option<(FontId, String)>)> {
+        text.chars()
+            .map(|ch| (ch, self.resolve_char(cache, ch)))
+            .collect()
+    }
+}
+
+/// A group of fonts that are fallbacks for a single CSS font-family name
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CssFallbackGroup {
+    /// The CSS font name (e.g., "NotoSansJP", "sans-serif")
+    pub css_name: String,
+    
+    /// System fonts that match this CSS name
+    /// First font in list is the best match
+    pub fonts: Vec<FontMatch>,
+}
+
+/// Cache key for font fallback chain queries
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FontChainCacheKey {
+    /// CSS font stack
+    font_families: Vec<String>,
+    /// Unicode ranges needed (extracted from text)
+    unicode_ranges: Vec<UnicodeRange>,
+    /// Font weight
+    weight: FcWeight,
+    /// Font style flags
+    italic: PatternMatch,
+    oblique: PatternMatch,
+}
+
 /// Path to a font file
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(C)]
@@ -723,7 +1045,7 @@ pub enum FontSource<'a> {
 }
 
 /// Font cache, initialized at startup
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
 pub struct FcFontCache {
     // Pattern to FontId mapping (query index)
     patterns: BTreeMap<FcPattern, FontId>,
@@ -733,16 +1055,84 @@ pub struct FcFontCache {
     memory_fonts: BTreeMap<FontId, FcFont>,
     // Metadata cache (patterns stored by ID for quick lookup)
     metadata: BTreeMap<FontId, FcPattern>,
+    // Token index: maps lowercase tokens ("noto", "sans", "jp") to sets of FontIds
+    // This enables fast fuzzy search by intersecting token sets
+    token_index: BTreeMap<String, alloc::collections::BTreeSet<FontId>>,
+    // Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>
+    // Avoids re-tokenization during fuzzy search
+    font_tokens: BTreeMap<FontId, Vec<String>>,
+    // Font fallback chain cache (CSS stack + unicode -> resolved chain)
+    #[cfg(feature = "std")]
+    chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
+}
+
+impl Clone for FcFontCache {
+    fn clone(&self) -> Self {
+        Self {
+            patterns: self.patterns.clone(),
+            disk_fonts: self.disk_fonts.clone(),
+            memory_fonts: self.memory_fonts.clone(),
+            metadata: self.metadata.clone(),
+            token_index: self.token_index.clone(),
+            font_tokens: self.font_tokens.clone(),
+            #[cfg(feature = "std")]
+            chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()), // Empty cache for cloned instance
+        }
+    }
+}
+
+impl Default for FcFontCache {
+    fn default() -> Self {
+        Self {
+            patterns: BTreeMap::new(),
+            disk_fonts: BTreeMap::new(),
+            memory_fonts: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            token_index: BTreeMap::new(),
+            font_tokens: BTreeMap::new(),
+            #[cfg(feature = "std")]
+            chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
 }
 
 impl FcFontCache {
+    /// Helper method to add a font pattern to the token index
+    fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
+        // Extract tokens from both name and family
+        let mut all_tokens = Vec::new();
+        
+        if let Some(name) = &pattern.name {
+            all_tokens.extend(Self::extract_font_name_tokens(name));
+        }
+        
+        if let Some(family) = &pattern.family {
+            all_tokens.extend(Self::extract_font_name_tokens(family));
+        }
+        
+        // Convert tokens to lowercase and store them
+        let tokens_lower: Vec<String> = all_tokens.iter().map(|t| t.to_lowercase()).collect();
+        
+        // Add each token (lowercase) to the index
+        for token_lower in &tokens_lower {
+            self.token_index
+                .entry(token_lower.clone())
+                .or_insert_with(alloc::collections::BTreeSet::new)
+                .insert(id);
+        }
+        
+        // Store pre-tokenized font name for fast lookup (no re-tokenization needed)
+        self.font_tokens.insert(id, tokens_lower);
+    }
+
     /// Adds in-memory font files
     pub fn with_memory_fonts(&mut self, fonts: Vec<(FcPattern, FcFont)>) -> &mut Self {
         for (pattern, font) in fonts {
             let id = FontId::new();
             self.patterns.insert(pattern.clone(), id);
-            self.metadata.insert(id, pattern);
+            self.metadata.insert(id, pattern.clone());
             self.memory_fonts.insert(id, font);
+            self.index_pattern_tokens(&pattern, id);
         }
         self
     }
@@ -755,8 +1145,9 @@ impl FcFontCache {
         font: FcFont,
     ) -> &mut Self {
         self.patterns.insert(pattern.clone(), id);
-        self.metadata.insert(id, pattern);
+        self.metadata.insert(id, pattern.clone());
         self.memory_fonts.insert(id, font);
+        self.index_pattern_tokens(&pattern, id);
         self
     }
 
@@ -804,8 +1195,9 @@ impl FcFontCache {
                 for (pattern, path) in font_entries {
                     let id = FontId::new();
                     cache.patterns.insert(pattern.clone(), id);
-                    cache.metadata.insert(id, pattern);
+                    cache.metadata.insert(id, pattern.clone());
                     cache.disk_fonts.insert(id, path);
+                    cache.index_pattern_tokens(&pattern, id);
                 }
             }
         }
@@ -825,8 +1217,9 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 let id = FontId::new();
                 cache.patterns.insert(pattern.clone(), id);
-                cache.metadata.insert(id, pattern);
+                cache.metadata.insert(id, pattern.clone());
                 cache.disk_fonts.insert(id, path);
+                cache.index_pattern_tokens(&pattern, id);
             }
         }
 
@@ -836,14 +1229,17 @@ impl FcFontCache {
                 (None, "~/Library/Fonts".to_owned()),
                 (None, "/System/Library/Fonts".to_owned()),
                 (None, "/Library/Fonts".to_owned()),
+                // Scan AssetsV2 for dynamic system fonts (PingFang, SF Pro, etc.)
+                (None, "/System/Library/AssetsV2".to_owned()),
             ];
 
             let font_entries = FcScanDirectoriesInner(&font_dirs);
             for (pattern, path) in font_entries {
                 let id = FontId::new();
                 cache.patterns.insert(pattern.clone(), id);
-                cache.metadata.insert(id, pattern);
+                cache.metadata.insert(id, pattern.clone());
                 cache.disk_fonts.insert(id, path);
+                cache.index_pattern_tokens(&pattern, id);
             }
         }
 
@@ -865,23 +1261,33 @@ impl FcFontCache {
         for (stored_pattern, id) in &self.patterns {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
                 let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
-                let coverage = Self::calculate_unicode_coverage(&metadata.unicode_ranges);
+                
+                // Calculate Unicode compatibility score
+                let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
+                    // No specific Unicode requirements, use general coverage
+                    Self::calculate_unicode_coverage(&metadata.unicode_ranges) as i32
+                } else {
+                    // Calculate how well this font covers the requested Unicode ranges
+                    Self::calculate_unicode_compatibility(&pattern.unicode_ranges, &metadata.unicode_ranges)
+                };
+                
                 let style_score = Self::calculate_style_score(pattern, metadata);
-                matches.push((*id, coverage, style_score, metadata.clone()));
+                matches.push((*id, unicode_compatibility, style_score, metadata.clone()));
             }
         }
 
-        // Sort by style score (lowest first), then by unicode coverage (highest first)
-        matches.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(&a.1)));
+        // Sort by Unicode compatibility (highest first), THEN by style score (lowest first)
+        // This ensures legibility is supreme priority
+        matches.sort_by(|a, b| {
+            b.1.cmp(&a.1) // Unicode compatibility (higher is better)
+                .then_with(|| a.2.cmp(&b.2)) // Style score (lower is better)
+        });
 
         matches.first().map(|(id, _, _, metadata)| {
-            // Find fallbacks for this font
-            let fallbacks = self.find_fallbacks(metadata, trace);
-
             FontMatch {
                 id: *id,
                 unicode_ranges: metadata.unicode_ranges.clone(),
-                fallbacks,
+                fallbacks: Vec::new(), // Fallbacks computed lazily via compute_fallbacks()
             }
         })
     }
@@ -893,72 +1299,112 @@ impl FcFontCache {
         for (stored_pattern, id) in &self.patterns {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
                 let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
-                let coverage = Self::calculate_unicode_coverage(&metadata.unicode_ranges);
+                
+                // Calculate Unicode compatibility score
+                let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
+                    Self::calculate_unicode_coverage(&metadata.unicode_ranges) as i32
+                } else {
+                    Self::calculate_unicode_compatibility(&pattern.unicode_ranges, &metadata.unicode_ranges)
+                };
+                
                 let style_score = Self::calculate_style_score(pattern, metadata);
-                matches.push((*id, coverage, style_score, metadata.clone()));
+                matches.push((*id, unicode_compatibility, style_score, metadata.clone()));
             }
         }
 
-        // Sort by style score (lowest first), then by unicode coverage (highest first)
-        matches.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(&a.1)));
+        // Sort by style score (lowest first), THEN by Unicode compatibility (highest first)
+        // Style matching (weight, italic, etc.) is now the primary criterion
+        matches.sort_by(|a, b| {
+            a.2.cmp(&b.2) // Style score (lower is better)
+                .then_with(|| b.1.cmp(&a.1)) // Unicode compatibility (higher is better)
+        });
 
         matches
             .into_iter()
             .map(|(id, _, _, metadata)| {
-                let fallbacks = self.find_fallbacks(&metadata, trace);
-
                 FontMatch {
                     id,
                     unicode_ranges: metadata.unicode_ranges.clone(),
-                    fallbacks,
+                    fallbacks: Vec::new(), // Fallbacks computed lazily via compute_fallbacks()
                 }
             })
             .collect()
     }
 
-    fn find_fallbacks(
+    /// Compute fallback fonts for a given font
+    /// This is a lazy operation that can be expensive - only call when actually needed
+    /// (e.g., for FFI or debugging, not needed for resolve_char)
+    pub fn compute_fallbacks(
+        &self,
+        font_id: &FontId,
+        trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatchNoFallback> {
+        // Get the pattern for this font
+        let pattern = match self.metadata.get(font_id) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        
+        self.compute_fallbacks_for_pattern(pattern, Some(font_id), trace)
+    }
+    
+    fn compute_fallbacks_for_pattern(
         &self,
         pattern: &FcPattern,
+        exclude_id: Option<&FontId>,
         _trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatchNoFallback> {
         let mut candidates = Vec::new();
 
         // Collect all potential fallbacks (excluding original pattern)
-        let original_id = self.patterns.get(pattern);
-
         for (stored_pattern, id) in &self.patterns {
-            // Skip if this is the original pattern
-            if original_id.is_some() && original_id.unwrap() == id {
+            // Skip if this is the original font
+            if exclude_id.is_some() && exclude_id.unwrap() == id {
                 continue;
             }
 
             // Check if this font supports any of the unicode ranges
-            if !stored_pattern.unicode_ranges.is_empty() {
-                let supports_ranges = pattern.unicode_ranges.iter().any(|p_range| {
-                    stored_pattern
-                        .unicode_ranges
-                        .iter()
-                        .any(|k_range| p_range.overlaps(k_range))
-                });
-
-                if supports_ranges {
-                    let coverage = Self::calculate_unicode_coverage(&stored_pattern.unicode_ranges);
+            if !stored_pattern.unicode_ranges.is_empty() && !pattern.unicode_ranges.is_empty() {
+                // Calculate Unicode compatibility
+                let unicode_compatibility = Self::calculate_unicode_compatibility(
+                    &pattern.unicode_ranges,
+                    &stored_pattern.unicode_ranges
+                );
+                
+                // Only include if there's actual overlap
+                if unicode_compatibility > 0 {
                     let style_score = Self::calculate_style_score(pattern, stored_pattern);
                     candidates.push((
                         FontMatchNoFallback {
                             id: *id,
                             unicode_ranges: stored_pattern.unicode_ranges.clone(),
                         },
-                        coverage,
+                        unicode_compatibility,
                         style_score,
                         stored_pattern.clone(),
                     ));
                 }
+            } else if pattern.unicode_ranges.is_empty() && !stored_pattern.unicode_ranges.is_empty() {
+                // No specific Unicode requirements, use general coverage
+                let coverage = Self::calculate_unicode_coverage(&stored_pattern.unicode_ranges) as i32;
+                let style_score = Self::calculate_style_score(pattern, stored_pattern);
+                candidates.push((
+                    FontMatchNoFallback {
+                        id: *id,
+                        unicode_ranges: stored_pattern.unicode_ranges.clone(),
+                    },
+                    coverage,
+                    style_score,
+                    stored_pattern.clone(),
+                ));
             }
         }
 
-        // Sort by style score (lowest first), then by coverage (highest first)
-        candidates.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| b.1.cmp(&a.1)));
+        // Sort by Unicode compatibility (highest first), THEN by style score (lowest first)
+        candidates.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.2.cmp(&b.2))
+        });
 
         // Deduplicate by keeping only the best match per unique unicode range
         let mut seen_ranges = Vec::new();
@@ -1182,7 +1628,7 @@ impl FcFontCache {
             }
         }
 
-        // Check weight
+        // Check weight - hard filter if non-normal weight is requested
         if pattern.weight != FcWeight::Normal && pattern.weight != k.weight {
             trace.push(TraceMsg {
                 level: TraceLevel::Info,
@@ -1198,7 +1644,7 @@ impl FcFontCache {
             return false;
         }
 
-        // Check stretch
+        // Check stretch - hard filter if non-normal stretch is requested
         if pattern.stretch != FcStretch::Normal && pattern.stretch != k.stretch {
             trace.push(TraceMsg {
                 level: TraceLevel::Info,
@@ -1248,6 +1694,631 @@ impl FcFontCache {
 
         true
     }
+    
+    /// Resolve a complete font fallback chain for a CSS font-family stack
+    /// This is the main entry point for font resolution with caching
+    /// Automatically expands generic CSS families (serif, sans-serif, monospace) to OS-specific fonts
+    /// 
+    /// # Arguments
+    /// * `font_families` - CSS font-family stack (e.g., ["Arial", "sans-serif"])
+    /// * `text` - The text to render (used to extract Unicode ranges)
+    /// * `weight` - Font weight
+    /// * `italic` - Italic style requirement
+    /// * `oblique` - Oblique style requirement
+    /// * `trace` - Debug trace messages
+    /// 
+    /// # Returns
+    /// A complete font fallback chain with CSS fallbacks and Unicode fallbacks
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
+    /// let cache = FcFontCache::build();
+    /// let families = vec!["Arial".to_string(), "sans-serif".to_string()];
+    /// let chain = cache.resolve_font_chain(&families, "Hello", FcWeight::Normal, 
+    ///                                       PatternMatch::DontCare, PatternMatch::DontCare, 
+    ///                                       &mut Vec::new());
+    /// // On macOS: families expanded to ["Arial", "San Francisco", "Helvetica Neue", "Lucida Grande"]
+    /// ```
+    #[cfg(feature = "std")]
+    pub fn resolve_font_chain(
+        &self,
+        font_families: &[String],
+        text: &str,
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        trace: &mut Vec<TraceMsg>,
+    ) -> FontFallbackChain {
+        self.resolve_font_chain_with_os(font_families, text, weight, italic, oblique, trace, OperatingSystem::current())
+    }
+    
+    /// Resolve font chain with explicit OS specification (useful for testing)
+    #[cfg(feature = "std")]
+    pub fn resolve_font_chain_with_os(
+        &self,
+        font_families: &[String],
+        text: &str,
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        trace: &mut Vec<TraceMsg>,
+        os: OperatingSystem,
+    ) -> FontFallbackChain {
+        // Extract Unicode ranges from text first
+        let unicode_ranges = Self::extract_unicode_ranges(text);
+        
+        // Expand generic CSS families to OS-specific fonts with Unicode-aware prioritization
+        let expanded_families = expand_font_families(font_families, os, &unicode_ranges);
+        
+        // Check cache (use expanded families as key)
+        let cache_key = FontChainCacheKey {
+            font_families: expanded_families.clone(),
+            unicode_ranges: unicode_ranges.clone(),
+            weight,
+            italic,
+            oblique,
+        };
+        
+        if let Ok(cache) = self.chain_cache.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return cached.clone();
+            }
+        }
+        
+        // Build the chain
+        let chain = self.resolve_font_chain_uncached(
+            &expanded_families,
+            &unicode_ranges,
+            weight,
+            italic,
+            oblique,
+            trace,
+        );
+        
+        // Cache the result
+        if let Ok(mut cache) = self.chain_cache.lock() {
+            cache.insert(cache_key, chain.clone());
+        }
+        
+        chain
+    }
+    
+    /// Internal implementation without caching
+    fn resolve_font_chain_uncached(
+        &self,
+        font_families: &[String],
+        unicode_ranges: &[UnicodeRange],
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        trace: &mut Vec<TraceMsg>,
+    ) -> FontFallbackChain {
+        let mut css_fallbacks = Vec::new();
+        let mut covered_chars: Vec<bool> = vec![false; unicode_ranges.len()];
+        
+        // Phase 1: Resolve each CSS font-family to its system fallbacks
+        for family in font_families {
+            // Check if this is a generic font family
+            let (pattern, is_generic) = if Self::is_generic_family(family) {
+                // For generic families, don't filter by name, use font properties instead
+                let pattern = match family.as_str() {
+                    "sans-serif" => FcPattern {
+                        name: None,
+                        weight,
+                        italic,
+                        oblique,
+                        monospace: PatternMatch::False,
+                        unicode_ranges: Vec::new(),
+                        ..Default::default()
+                    },
+                    "serif" => FcPattern {
+                        name: None,
+                        weight,
+                        italic,
+                        oblique,
+                        monospace: PatternMatch::False,
+                        unicode_ranges: Vec::new(),
+                        ..Default::default()
+                    },
+                    "monospace" => FcPattern {
+                        name: None,
+                        weight,
+                        italic,
+                        oblique,
+                        monospace: PatternMatch::True,
+                        unicode_ranges: Vec::new(),
+                        ..Default::default()
+                    },
+                    _ => FcPattern {
+                        name: None,
+                        weight,
+                        italic,
+                        oblique,
+                        unicode_ranges: Vec::new(),
+                        ..Default::default()
+                    },
+                };
+                (pattern, true)
+            } else {
+                // Specific font family name
+                let pattern = FcPattern {
+                    name: Some(family.clone()),
+                    weight,
+                    italic,
+                    oblique,
+                    unicode_ranges: Vec::new(),
+                    ..Default::default()
+                };
+                (pattern, false)
+            };
+            
+            // Use fuzzy matching for specific fonts (fast token-based lookup)
+            // For generic families, use query_all (slower but necessary for property matching)
+            let mut matches = if is_generic {
+                // Generic families need full pattern matching
+                self.query_all(&pattern, trace)
+            } else {
+                // Specific font names: use fast token-based fuzzy matching
+                self.fuzzy_query_by_name(family, weight, italic, oblique, unicode_ranges, trace)
+            };
+            
+            // For generic families, limit to top 5 fonts to avoid too many matches
+            if is_generic && matches.len() > 5 {
+                matches.truncate(5);
+            }
+            
+            // Check coverage for each match
+            for font_match in &matches {
+                for (i, range) in unicode_ranges.iter().enumerate() {
+                    if !covered_chars[i] {
+                        // Check if this font covers this range
+                        for font_range in &font_match.unicode_ranges {
+                            if font_range.overlaps(range) {
+                                covered_chars[i] = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Always add the CSS fallback group to preserve CSS ordering
+            // even if no fonts were found for this family
+            css_fallbacks.push(CssFallbackGroup {
+                css_name: family.clone(),
+                fonts: matches,
+            });
+        }
+        
+        // Phase 2: Check if all Unicode ranges are covered
+        let all_covered = covered_chars.iter().all(|&c| c);
+        let unicode_fallbacks = if !all_covered {
+            // Find fonts that cover the missing ranges
+            self.find_unicode_fallbacks(
+                unicode_ranges,
+                &covered_chars,
+                &css_fallbacks,
+                weight,
+                italic,
+                oblique,
+                trace,
+            )
+        } else {
+            Vec::new()
+        };
+        
+        FontFallbackChain {
+            css_fallbacks,
+            unicode_fallbacks,
+            original_stack: font_families.to_vec(),
+        }
+    }
+    
+    /// Extract Unicode ranges from text
+    fn extract_unicode_ranges(text: &str) -> Vec<UnicodeRange> {
+        let mut chars: Vec<char> = text.chars().collect();
+        chars.sort_unstable();
+        chars.dedup();
+        
+        if chars.is_empty() {
+            return Vec::new();
+        }
+        
+        let mut ranges = Vec::new();
+        let mut range_start = chars[0] as u32;
+        let mut range_end = range_start;
+        
+        for &c in &chars[1..] {
+            let codepoint = c as u32;
+            if codepoint == range_end + 1 {
+                range_end = codepoint;
+            } else {
+                ranges.push(UnicodeRange { start: range_start, end: range_end });
+                range_start = codepoint;
+                range_end = codepoint;
+            }
+        }
+        
+        ranges.push(UnicodeRange { start: range_start, end: range_end });
+        ranges
+    }
+    
+    /// Check if a font family name is a generic CSS family
+    fn is_generic_family(family: &str) -> bool {
+        matches!(
+            family.to_lowercase().as_str(),
+            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui"
+        )
+    }
+    
+    /// Fuzzy query for fonts by name when exact match fails
+    /// Uses intelligent token-based matching with inverted index for speed:
+    /// 1. Break name into tokens (e.g., "NotoSansJP" -> ["noto", "sans", "jp"])
+    /// 2. Use token_index to find candidate fonts via BTreeSet intersection
+    /// 3. Score only the candidate fonts (instead of all 800+ patterns)
+    /// 4. Prioritize fonts matching more tokens + Unicode coverage
+    fn fuzzy_query_by_name(
+        &self,
+        requested_name: &str,
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        unicode_ranges: &[UnicodeRange],
+        trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatch> {
+        // Extract tokens from the requested name (e.g., "NotoSansJP" -> ["noto", "sans", "jp"])
+        let tokens = Self::extract_font_name_tokens(requested_name);
+        
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        
+        // Convert tokens to lowercase for case-insensitive lookup
+        let tokens_lower: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+        
+        // Progressive token matching strategy:
+        // Start with first token, then progressively narrow down with each additional token
+        // If adding a token results in 0 matches, use the previous (broader) set
+        // Example: ["Noto"] -> 10 fonts, ["Noto","Sans"] -> 2 fonts, ["Noto","Sans","JP"] -> 0 fonts => use 2 fonts
+        
+        // Start with the first token
+        let first_token = &tokens_lower[0];
+        let mut candidate_ids = match self.token_index.get(first_token) {
+            Some(ids) if !ids.is_empty() => ids.clone(),
+            _ => {
+                // First token not found - no fonts match, quit immediately
+                return Vec::new();
+            }
+        };
+        
+        // Progressively narrow down with each additional token
+        for token in &tokens_lower[1..] {
+            if let Some(token_ids) = self.token_index.get(token) {
+                // Calculate intersection
+                let intersection: alloc::collections::BTreeSet<FontId> = 
+                    candidate_ids.intersection(token_ids).copied().collect();
+                
+                if intersection.is_empty() {
+                    // Adding this token results in 0 matches - keep previous set and stop
+                    break;
+                } else {
+                    // Successfully narrowed down - use intersection
+                    candidate_ids = intersection;
+                }
+            } else {
+                // Token not in index - keep current set and stop
+                break;
+            }
+        }
+        
+        // Now score only the candidate fonts (HUGE speedup!)
+        let mut candidates = Vec::new();
+        
+        for id in candidate_ids {
+            let pattern = match self.metadata.get(&id) {
+                Some(p) => p,
+                None => continue,
+            };
+            
+            // Get pre-tokenized font name (already lowercase)
+            let font_tokens_lower = match self.font_tokens.get(&id) {
+                Some(tokens) => tokens,
+                None => continue,
+            };
+            
+            if font_tokens_lower.is_empty() {
+                continue;
+            }
+            
+            // Calculate token match score (how many requested tokens appear in font name)
+            // Both tokens_lower and font_tokens_lower are already lowercase, so direct comparison
+            let token_matches = tokens_lower.iter()
+                .filter(|req_token| {
+                    font_tokens_lower.iter().any(|font_token| {
+                        // Both already lowercase - just check if font token contains request token
+                        font_token.contains(req_token.as_str())
+                    })
+                })
+                .count();
+            
+            // Skip if no tokens match (shouldn't happen due to index, but safety check)
+            if token_matches == 0 {
+                continue;
+            }
+            
+            // Calculate token similarity score (0-100)
+            let token_similarity = (token_matches * 100 / tokens.len()) as i32;
+            
+            // Calculate Unicode range similarity
+            let unicode_similarity = if !unicode_ranges.is_empty() && !pattern.unicode_ranges.is_empty() {
+                Self::calculate_unicode_compatibility(unicode_ranges, &pattern.unicode_ranges)
+            } else {
+                0
+            };
+            
+            // CRITICAL: If we have Unicode requirements, ONLY accept fonts that cover them
+            // A font with great name match but no Unicode coverage is useless
+            if !unicode_ranges.is_empty() && unicode_similarity == 0 {
+                continue;
+            }
+            
+            let style_score = Self::calculate_style_score(&FcPattern {
+                weight,
+                italic,
+                oblique,
+                ..Default::default()
+            }, pattern);
+            
+            candidates.push((
+                id,
+                token_similarity,
+                unicode_similarity,
+                style_score,
+                pattern.clone(),
+            ));
+        }
+        
+        // Sort by:
+        // 1. Token matches (more matches = better)
+        // 2. Unicode compatibility (if ranges provided)
+        // 3. Style score (lower is better)
+        candidates.sort_by(|a, b| {
+            if !unicode_ranges.is_empty() {
+                // When we have Unicode requirements, prioritize coverage
+                b.1.cmp(&a.1) // Token similarity (higher is better) - PRIMARY
+                    .then_with(|| b.2.cmp(&a.2)) // Unicode similarity (higher is better) - SECONDARY
+                    .then_with(|| a.3.cmp(&b.3)) // Style score (lower is better) - TERTIARY
+            } else {
+                // No Unicode requirements, token similarity is primary
+                b.1.cmp(&a.1) // Token similarity (higher is better)
+                    .then_with(|| a.3.cmp(&b.3)) // Style score (lower is better)
+            }
+        });
+        
+        // Take top 5 matches
+        candidates.truncate(5);
+        
+        // Convert to FontMatch
+        candidates
+            .into_iter()
+            .map(|(id, _token_sim, _unicode_sim, _style, pattern)| {
+                FontMatch {
+                    id,
+                    unicode_ranges: pattern.unicode_ranges.clone(),
+                    fallbacks: Vec::new(), // Fallbacks computed lazily via compute_fallbacks()
+                }
+            })
+            .collect()
+    }
+    
+    /// Extract tokens from a font name
+    /// E.g., "NotoSansJP" -> ["Noto", "Sans", "JP"]
+    /// E.g., "Noto Sans CJK JP" -> ["Noto", "Sans", "CJK", "JP"]
+    fn extract_font_name_tokens(name: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current_token = String::new();
+        let mut last_was_lower = false;
+        
+        for c in name.chars() {
+            if c.is_whitespace() || c == '-' || c == '_' {
+                // Word separator
+                if !current_token.is_empty() {
+                    tokens.push(current_token.clone());
+                    current_token.clear();
+                }
+                last_was_lower = false;
+            } else if c.is_uppercase() && last_was_lower && !current_token.is_empty() {
+                // CamelCase boundary (e.g., "Noto" | "Sans")
+                tokens.push(current_token.clone());
+                current_token.clear();
+                current_token.push(c);
+                last_was_lower = false;
+            } else {
+                current_token.push(c);
+                last_was_lower = c.is_lowercase();
+            }
+        }
+        
+        if !current_token.is_empty() {
+            tokens.push(current_token);
+        }
+        
+        tokens
+    }
+    
+    /// Normalize font name for comparison (remove spaces, lowercase, keep only ASCII alphanumeric)
+    /// This ensures we only compare Latin-script names, ignoring localized names
+    fn normalize_font_name(name: &str) -> String {
+        name.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    }
+    
+    /// Calculate Levenshtein distance between two strings
+    fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+        let len1 = s1.chars().count();
+        let len2 = s2.chars().count();
+        
+        if len1 == 0 {
+            return len2;
+        }
+        if len2 == 0 {
+            return len1;
+        }
+        
+        let mut prev_row: Vec<usize> = (0..=len2).collect();
+        let mut curr_row = vec![0; len2 + 1];
+        
+        for (i, c1) in s1.chars().enumerate() {
+            curr_row[0] = i + 1;
+            
+            for (j, c2) in s2.chars().enumerate() {
+                let cost = if c1 == c2 { 0 } else { 1 };
+                curr_row[j + 1] = (curr_row[j] + 1)
+                    .min(prev_row[j + 1] + 1)
+                    .min(prev_row[j] + cost);
+            }
+            
+            core::mem::swap(&mut prev_row, &mut curr_row);
+        }
+        
+        prev_row[len2]
+    }
+    
+    /// Find fonts to cover missing Unicode ranges
+    /// Uses intelligent matching: prefers fonts with similar names to existing ones
+    /// Early quits once all Unicode ranges are covered for performance
+    fn find_unicode_fallbacks(
+        &self,
+        unicode_ranges: &[UnicodeRange],
+        covered_chars: &[bool],
+        existing_groups: &[CssFallbackGroup],
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatch> {
+        // Extract uncovered ranges
+        let mut uncovered_ranges = Vec::new();
+        for (i, &covered) in covered_chars.iter().enumerate() {
+            if !covered && i < unicode_ranges.len() {
+                uncovered_ranges.push(unicode_ranges[i].clone());
+            }
+        }
+        
+        if uncovered_ranges.is_empty() {
+            return Vec::new();
+        }
+        
+        // Query for fonts that cover these ranges
+        let pattern = FcPattern {
+            name: None, // Wildcard - match any font
+            weight,
+            italic,
+            oblique,
+            unicode_ranges: uncovered_ranges.clone(),
+            ..Default::default()
+        };
+        
+        let mut candidates = self.query_all(&pattern, trace);
+        
+        // Intelligent sorting: prefer fonts with similar names to existing ones
+        // Extract font family prefixes from existing fonts (e.g., "Noto Sans" from "Noto Sans JP")
+        let existing_prefixes: Vec<String> = existing_groups
+            .iter()
+            .flat_map(|group| {
+                group.fonts.iter().filter_map(|font| {
+                    self.get_metadata_by_id(&font.id)
+                        .and_then(|meta| meta.family.clone())
+                        .and_then(|family| {
+                            // Extract prefix (e.g., "Noto Sans" from "Noto Sans JP")
+                            family.split_whitespace()
+                                .take(2)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .into()
+                        })
+                })
+            })
+            .collect();
+        
+        // Sort candidates by:
+        // 1. Name similarity to existing fonts (highest priority)
+        // 2. Unicode coverage (secondary)
+        candidates.sort_by(|a, b| {
+            let a_meta = self.get_metadata_by_id(&a.id);
+            let b_meta = self.get_metadata_by_id(&b.id);
+            
+            let a_score = Self::calculate_font_similarity_score(a_meta, &existing_prefixes);
+            let b_score = Self::calculate_font_similarity_score(b_meta, &existing_prefixes);
+            
+            b_score.cmp(&a_score) // Higher score = better match
+                .then_with(|| {
+                    let a_coverage = Self::calculate_unicode_compatibility(&uncovered_ranges, &a.unicode_ranges);
+                    let b_coverage = Self::calculate_unicode_compatibility(&uncovered_ranges, &b.unicode_ranges);
+                    b_coverage.cmp(&a_coverage)
+                })
+        });
+        
+        // Early quit optimization: only take fonts until all ranges are covered
+        let mut result = Vec::new();
+        let mut remaining_uncovered: Vec<bool> = vec![true; uncovered_ranges.len()];
+        
+        for candidate in candidates {
+            // Check which ranges this font covers
+            let mut covers_new_range = false;
+            
+            for (i, range) in uncovered_ranges.iter().enumerate() {
+                if remaining_uncovered[i] {
+                    // Check if this font covers this range
+                    for font_range in &candidate.unicode_ranges {
+                        if font_range.overlaps(range) {
+                            remaining_uncovered[i] = false;
+                            covers_new_range = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // Only add fonts that cover at least one new range
+            if covers_new_range {
+                result.push(candidate);
+                
+                // Early quit: if all ranges are covered, stop
+                if remaining_uncovered.iter().all(|&uncovered| !uncovered) {
+                    break;
+                }
+            }
+        }
+        
+        result
+    }
+    
+    /// Calculate similarity score between a font and existing font prefixes
+    /// Higher score = more similar
+    fn calculate_font_similarity_score(
+        font_meta: Option<&FcPattern>,
+        existing_prefixes: &[String],
+    ) -> i32 {
+        let Some(meta) = font_meta else { return 0; };
+        let Some(family) = &meta.family else { return 0; };
+        
+        // Check if this font's family matches any existing prefix
+        for prefix in existing_prefixes {
+            if family.starts_with(prefix) {
+                return 100; // Strong match
+            }
+            if family.contains(prefix) {
+                return 50; // Partial match
+            }
+        }
+        
+        0 // No match
+    }
+    
     /// Find fallback fonts for a given pattern
     // Helper to calculate total unicode coverage
     fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
@@ -1255,6 +2326,36 @@ impl FcFontCache {
             .iter()
             .map(|range| (range.end - range.start + 1) as u64)
             .sum()
+    }
+
+    /// Calculate how well a font's Unicode ranges cover the requested ranges
+    /// Returns a compatibility score (higher is better, 0 means no overlap)
+    fn calculate_unicode_compatibility(
+        requested: &[UnicodeRange],
+        available: &[UnicodeRange],
+    ) -> i32 {
+        if requested.is_empty() {
+            // No specific requirements, return total coverage
+            return Self::calculate_unicode_coverage(available) as i32;
+        }
+        
+        let mut total_coverage = 0u32;
+        
+        for req_range in requested {
+            for avail_range in available {
+                // Calculate overlap between requested and available ranges
+                let overlap_start = req_range.start.max(avail_range.start);
+                let overlap_end = req_range.end.min(avail_range.end);
+                
+                if overlap_start <= overlap_end {
+                    // There is overlap
+                    let overlap_size = overlap_end - overlap_start + 1;
+                    total_coverage += overlap_size;
+                }
+            }
+        }
+        
+        total_coverage as i32
     }
 
     fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> i32 {
@@ -1575,7 +2676,9 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
         let weight = FcWeight::from_u16(os2_table.us_weight_class);
         let stretch = FcStretch::from_u16(os2_table.us_width_class);
 
-        // Extract unicode ranges
+        // Extract unicode ranges from OS/2 table (fast, but may be inaccurate)
+        // These are hints about what the font *should* support
+        // For actual glyph coverage verification, query the font file directly
         let mut unicode_ranges = Vec::new();
 
         // Process the 4 Unicode range bitfields from OS/2 table
@@ -1589,17 +2692,141 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
         // Unicode range bit positions to actual ranges
         // Based on OpenType spec: https://learn.microsoft.com/en-us/typography/opentype/spec/os2#ur
         let range_mappings = [
-            // Range 1 (Basic Latin through General Punctuation)
+            // ulUnicodeRange1 (bits 0-31)
             (0, 0x0000, 0x007F), // Basic Latin
             (1, 0x0080, 0x00FF), // Latin-1 Supplement
             (2, 0x0100, 0x017F), // Latin Extended-A
-            // ... add more range mappings
-
-            // A simplified example - in practice, you'd include all ranges from the OpenType spec
-            (7, 0x0370, 0x03FF),  // Greek and Coptic
-            (9, 0x0400, 0x04FF),  // Cyrillic
-            (29, 0x2000, 0x206F), // General Punctuation
-            (57, 0x4E00, 0x9FFF), // CJK Unified Ideographs
+            (3, 0x0180, 0x024F), // Latin Extended-B
+            (4, 0x0250, 0x02AF), // IPA Extensions
+            (5, 0x02B0, 0x02FF), // Spacing Modifier Letters
+            (6, 0x0300, 0x036F), // Combining Diacritical Marks
+            (7, 0x0370, 0x03FF), // Greek and Coptic
+            (8, 0x2C80, 0x2CFF), // Coptic
+            (9, 0x0400, 0x04FF), // Cyrillic
+            (10, 0x0530, 0x058F), // Armenian
+            (11, 0x0590, 0x05FF), // Hebrew
+            (12, 0x0600, 0x06FF), // Arabic
+            (13, 0x0700, 0x074F), // Syriac
+            (14, 0x0780, 0x07BF), // Thaana
+            (15, 0x0900, 0x097F), // Devanagari
+            (16, 0x0980, 0x09FF), // Bengali
+            (17, 0x0A00, 0x0A7F), // Gurmukhi
+            (18, 0x0A80, 0x0AFF), // Gujarati
+            (19, 0x0B00, 0x0B7F), // Oriya
+            (20, 0x0B80, 0x0BFF), // Tamil
+            (21, 0x0C00, 0x0C7F), // Telugu
+            (22, 0x0C80, 0x0CFF), // Kannada
+            (23, 0x0D00, 0x0D7F), // Malayalam
+            (24, 0x0E00, 0x0E7F), // Thai
+            (25, 0x0E80, 0x0EFF), // Lao
+            (26, 0x10A0, 0x10FF), // Georgian
+            (27, 0x1B00, 0x1B7F), // Balinese
+            (28, 0x1100, 0x11FF), // Hangul Jamo
+            (29, 0x1E00, 0x1EFF), // Latin Extended Additional
+            (30, 0x1F00, 0x1FFF), // Greek Extended
+            (31, 0x2000, 0x206F), // General Punctuation
+            
+            // ulUnicodeRange2 (bits 32-63)
+            (32, 0x2070, 0x209F), // Superscripts And Subscripts
+            (33, 0x20A0, 0x20CF), // Currency Symbols
+            (34, 0x20D0, 0x20FF), // Combining Diacritical Marks For Symbols
+            (35, 0x2100, 0x214F), // Letterlike Symbols
+            (36, 0x2150, 0x218F), // Number Forms
+            (37, 0x2190, 0x21FF), // Arrows
+            (38, 0x2200, 0x22FF), // Mathematical Operators
+            (39, 0x2300, 0x23FF), // Miscellaneous Technical
+            (40, 0x2400, 0x243F), // Control Pictures
+            (41, 0x2440, 0x245F), // Optical Character Recognition
+            (42, 0x2460, 0x24FF), // Enclosed Alphanumerics
+            (43, 0x2500, 0x257F), // Box Drawing
+            (44, 0x2580, 0x259F), // Block Elements
+            (45, 0x25A0, 0x25FF), // Geometric Shapes
+            (46, 0x2600, 0x26FF), // Miscellaneous Symbols
+            (47, 0x2700, 0x27BF), // Dingbats
+            (48, 0x3000, 0x303F), // CJK Symbols And Punctuation
+            (49, 0x3040, 0x309F), // Hiragana
+            (50, 0x30A0, 0x30FF), // Katakana
+            (51, 0x3100, 0x312F), // Bopomofo
+            (52, 0x3130, 0x318F), // Hangul Compatibility Jamo
+            (53, 0x3190, 0x319F), // Kanbun
+            (54, 0x31A0, 0x31BF), // Bopomofo Extended
+            (55, 0x31C0, 0x31EF), // CJK Strokes
+            (56, 0x31F0, 0x31FF), // Katakana Phonetic Extensions
+            (57, 0x3200, 0x32FF), // Enclosed CJK Letters And Months
+            (58, 0x3300, 0x33FF), // CJK Compatibility
+            (59, 0x4E00, 0x9FFF), // CJK Unified Ideographs
+            (60, 0xA000, 0xA48F), // Yi Syllables
+            (61, 0xA490, 0xA4CF), // Yi Radicals
+            (62, 0xAC00, 0xD7AF), // Hangul Syllables
+            (63, 0xD800, 0xDFFF), // Non-Plane 0 (note: surrogates, not directly usable)
+            
+            // ulUnicodeRange3 (bits 64-95)
+            (64, 0x10000, 0x10FFFF), // Phoenician and other non-BMP (bit 64 indicates non-BMP support)
+            (65, 0xF900, 0xFAFF), // CJK Compatibility Ideographs
+            (66, 0xFB00, 0xFB4F), // Alphabetic Presentation Forms
+            (67, 0xFB50, 0xFDFF), // Arabic Presentation Forms-A
+            (68, 0xFE00, 0xFE0F), // Variation Selectors
+            (69, 0xFE10, 0xFE1F), // Vertical Forms
+            (70, 0xFE20, 0xFE2F), // Combining Half Marks
+            (71, 0xFE30, 0xFE4F), // CJK Compatibility Forms
+            (72, 0xFE50, 0xFE6F), // Small Form Variants
+            (73, 0xFE70, 0xFEFF), // Arabic Presentation Forms-B
+            (74, 0xFF00, 0xFFEF), // Halfwidth And Fullwidth Forms
+            (75, 0xFFF0, 0xFFFF), // Specials
+            (76, 0x0F00, 0x0FFF), // Tibetan
+            (77, 0x0700, 0x074F), // Syriac
+            (78, 0x0780, 0x07BF), // Thaana
+            (79, 0x0D80, 0x0DFF), // Sinhala
+            (80, 0x1000, 0x109F), // Myanmar
+            (81, 0x1200, 0x137F), // Ethiopic
+            (82, 0x13A0, 0x13FF), // Cherokee
+            (83, 0x1400, 0x167F), // Unified Canadian Aboriginal Syllabics
+            (84, 0x1680, 0x169F), // Ogham
+            (85, 0x16A0, 0x16FF), // Runic
+            (86, 0x1780, 0x17FF), // Khmer
+            (87, 0x1800, 0x18AF), // Mongolian
+            (88, 0x2800, 0x28FF), // Braille Patterns
+            (89, 0xA000, 0xA48F), // Yi Syllables
+            (90, 0x1680, 0x169F), // Ogham
+            (91, 0x16A0, 0x16FF), // Runic
+            (92, 0x1700, 0x171F), // Tagalog
+            (93, 0x1720, 0x173F), // Hanunoo
+            (94, 0x1740, 0x175F), // Buhid
+            (95, 0x1760, 0x177F), // Tagbanwa
+            
+            // ulUnicodeRange4 (bits 96-127)
+            (96, 0x1900, 0x194F), // Limbu
+            (97, 0x1950, 0x197F), // Tai Le
+            (98, 0x1980, 0x19DF), // New Tai Lue
+            (99, 0x1A00, 0x1A1F), // Buginese
+            (100, 0x2C00, 0x2C5F), // Glagolitic
+            (101, 0x2D30, 0x2D7F), // Tifinagh
+            (102, 0x4DC0, 0x4DFF), // Yijing Hexagram Symbols
+            (103, 0xA800, 0xA82F), // Syloti Nagri
+            (104, 0x10000, 0x1007F), // Linear B Syllabary
+            (105, 0x10080, 0x100FF), // Linear B Ideograms
+            (106, 0x10100, 0x1013F), // Aegean Numbers
+            (107, 0x10140, 0x1018F), // Ancient Greek Numbers
+            (108, 0x10300, 0x1032F), // Old Italic
+            (109, 0x10330, 0x1034F), // Gothic
+            (110, 0x10380, 0x1039F), // Ugaritic
+            (111, 0x103A0, 0x103DF), // Old Persian
+            (112, 0x10400, 0x1044F), // Deseret
+            (113, 0x10450, 0x1047F), // Shavian
+            (114, 0x10480, 0x104AF), // Osmanya
+            (115, 0x10800, 0x1083F), // Cypriot Syllabary
+            (116, 0x10A00, 0x10A5F), // Kharoshthi
+            (117, 0x1D000, 0x1D0FF), // Byzantine Musical Symbols
+            (118, 0x1D100, 0x1D1FF), // Musical Symbols
+            (119, 0x1D200, 0x1D24F), // Ancient Greek Musical Notation
+            (120, 0x1D300, 0x1D35F), // Tai Xuan Jing Symbols
+            (121, 0x1D400, 0x1D7FF), // Mathematical Alphanumeric Symbols
+            (122, 0x1F000, 0x1F02F), // Mahjong Tiles
+            (123, 0x1F030, 0x1F09F), // Domino Tiles
+            (124, 0x1F300, 0x1F9FF), // Miscellaneous Symbols And Pictographs (Emoji)
+            (125, 0x1F680, 0x1F6FF), // Transport And Map Symbols
+            (126, 0x1F700, 0x1F77F), // Alchemical Symbols
+            (127, 0x1F900, 0x1F9FF), // Supplemental Symbols and Pictographs
         ];
 
         for (range_idx, bit_pos, start, end) in range_mappings.iter().map(|&(bit, start, end)| {
