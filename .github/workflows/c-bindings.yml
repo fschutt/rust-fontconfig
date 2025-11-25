@@ -13,20 +13,27 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
             lib_prefix: lib
             static_ext: .a
             dynamic_ext: .so
+            compiler: gcc
           - os: windows-latest
             lib_prefix: ""
             static_ext: .lib
             dynamic_ext: .dll
+            compiler: msvc
+          - os: windows-latest
+            lib_prefix: lib
+            static_ext: .a
+            dynamic_ext: .dll
+            compiler: gcc
           - os: macos-latest
             lib_prefix: lib
             static_ext: .a
             dynamic_ext: .dylib
+            compiler: gcc
 
     runs-on: ${{ matrix.os }}
 
@@ -36,8 +43,21 @@ jobs:
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
     
-    - name: Build Rust library
+    - name: Install GNU target (Windows GCC)
+      if: matrix.os == 'windows-latest' && matrix.compiler == 'gcc'
+      run: rustup target add x86_64-pc-windows-gnu
+    
+    - name: Build Rust library (MSVC)
+      if: matrix.compiler == 'msvc'
       run: cargo build --release --features ffi
+    
+    - name: Build Rust library (GCC/Unix)
+      if: matrix.compiler == 'gcc' && matrix.os != 'windows-latest'
+      run: cargo build --release --features ffi
+
+    - name: Build Rust library (GCC/Windows)
+      if: matrix.compiler == 'gcc' && matrix.os == 'windows-latest'
+      run: cargo build --release --features ffi --target x86_64-pc-windows-gnu
     
     - name: Create include directory
       run: mkdir -p include
@@ -59,13 +79,24 @@ jobs:
         cp target/release/${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }} .
         cp target/release/${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }} .
       
-    - name: Build C example (Windows)
-      if: matrix.os == 'windows-latest'
+    - name: Build C example (Windows MSVC)
+      if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
       run: |
-        cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I include /link /LIBPATH:target/release rust_fontconfig.lib
-        copy target\release\rust_fontconfig${{ matrix.static_ext }} .
-        copy target\release\rust_fontconfig${{ matrix.dynamic_ext }} .
+        cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I include /link /LIBPATH:target/release rust_fontconfig.dll.lib
+        copy target\release\rust_fontconfig.lib .
+        copy target\release\rust_fontconfig.dll .
+        copy target\release\rust_fontconfig.dll.lib .
+        dir
       shell: cmd
+
+    - name: Build C example (Windows GCC)
+      if: matrix.os == 'windows-latest' && matrix.compiler == 'gcc'
+      shell: bash
+      run: |
+        gcc -Wall -o example.exe ffi/example.c -Iinclude -L./target/x86_64-pc-windows-gnu/release -lrust_fontconfig
+        cp target/x86_64-pc-windows-gnu/release/librust_fontconfig.a .
+        cp target/x86_64-pc-windows-gnu/release/rust_fontconfig.dll .
+        ls -la
     
     - name: Set LD_LIBRARY_PATH (Linux)
       if: matrix.os == 'ubuntu-latest'
@@ -86,38 +117,39 @@ jobs:
     - name: Run C example (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        dir
+        .\example.exe help || echo "Example exited with status %ERRORLEVEL%"
       shell: cmd
-
-    - name: Run C example (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        example.exe || echo "Example exited with status %ERRORLEVEL%"
-      shell: cmd
-      continue-on-error: true # TODO
+      continue-on-error: true
     
     - name: Upload static library
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }}-${{ matrix.os }}
+        name: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }}-${{ matrix.os }}-${{ matrix.compiler }}
         path: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }}
     
     - name: Upload dynamic library
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }}-${{ matrix.os }}
+        name: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }}-${{ matrix.os }}-${{ matrix.compiler }}
         path: ${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }}
+
+    - name: Upload import library (Windows MSVC)
+      if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
+      uses: actions/upload-artifact@v4
+      with:
+        name: rust_fontconfig.dll.lib-${{ matrix.os }}-msvc
+        path: rust_fontconfig.dll.lib
     
     - name: Upload headers
       uses: actions/upload-artifact@v4
       with:
-        name: headers-${{ matrix.os }}
+        name: headers-${{ matrix.os }}-${{ matrix.compiler }}
         path: include/
     
     - name: Upload C example
       uses: actions/upload-artifact@v4
       with:
-        name: example-${{ matrix.os }}
+        name: example-${{ matrix.os }}-${{ matrix.compiler }}
         path: |
           example${{ matrix.os == 'windows-latest' && '.exe' || '' }}
           ffi/example.c
