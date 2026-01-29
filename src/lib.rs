@@ -2994,6 +2994,248 @@ fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
     }
 }
 
+/// Parse font bytes and extract font patterns for in-memory fonts.
+/// 
+/// This is the public API for parsing in-memory font data to create 
+/// `(FcPattern, FcFont)` tuples that can be added to an `FcFontCache` 
+/// via `with_memory_fonts()`.
+///
+/// # Arguments
+/// * `font_bytes` - The raw bytes of a TrueType/OpenType font file
+/// * `font_id` - An identifier string for this font (used internally)
+///
+/// # Returns
+/// A vector of `(FcPattern, FcFont)` tuples, one for each font face in the file.
+/// Returns `None` if the font could not be parsed.
+///
+/// # Example
+/// ```ignore
+/// use rust_fontconfig::{FcFontCache, FcParseFontBytes};
+/// 
+/// let font_bytes = include_bytes!("path/to/font.ttf");
+/// let mut cache = FcFontCache::default();
+/// 
+/// if let Some(fonts) = FcParseFontBytes(font_bytes, "MyFont") {
+///     cache.with_memory_fonts(fonts);
+/// }
+/// ```
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[allow(non_snake_case)]
+pub fn FcParseFontBytes(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPattern, FcFont)>> {
+    FcParseFontBytesInner(font_bytes, font_id)
+}
+
+/// Internal implementation for parsing font bytes.
+/// Used by both FcParseFont (for disk fonts) and FcParseFontBytes (for memory fonts).
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn FcParseFontBytesInner(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPattern, FcFont)>> {
+    use allsorts::{
+        binary::read::ReadScope,
+        font_data::FontData,
+        get_name::fontcode_get_name,
+        post::PostTable,
+        tables::{
+            os2::Os2, FontTableProvider, HeadTable, HheaTable, HmtxTable, MaxpTable, NameTable,
+        },
+        tag,
+    };
+    use std::collections::BTreeSet;
+
+    const FONT_SPECIFIER_NAME_ID: u16 = 4;
+    const FONT_SPECIFIER_FAMILY_ID: u16 = 1;
+
+    let max_fonts = if font_bytes.len() >= 12 && &font_bytes[0..4] == b"ttcf" {
+        let num_fonts =
+            u32::from_be_bytes([font_bytes[8], font_bytes[9], font_bytes[10], font_bytes[11]]);
+        std::cmp::min(num_fonts as usize, 100)
+    } else {
+        1
+    };
+
+    let scope = ReadScope::new(font_bytes);
+    let font_file = scope.read::<FontData<'_>>().ok()?;
+
+    let mut results = Vec::new();
+
+    for font_index in 0..max_fonts {
+        let provider = font_file.table_provider(font_index).ok()?;
+        let head_data = provider.table_data(tag::HEAD).ok()??.into_owned();
+        let head_table = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
+
+        let is_bold = head_table.is_bold();
+        let is_italic = head_table.is_italic();
+        let mut detected_monospace = None;
+
+        let post_data = provider.table_data(tag::POST).ok()??;
+        if let Ok(post_table) = ReadScope::new(&post_data).read::<PostTable>() {
+            detected_monospace = Some(post_table.header.is_fixed_pitch != 0);
+        }
+
+        let os2_data = provider.table_data(tag::OS_2).ok()??;
+        let os2_table = ReadScope::new(&os2_data)
+            .read_dep::<Os2>(os2_data.len())
+            .ok()?;
+
+        let is_oblique = os2_table
+            .fs_selection
+            .contains(allsorts::tables::os2::FsSelection::OBLIQUE);
+        let weight = FcWeight::from_u16(os2_table.us_weight_class);
+        let stretch = FcStretch::from_u16(os2_table.us_width_class);
+
+        let mut unicode_ranges = Vec::new();
+        let ranges = [
+            os2_table.ul_unicode_range1,
+            os2_table.ul_unicode_range2,
+            os2_table.ul_unicode_range3,
+            os2_table.ul_unicode_range4,
+        ];
+
+        // Full Unicode range bit mappings (same as FcParseFont)
+        let range_mappings = [
+            (0, 0x0000u32, 0x007Fu32),
+            (1, 0x0080, 0x00FF),
+            (2, 0x0100, 0x017F),
+            (3, 0x0180, 0x024F),
+            (4, 0x0250, 0x02AF),
+            (5, 0x02B0, 0x02FF),
+            (6, 0x0300, 0x036F),
+            (7, 0x0370, 0x03FF),
+            (8, 0x2C80, 0x2CFF),
+            (9, 0x0400, 0x04FF),
+            (10, 0x0530, 0x058F),
+            (11, 0x0590, 0x05FF),
+            (12, 0x0600, 0x06FF),
+            (31, 0x2000, 0x206F),
+            (48, 0x3000, 0x303F),
+            (49, 0x3040, 0x309F),
+            (50, 0x30A0, 0x30FF),
+            (59, 0x4E00, 0x9FFF),
+            (62, 0xAC00, 0xD7AF),
+        ];
+
+        for &(bit, start, end) in &range_mappings {
+            let range_idx = (bit / 32) as usize;
+            let bit_pos = bit % 32;
+            if range_idx < 4 && (ranges[range_idx] & (1 << bit_pos)) != 0 {
+                unicode_ranges.push(UnicodeRange { start, end });
+            }
+        }
+
+        unicode_ranges = verify_unicode_ranges_with_cmap(&provider, unicode_ranges);
+
+        if unicode_ranges.is_empty() {
+            if let Some(cmap_ranges) = analyze_cmap_coverage(&provider) {
+                unicode_ranges = cmap_ranges;
+            }
+        }
+
+        if detected_monospace.is_none() {
+            if os2_table.panose[0] == 2 {
+                detected_monospace = Some(os2_table.panose[3] == 9);
+            } else if let (Ok(Some(hhea_data)), Ok(Some(maxp_data)), Ok(Some(hmtx_data))) = (
+                provider.table_data(tag::HHEA),
+                provider.table_data(tag::MAXP),
+                provider.table_data(tag::HMTX),
+            ) {
+                if let (Ok(hhea_table), Ok(maxp_table)) = (
+                    ReadScope::new(&hhea_data).read::<HheaTable>(),
+                    ReadScope::new(&maxp_data).read::<MaxpTable>(),
+                ) {
+                    if let Ok(hmtx_table) = ReadScope::new(&hmtx_data).read_dep::<HmtxTable<'_>>((
+                        usize::from(maxp_table.num_glyphs),
+                        usize::from(hhea_table.num_h_metrics),
+                    )) {
+                        let mut monospace = true;
+                        let mut last_advance = 0;
+                        for i in 0..hhea_table.num_h_metrics as usize {
+                            if let Ok(metric) = hmtx_table.h_metrics.read_item(i) {
+                                if i > 0 && metric.advance_width != last_advance {
+                                    monospace = false;
+                                    break;
+                                }
+                                last_advance = metric.advance_width;
+                            }
+                        }
+                        detected_monospace = Some(monospace);
+                    }
+                }
+            }
+        }
+
+        let is_monospace = detected_monospace.unwrap_or(false);
+
+        let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
+        let name_table = ReadScope::new(&name_data).read::<NameTable>().ok()?;
+
+        let mut f_family = None;
+
+        let patterns: BTreeSet<_> = name_table
+            .name_records
+            .iter()
+            .filter_map(|name_record| {
+                let name_id = name_record.name_id;
+                if name_id == FONT_SPECIFIER_FAMILY_ID {
+                    if let Ok(Some(family)) = fontcode_get_name(&name_data, FONT_SPECIFIER_FAMILY_ID) {
+                        f_family = Some(family);
+                    }
+                    None
+                } else if name_id == FONT_SPECIFIER_NAME_ID {
+                    let family = f_family.as_ref()?;
+                    let name = fontcode_get_name(&name_data, FONT_SPECIFIER_NAME_ID).ok()??;
+                    if name.to_bytes().is_empty() {
+                        None
+                    } else {
+                        let mut name_str = String::from_utf8_lossy(name.to_bytes()).to_string();
+                        let mut family_str = String::from_utf8_lossy(family.as_bytes()).to_string();
+                        if name_str.starts_with('.') {
+                            name_str = name_str[1..].to_string();
+                        }
+                        if family_str.starts_with('.') {
+                            family_str = family_str[1..].to_string();
+                        }
+
+                        Some((
+                            FcPattern {
+                                name: Some(name_str),
+                                family: Some(family_str),
+                                bold: if is_bold { PatternMatch::True } else { PatternMatch::False },
+                                italic: if is_italic { PatternMatch::True } else { PatternMatch::False },
+                                oblique: if is_oblique { PatternMatch::True } else { PatternMatch::False },
+                                monospace: if is_monospace { PatternMatch::True } else { PatternMatch::False },
+                                condensed: if stretch <= FcStretch::Condensed { PatternMatch::True } else { PatternMatch::False },
+                                weight,
+                                stretch,
+                                unicode_ranges: unicode_ranges.clone(),
+                                metadata: FcFontMetadata::default(),
+                            },
+                            font_index,
+                        ))
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.extend(patterns.into_iter().map(|(pat, idx)| {
+            (
+                pat,
+                FcFont {
+                    bytes: font_bytes.to_vec(),
+                    font_index: idx,
+                    id: font_id.to_string(),
+                },
+            )
+        }));
+    }
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
+
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern, FcFontPath)> {
     #[cfg(feature = "multithreading")]
