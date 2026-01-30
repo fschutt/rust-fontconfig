@@ -345,40 +345,12 @@ impl core::fmt::Display for FontId {
 }
 
 impl FontId {
-    /// Generate a new pseudo-UUID without external dependencies
+    /// Generate a new unique FontId using an atomic counter
     pub fn new() -> Self {
-        #[cfg(feature = "std")]
-        {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default();
-
-            let time_part = now.as_nanos();
-            let random_part = {
-                // Simple PRNG based on time
-                let seed = now.as_secs() as u64;
-                let a = 6364136223846793005u64;
-                let c = 1442695040888963407u64;
-                let r = a.wrapping_mul(seed).wrapping_add(c);
-                r as u64
-            };
-
-            // Combine time and random parts
-            let id = (time_part & 0xFFFFFFFFFFFFFFFFu128) | ((random_part as u128) << 64);
-            FontId(id)
-        }
-
-        #[cfg(not(feature = "std"))]
-        {
-            // For no_std contexts, just use a counter
-            static mut COUNTER: u128 = 0;
-            let id = unsafe {
-                COUNTER += 1;
-                COUNTER
-            };
-            FontId(id)
-        }
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+        FontId(id)
     }
 }
 
