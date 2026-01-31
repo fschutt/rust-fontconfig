@@ -1081,6 +1081,26 @@ pub enum FontSource<'a> {
     Disk(&'a FcFontPath),
 }
 
+/// A named font to be added to the font cache from memory.
+/// This is the primary way to supply custom fonts to the application.
+#[derive(Debug, Clone)]
+pub struct NamedFont {
+    /// Human-readable name for this font (e.g., "My Custom Font")
+    pub name: String,
+    /// The raw font file bytes (TTF, OTF, WOFF, WOFF2, TTC)
+    pub bytes: Vec<u8>,
+}
+
+impl NamedFont {
+    /// Create a new named font from bytes
+    pub fn new(name: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            bytes,
+        }
+    }
+}
+
 /// Font cache, initialized at startup
 #[derive(Debug)]
 pub struct FcFontCache {
@@ -1228,12 +1248,117 @@ impl FcFontCache {
     /// Builds a new font cache from all fonts discovered on the system
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build() -> Self {
+        Self::build_inner(None)
+    }
+    
+    /// Builds a font cache with only specific font families (and their fallbacks).
+    /// 
+    /// This is a performance optimization for applications that know ahead of time
+    /// which fonts they need. Instead of scanning all system fonts (which can be slow
+    /// on systems with many fonts), only fonts matching the specified families are loaded.
+    /// 
+    /// Generic family names like "sans-serif", "serif", "monospace" are expanded
+    /// to OS-specific font names (e.g., "sans-serif" on macOS becomes "Helvetica Neue", 
+    /// "San Francisco", etc.).
+    /// 
+    /// **Note**: This will NOT automatically load fallback fonts for scripts not covered
+    /// by the requested families. If you need Arabic, CJK, or emoji support, either:
+    /// - Add those families explicitly to the filter
+    /// - Use `with_memory_fonts()` to add bundled fonts
+    /// - Use `build()` to load all system fonts
+    /// 
+    /// # Arguments
+    /// * `families` - Font family names to load (e.g., ["Arial", "sans-serif"])
+    /// 
+    /// # Example
+    /// ```ignore
+    /// // Only load Arial and sans-serif fallback fonts
+    /// let cache = FcFontCache::build_with_families(&["Arial", "sans-serif"]);
+    /// ```
+    #[cfg(all(feature = "std", feature = "parsing"))]
+    pub fn build_with_families(families: &[impl AsRef<str>]) -> Self {
+        // Expand generic families to OS-specific names
+        let os = OperatingSystem::current();
+        let mut target_families: Vec<String> = Vec::new();
+        
+        for family in families {
+            let family_str = family.as_ref();
+            let expanded = os.expand_generic_family(family_str, &[]);
+            if expanded.is_empty() || (expanded.len() == 1 && expanded[0] == family_str) {
+                target_families.push(family_str.to_string());
+            } else {
+                target_families.extend(expanded);
+            }
+        }
+        
+        Self::build_inner(Some(&target_families))
+    }
+    
+    /// Inner build function that handles both filtered and unfiltered font loading.
+    /// 
+    /// # Arguments
+    /// * `family_filter` - If Some, only load fonts matching these family names.
+    ///                     If None, load all fonts.
+    #[cfg(all(feature = "std", feature = "parsing"))]
+    fn build_inner(family_filter: Option<&[String]>) -> Self {
         let mut cache = FcFontCache::default();
+        
+        // Normalize filter families for matching (lowercase, remove spaces/dashes)
+        let filter_normalized: Option<Vec<String>> = family_filter.map(|families| {
+            families
+                .iter()
+                .map(|f| f.to_lowercase().replace(' ', "").replace('-', ""))
+                .collect()
+        });
+        
+        // Helper closure to check if a pattern matches the filter
+        let matches_filter = |pattern: &FcPattern| -> bool {
+            match &filter_normalized {
+                None => true, // No filter = accept all
+                Some(targets) => {
+                    pattern.name.as_ref().map_or(false, |name| {
+                        let name_norm = name.to_lowercase().replace(' ', "").replace('-', "");
+                        targets.iter().any(|target| name_norm.contains(target))
+                    }) || pattern.family.as_ref().map_or(false, |family| {
+                        let family_norm = family.to_lowercase().replace(' ', "").replace('-', "");
+                        targets.iter().any(|target| family_norm.contains(target))
+                    })
+                }
+            }
+        };
 
         #[cfg(target_os = "linux")]
         {
             if let Some(font_entries) = FcScanDirectories() {
                 for (pattern, path) in font_entries {
+                    if matches_filter(&pattern) {
+                        let id = FontId::new();
+                        cache.patterns.insert(pattern.clone(), id);
+                        cache.metadata.insert(id, pattern.clone());
+                        cache.disk_fonts.insert(id, path);
+                        cache.index_pattern_tokens(&pattern, id);
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let system_root = std::env::var("SystemRoot")
+                .or_else(|_| std::env::var("WINDIR"))
+                .unwrap_or_else(|_| "C:\\Windows".to_string());
+            
+            let user_profile = std::env::var("USERPROFILE")
+                .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
+            
+            let font_dirs = vec![
+                (None, format!("{}\\Fonts\\", system_root)),
+                (None, format!("{}\\AppData\\Local\\Microsoft\\Windows\\Fonts\\", user_profile)),
+            ];
+
+            let font_entries = FcScanDirectoriesInner(&font_dirs);
+            for (pattern, path) in font_entries {
+                if matches_filter(&pattern) {
                     let id = FontId::new();
                     cache.patterns.insert(pattern.clone(), id);
                     cache.metadata.insert(id, pattern.clone());
@@ -1243,57 +1368,33 @@ impl FcFontCache {
             }
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            // Get the Windows system root directory from environment variable
-            // Falls back to C:\Windows if not found
-            let system_root = std::env::var("SystemRoot")
-                .or_else(|_| std::env::var("WINDIR"))
-                .unwrap_or_else(|_| "C:\\Windows".to_string());
-            
-            // Get user profile directory for user-installed fonts
-            let user_profile = std::env::var("USERPROFILE")
-                .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
-            
-            let font_dirs = vec![
-                (None, format!("{}\\Fonts\\", system_root)),
-                (
-                    None,
-                    format!("{}\\AppData\\Local\\Microsoft\\Windows\\Fonts\\", user_profile),
-                ),
-            ];
-
-            let font_entries = FcScanDirectoriesInner(&font_dirs);
-            for (pattern, path) in font_entries {
-                let id = FontId::new();
-                cache.patterns.insert(pattern.clone(), id);
-                cache.metadata.insert(id, pattern.clone());
-                cache.disk_fonts.insert(id, path);
-                cache.index_pattern_tokens(&pattern, id);
-            }
-        }
-
         #[cfg(target_os = "macos")]
         {
             let font_dirs = vec![
                 (None, "~/Library/Fonts".to_owned()),
                 (None, "/System/Library/Fonts".to_owned()),
                 (None, "/Library/Fonts".to_owned()),
-                // Scan AssetsV2 for dynamic system fonts (PingFang, SF Pro, etc.)
                 (None, "/System/Library/AssetsV2".to_owned()),
             ];
 
             let font_entries = FcScanDirectoriesInner(&font_dirs);
             for (pattern, path) in font_entries {
-                let id = FontId::new();
-                cache.patterns.insert(pattern.clone(), id);
-                cache.metadata.insert(id, pattern.clone());
-                cache.disk_fonts.insert(id, path);
-                cache.index_pattern_tokens(&pattern, id);
+                if matches_filter(&pattern) {
+                    let id = FontId::new();
+                    cache.patterns.insert(pattern.clone(), id);
+                    cache.metadata.insert(id, pattern.clone());
+                    cache.disk_fonts.insert(id, path);
+                    cache.index_pattern_tokens(&pattern, id);
+                }
             }
         }
 
         cache
+    }
+    
+    /// Check if a font ID is a memory font (preferred over disk fonts)
+    pub fn is_memory_font(&self, id: &FontId) -> bool {
+        self.memory_fonts.contains_key(id)
     }
 
     /// Returns the list of fonts and font patterns
@@ -1305,6 +1406,7 @@ impl FcFontCache {
     }
 
     /// Queries a font from the in-memory cache, returns the first found font (early return)
+    /// Memory fonts are always preferred over disk fonts with the same match quality.
     pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
         let mut matches = Vec::new();
 
@@ -1322,18 +1424,23 @@ impl FcFontCache {
                 };
                 
                 let style_score = Self::calculate_style_score(pattern, metadata);
-                matches.push((*id, unicode_compatibility, style_score, metadata.clone()));
+                
+                // Memory fonts get a bonus to prefer them over disk fonts
+                let is_memory = self.memory_fonts.contains_key(id);
+                
+                matches.push((*id, unicode_compatibility, style_score, metadata.clone(), is_memory));
             }
         }
 
-        // Sort by Unicode compatibility (highest first), THEN by style score (lowest first)
-        // This ensures legibility is supreme priority
+        // Sort by: 1. Memory font (preferred), 2. Unicode compatibility, 3. Style score
         matches.sort_by(|a, b| {
-            b.1.cmp(&a.1) // Unicode compatibility (higher is better)
+            // Memory fonts first
+            b.4.cmp(&a.4)
+                .then_with(|| b.1.cmp(&a.1)) // Unicode compatibility (higher is better)
                 .then_with(|| a.2.cmp(&b.2)) // Style score (lower is better)
         });
 
-        matches.first().map(|(id, _, _, metadata)| {
+        matches.first().map(|(id, _, _, metadata, _)| {
             FontMatch {
                 id: *id,
                 unicode_ranges: metadata.unicode_ranges.clone(),
