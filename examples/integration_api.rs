@@ -1,136 +1,122 @@
 //! Integration API example
-//! 
-//! Shows how to integrate rust-fontconfig into a text layout pipeline.
+//!
+//! Shows the complete workflow for integrating rust-fontconfig into a text
+//! layout pipeline — from CSS font-family resolution to loading font bytes.
+//!
+//! Run with:
+//!   cargo run --example integration_api
 
-use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch, FontId};
+use rust_fontconfig::{FcFontCache, FcWeight, FontId, PatternMatch};
 
 fn main() {
-    println!("Font Integration API Example\n");
-    
-    // Step 1: Build the font cache once at application startup
-    println!("Step 1: Building font cache...");
+    println!("=== Font Integration Pipeline ===\n");
+
+    // ── Step 1: Build font cache ──
+    println!("Step 1: Build font cache");
     let cache = FcFontCache::build();
-    println!("  Loaded {} fonts\n", cache.list().len());
-    
-    // Step 2: Simulate CSS font-family resolution
-    // This is what a browser/text renderer would do
-    println!("Step 2: Resolving CSS font-family: 'Helvetica, Arial, sans-serif'\n");
-    
+    println!("  {} fonts loaded\n", cache.list().len());
+
+    // ── Step 2: Resolve CSS font-family ──
     let css_families = vec![
         "Helvetica".to_string(),
         "Arial".to_string(),
         "sans-serif".to_string(),
     ];
-    
-    let mut trace = Vec::new();
+    println!("Step 2: Resolve font-family: {:?}\n", css_families);
+
     let chain = cache.resolve_font_chain(
         &css_families,
         FcWeight::Normal,
-        PatternMatch::False,  // italic
-        PatternMatch::False,  // oblique
-        &mut trace,
+        PatternMatch::False,
+        PatternMatch::False,
+        &mut Vec::new(),
     );
-    
-    println!("  CSS fallback groups: {}", chain.css_fallbacks.len());
+
     for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        println!("    {}: CSS '{}' -> {} fonts", i + 1, group.css_name, group.fonts.len());
-        for font in group.fonts.iter().take(2) {
-            if let Some(meta) = cache.get_metadata_by_id(&font.id) {
-                let name = meta.name.as_ref().or(meta.family.as_ref());
-                println!("       - {:?}", name);
+        print!("  [{}] '{}': {} fonts", i + 1, group.css_name, group.fonts.len());
+        if let Some(first) = group.fonts.first() {
+            if let Some(meta) = cache.get_metadata_by_id(&first.id) {
+                print!(
+                    " (first: {:?})",
+                    meta.name.as_ref().or(meta.family.as_ref())
+                );
             }
         }
-        if group.fonts.len() > 2 {
-            println!("       ... and {} more", group.fonts.len() - 2);
-        }
+        println!();
     }
-    
-    println!("\n  Unicode fallback fonts: {}", chain.unicode_fallbacks.len());
-    for (i, font) in chain.unicode_fallbacks.iter().take(3).enumerate() {
-        if let Some(meta) = cache.get_metadata_by_id(&font.id) {
-            println!("    {}: {:?}", 
-                     i + 1, 
-                     meta.name.as_ref().or(meta.family.as_ref()));
-        }
-    }
-    if chain.unicode_fallbacks.len() > 3 {
-        println!("    ... and {} more", chain.unicode_fallbacks.len() - 3);
-    }
-    
-    // Step 3: Resolve text to fonts
-    // This maps each character to a specific font
-    println!("\n\nStep 3: Resolve text to fonts");
-    
+    println!(
+        "  + {} unicode fallback fonts\n",
+        chain.unicode_fallbacks.len()
+    );
+
+    // ── Step 3: Resolve text to font runs ──
     let text = "Hello 世界! Привет мир";
-    println!("  Input text: '{}'\n", text);
-    
+    println!("Step 3: Resolve text: '{}'\n", text);
+
     let resolved = chain.resolve_text(&cache, text);
-    
+
     // Group by runs of same font
-    let mut runs = Vec::new();
-    let mut current_run_text = String::new();
-    let mut current_font_id: Option<FontId> = None;
-    
-    for (ch, font_info) in &resolved {
-        let this_font_id = font_info.as_ref().map(|(id, _)| *id);
-        
-        if this_font_id != current_font_id {
-            if !current_run_text.is_empty() {
-                runs.push((current_run_text.clone(), current_font_id));
-                current_run_text.clear();
+    let mut runs: Vec<(String, Option<FontId>)> = Vec::new();
+    let mut current_text = String::new();
+    let mut current_id: Option<FontId> = None;
+
+    for (ch, info) in &resolved {
+        let this_id = info.as_ref().map(|(id, _)| *id);
+        if this_id != current_id {
+            if !current_text.is_empty() {
+                runs.push((current_text.clone(), current_id));
+                current_text.clear();
             }
-            current_font_id = this_font_id;
+            current_id = this_id;
         }
-        current_run_text.push(*ch);
+        current_text.push(*ch);
     }
-    if !current_run_text.is_empty() {
-        runs.push((current_run_text, current_font_id));
+    if !current_text.is_empty() {
+        runs.push((current_text, current_id));
     }
-    
+
     println!("  Font runs:");
     for (run_text, font_id) in &runs {
-        let font_name = font_id.as_ref()
+        let name = font_id
+            .as_ref()
             .and_then(|id| cache.get_metadata_by_id(id))
             .and_then(|m| m.name.clone().or(m.family.clone()))
-            .unwrap_or_else(|| "[NO FONT]".to_string());
-        println!("    '{}' -> {}", run_text, font_name);
+            .unwrap_or_else(|| "[NO FONT]".into());
+        println!("    '{}' -> {}", run_text, name);
     }
-    
-    // Step 4: Load font data for shaping
-    // In a real application, you'd load font bytes here
-    println!("\n\nStep 4: Loading fonts for shaping");
-    
-    // Collect unique font IDs needed for this text
-    let unique_fonts: std::collections::HashSet<_> = runs.iter()
-        .filter_map(|(_, id)| *id)
-        .collect();
-    
-    println!("  Unique fonts needed: {}", unique_fonts.len());
-    
+
+    // ── Step 4: Load font bytes ──
+    let unique_fonts: std::collections::HashSet<_> =
+        runs.iter().filter_map(|(_, id)| *id).collect();
+
+    println!(
+        "\nStep 4: Load fonts ({} unique needed)\n",
+        unique_fonts.len()
+    );
     for font_id in &unique_fonts {
         if let Some(meta) = cache.get_metadata_by_id(font_id) {
-            println!("    - {:?}", meta.name.as_ref().or(meta.family.as_ref()));
-            // Get font path via get_font_by_id
+            let name = meta
+                .name
+                .as_ref()
+                .or(meta.family.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("?");
             if let Some(source) = cache.get_font_by_id(font_id) {
                 match source {
                     rust_fontconfig::FontSource::Disk(path) => {
-                        // In real code, you'd load the font file here:
-                        // let bytes = std::fs::read(&path.path)?;
-                        // let parsed = ttf_parser::Face::parse(&bytes, path.font_index as u32)?;
-                        println!("      Path: {}", path.path);
+                        println!("  {} -> {}", name, path.path);
                     }
                     rust_fontconfig::FontSource::Memory(font) => {
-                        println!("      Memory font (id: {})", font.id);
+                        println!("  {} -> memory (id: {})", name, font.id);
                     }
                 }
             }
         }
     }
-    
-    println!("\nWorkflow summary:");
-    println!("");
-    println!("1. FcFontCache::build() - once at startup");
-    println!("2. cache.resolve_font_chain() - per CSS font-family declaration");
-    println!("3. chain.resolve_text(\"abc\") -> [Run {{ font, glyphs: \"abc\" }}] - per text string to shape");
-    println!("4. Load font bytes and shape each run with its font");
+
+    println!("\nPipeline summary:");
+    println!("  1. FcFontCache::build()       — once at startup");
+    println!("  2. cache.resolve_font_chain() — per CSS font-family");
+    println!("  3. chain.resolve_text()       — per text run");
+    println!("  4. cache.get_font_by_id()     — load bytes for shaping");
 }

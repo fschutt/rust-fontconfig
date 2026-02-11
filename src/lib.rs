@@ -88,6 +88,9 @@ use std::path::PathBuf;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
+#[cfg(feature = "async-registry")]
+pub mod registry;
+
 /// Operating system type for generic font family resolution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperatingSystem {
@@ -321,6 +324,7 @@ pub fn expand_font_families(families: &[String], os: OperatingSystem, unicode_ra
 
 /// UUID to identify a font (collections are broken up into separate fonts)
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct FontId(pub u128);
 
 impl core::fmt::Debug for FontId {
@@ -356,6 +360,7 @@ impl FontId {
 
 /// Whether a field is required to match (yes / no / don't care)
 #[derive(Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub enum PatternMatch {
     /// Default: don't particularly care whether the requirement matches
@@ -383,6 +388,7 @@ impl PatternMatch {
 
 /// Font weight values as defined in CSS specification
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub enum FcWeight {
     Thin = 100,
@@ -564,6 +570,7 @@ impl Default for FcWeight {
 
 /// CSS font-stretch values
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub enum FcStretch {
     UltraCondensed = 1,
@@ -682,6 +689,7 @@ impl Default for FcStretch {
 
 /// Unicode range representation for font matching
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnicodeRange {
     pub start: u32,
     pub end: u32,
@@ -752,6 +760,7 @@ pub struct TraceMsg {
 
 /// Font pattern for matching
 #[derive(Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct FcPattern {
     // font name
@@ -834,6 +843,7 @@ impl core::fmt::Debug for FcPattern {
 
 /// Font metadata from the OS/2 table
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct FcFontMetadata {
     pub copyright: Option<String>,
     pub designer: Option<String>,
@@ -1045,18 +1055,19 @@ pub struct CssFallbackGroup {
 /// Different texts with the same CSS font-stack should share the same chain.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct FontChainCacheKey {
+pub(crate) struct FontChainCacheKey {
     /// CSS font stack (expanded to OS-specific fonts)
-    font_families: Vec<String>,
+    pub(crate) font_families: Vec<String>,
     /// Font weight
-    weight: FcWeight,
+    pub(crate) weight: FcWeight,
     /// Font style flags
-    italic: PatternMatch,
-    oblique: PatternMatch,
+    pub(crate) italic: PatternMatch,
+    pub(crate) oblique: PatternMatch,
 }
 
 /// Path to a font file
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct FcFontPath {
     pub path: String,
@@ -1105,19 +1116,19 @@ impl NamedFont {
 #[derive(Debug)]
 pub struct FcFontCache {
     // Pattern to FontId mapping (query index)
-    patterns: BTreeMap<FcPattern, FontId>,
+    pub(crate) patterns: BTreeMap<FcPattern, FontId>,
     // On-disk font paths
-    disk_fonts: BTreeMap<FontId, FcFontPath>,
+    pub(crate) disk_fonts: BTreeMap<FontId, FcFontPath>,
     // In-memory fonts
-    memory_fonts: BTreeMap<FontId, FcFont>,
+    pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
     // Metadata cache (patterns stored by ID for quick lookup)
-    metadata: BTreeMap<FontId, FcPattern>,
+    pub(crate) metadata: BTreeMap<FontId, FcPattern>,
     // Token index: maps lowercase tokens ("noto", "sans", "jp") to sets of FontIds
     // This enables fast fuzzy search by intersecting token sets
-    token_index: BTreeMap<String, alloc::collections::BTreeSet<FontId>>,
+    pub(crate) token_index: BTreeMap<String, alloc::collections::BTreeSet<FontId>>,
     // Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>
     // Avoids re-tokenization during fuzzy search
-    font_tokens: BTreeMap<FontId, Vec<String>>,
+    pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
     // Font fallback chain cache (CSS stack + unicode -> resolved chain)
     #[cfg(feature = "std")]
     chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
@@ -1594,7 +1605,7 @@ impl FcFontCache {
     }
 
     /// Check if a pattern matches the query, with detailed tracing
-    fn query_matches_internal(
+    pub fn query_matches_internal(
         k: &FcPattern,
         pattern: &FcPattern,
         trace: &mut Vec<TraceMsg>,
@@ -2164,7 +2175,7 @@ impl FcFontCache {
     /// Extract tokens from a font name
     /// E.g., "NotoSansJP" -> ["Noto", "Sans", "JP"]
     /// E.g., "Noto Sans CJK JP" -> ["Noto", "Sans", "CJK", "JP"]
-    fn extract_font_name_tokens(name: &str) -> Vec<String> {
+    pub fn extract_font_name_tokens(name: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut current_token = String::new();
         let mut last_was_lower = false;
@@ -2374,7 +2385,7 @@ impl FcFontCache {
     
     /// Find fallback fonts for a given pattern
     // Helper to calculate total unicode coverage
-    fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
+    pub fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
         ranges
             .iter()
             .map(|range| (range.end - range.start + 1) as u64)
@@ -2383,7 +2394,7 @@ impl FcFontCache {
 
     /// Calculate how well a font's Unicode ranges cover the requested ranges
     /// Returns a compatibility score (higher is better, 0 means no overlap)
-    fn calculate_unicode_compatibility(
+    pub fn calculate_unicode_compatibility(
         requested: &[UnicodeRange],
         available: &[UnicodeRange],
     ) -> i32 {
@@ -2411,7 +2422,7 @@ impl FcFontCache {
         total_coverage as i32
     }
 
-    fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> i32 {
+    pub fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> i32 {
 
         let mut score = 0_i32;
 
@@ -2656,7 +2667,7 @@ fn ParseFontsConf(
 
 // Remaining implementation for font scanning, parsing, etc.
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
+pub(crate) fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPath)>> {
     use allsorts::{
         binary::read::ReadScope,
         font_data::FontData,

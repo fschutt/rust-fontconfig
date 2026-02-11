@@ -1,54 +1,55 @@
+//! Basic font query example (synchronous API)
+//!
+//! Demonstrates the classic `FcFontCache::build()` API which scans ALL system
+//! fonts upfront. This works but is slow (~700ms on a system with 1000 fonts).
+//! For faster startup, see the `registry` example.
+//!
+//! Run with:
+//!   cargo run --example getfont
+
 use rust_fontconfig::{FcFontCache, FcPattern, FcWeight};
 use std::time::Instant;
 
 fn main() {
+    // Build the cache — scans and parses ALL system fonts
     let start = Instant::now();
     let cache = FcFontCache::build();
     let build_time = start.elapsed();
 
-    println!("✓ Cache built with {} fonts in {:?}", cache.list().len(), build_time);
-    println!();
+    println!("Cache built: {} fonts in {:?}\n", cache.list().len(), build_time);
 
-    // Test various font queries to showcase fuzzy matching
-    let test_queries = vec![
-        ("Arial", FcWeight::Normal, "Common sans-serif font"),
-        ("NotoSansJP", FcWeight::Normal, "Japanese font (fuzzy match)"),
+    // Query various fonts to showcase fuzzy matching
+    let queries = [
+        ("Arial", FcWeight::Normal, "Common sans-serif"),
         ("Helvetica", FcWeight::Bold, "Bold variant"),
-        ("DejaVu Sans", FcWeight::Normal, "Font with spaces"),
-        ("Courier", FcWeight::Normal, "Monospace font"),
+        ("Courier", FcWeight::Normal, "Monospace"),
+        ("Georgia", FcWeight::Normal, "Serif"),
+        ("sans-serif", FcWeight::Normal, "Generic family"),
     ];
 
-    for (font_name, weight, description) in test_queries {
-        println!("Searching for: '{}' ({})", font_name, description);
-        
-        let query_start = Instant::now();
+    for (name, weight, desc) in &queries {
+        let t = Instant::now();
         let result = cache.query(
             &FcPattern {
-                name: Some(font_name.to_string()),
-                weight,
+                name: Some(name.to_string()),
+                weight: *weight,
                 ..Default::default()
             },
             &mut Vec::new(),
         );
-        let query_time = query_start.elapsed();
 
         match result {
-            Some(font_match) => {
-                if let Some(pattern) = cache.get_metadata_by_id(&font_match.id) {
-                    let name = pattern.name.as_ref().or(pattern.family.as_ref())
-                        .map(|s| s.as_str()).unwrap_or("<unknown>");
-                    println!("  ✓ Found: {} (query time: {:?})", name, query_time);
-                    println!("    - Weight: {:?}", pattern.weight);
-                    println!("    - Unicode ranges: {}", font_match.unicode_ranges.len());
-                    println!("    - Fallbacks: {}", font_match.fallbacks.len());
-                } else {
-                    println!("  ✓ Found font ID: {} (query time: {:?})", font_match.id, query_time);
-                }
+            Some(fm) => {
+                let found = cache
+                    .get_metadata_by_id(&fm.id)
+                    .and_then(|m| m.name.clone().or(m.family.clone()))
+                    .unwrap_or_else(|| format!("{:?}", fm.id));
+                println!(
+                    "  ✓ '{}' ({}) -> {} [{:?}]",
+                    name, desc, found, t.elapsed()
+                );
             }
-            None => {
-                println!("  ✗ Not found (query time: {:?})", query_time);
-            }
+            None => println!("  ✗ '{}' ({}) -> NOT FOUND [{:?}]", name, desc, t.elapsed()),
         }
-        println!();
     }
 }

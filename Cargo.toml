@@ -19,6 +19,8 @@ xmlparser = { version = "0.13.3", default-features = false }
 rayon = { version = "1.5.0", default-features = false, optional = true }
 allsorts = { version = "0.16.1", default-features = false, features = ["flate2_rust"], optional = true }
 base64 = "0.22.1"
+serde = { version = "1", features = ["derive"], optional = true }
+bincode = { version = "1", optional = true }
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 mmapio = { version = "0.9.1", default-features = false, optional = true }
@@ -29,3 +31,5 @@ std = ["mmapio"]
 multithreading = ["rayon"]
 parsing = ["allsorts"]
 ffi = ["parsing", "std"]
+cache = ["serde", "bincode", "std"]
+async-registry = ["std", "parsing"]
