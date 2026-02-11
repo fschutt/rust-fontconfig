@@ -166,6 +166,19 @@ pub struct FcFontRegistry {
     os: OperatingSystem,
 }
 
+impl std::fmt::Debug for FcFontRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FcFontRegistry")
+            .field("faces_loaded", &self.faces_loaded.load(Ordering::Relaxed))
+            .field("files_parsed", &self.files_parsed.load(Ordering::Relaxed))
+            .field("files_discovered", &self.files_discovered.load(Ordering::Relaxed))
+            .field("scan_complete", &self.scan_complete.load(Ordering::Relaxed))
+            .field("build_complete", &self.build_complete.load(Ordering::Relaxed))
+            .field("cache_loaded", &self.cache_loaded.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
 impl FcFontRegistry {
     /// Create a new empty registry.
     pub fn new() -> Arc<Self> {
