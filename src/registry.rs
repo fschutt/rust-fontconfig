@@ -148,6 +148,10 @@ pub struct FcFontRegistry {
 
     // ── Deduplication ──
     processed_paths: Mutex<HashSet<PathBuf>>,
+    /// Paths that have been fully parsed and whose patterns are inserted.
+    /// Unlike `processed_paths` (set before parsing for dedup), this is set
+    /// AFTER parsing + insert_font(), so it's safe to wait on.
+    completed_paths: Mutex<HashSet<PathBuf>>,
 
     // ── Status ──
     scan_complete: AtomicBool,
@@ -196,6 +200,7 @@ impl FcFontRegistry {
             pending_requests: Mutex::new(Vec::new()),
             request_complete: Condvar::new(),
             processed_paths: Mutex::new(HashSet::new()),
+            completed_paths: Mutex::new(HashSet::new()),
             scan_complete: AtomicBool::new(false),
             build_complete: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -298,7 +303,21 @@ impl FcFontRegistry {
             return self.resolve_chains(&expanded_stacks);
         }
 
-        // 2. Check which families are already in the registry
+        // 2. Wait for Scout to finish first (typically < 100ms).
+        //    Without the scout's known_paths, we can't check which font
+        //    files exist for a family and whether all variants are parsed.
+        while !self.scan_complete.load(Ordering::Acquire) {
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "[azul-font-registry] WARNING: Timed out waiting for font scout (5s). \
+                     Proceeding with available fonts."
+                );
+                return self.resolve_chains(&expanded_stacks);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // 3. Check which families are completely missing from the registry
         let mut missing: Vec<String> = Vec::new();
         {
             let patterns = self.patterns.read().unwrap();
@@ -319,24 +338,47 @@ impl FcFontRegistry {
             }
         }
 
-        // 3. If nothing is missing, resolve chains immediately
-        if missing.is_empty() {
+        // 4. Even if families have at least one pattern, some font FILES for
+        //    that family may still be unprocessed (e.g., SFNSItalic.ttf parsed
+        //    but SFNS.ttf not yet ⇒ only italic variant available).
+        //    Use completed_paths (not processed_paths!) because processed_paths
+        //    is set BEFORE parsing, while completed_paths is set AFTER parsing
+        //    and insert_font().
+        let mut incomplete_paths: Vec<(std::path::PathBuf, String)> = Vec::new();
+        {
+            let known = self.known_paths.read().unwrap();
+            let completed = self.completed_paths.lock().unwrap();
+            for family in &needed_families {
+                // Check exact match
+                if let Some(paths) = known.get(family) {
+                    for path in paths {
+                        if !completed.contains(path) {
+                            incomplete_paths.push((path.clone(), family.clone()));
+                        }
+                    }
+                }
+                // Check partial matches (e.g. "systemfont" vs "sfns")
+                for (known_fam, paths) in known.iter() {
+                    if known_fam != family
+                        && (known_fam.contains(family.as_str())
+                            || family.contains(known_fam.as_str()))
+                    {
+                        for path in paths {
+                            if !completed.contains(path) {
+                                incomplete_paths.push((path.clone(), known_fam.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. If nothing is missing AND all files are processed, resolve immediately
+        if missing.is_empty() && incomplete_paths.is_empty() {
             return self.resolve_chains(&expanded_stacks);
         }
 
-        // 4. Wait for Scout to finish (so we can look up file paths)
-        while !self.scan_complete.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "[azul-font-registry] WARNING: Timed out waiting for font scout (5s). \
-                     Proceeding with available fonts."
-                );
-                return self.resolve_chains(&expanded_stacks);
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-
-        // 5. For each missing family, look up known_paths and push Critical jobs
+        // 6. Push Critical jobs for missing families AND incomplete file variants
         {
             let known_paths = self.known_paths.read().unwrap();
             let mut queue = self.build_queue.lock().unwrap();
@@ -369,40 +411,70 @@ impl FcFontRegistry {
                 }
             }
 
+            // Also push Critical jobs for incomplete file variants
+            for (path, fam) in &incomplete_paths {
+                queue.push(FcBuildJob {
+                    priority: Priority::Critical,
+                    path: path.clone(),
+                    font_index: None,
+                    guessed_family: fam.clone(),
+                });
+            }
+
             // Sort so Critical jobs are at the end (popped first with pop())
             queue.sort();
         }
         self.queue_condvar.notify_all();
 
-        // 6. Register a pending request and wait for completion
-        let satisfied = Arc::new(AtomicBool::new(false));
-        {
-            let mut pending = self.pending_requests.lock().unwrap();
-            pending.push(FontRequest {
-                families: missing.clone(),
-                satisfied: Arc::clone(&satisfied),
-            });
-        }
-
-        // 7. Wait for the Builder threads to satisfy our request (or timeout)
-        while !satisfied.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "[azul-font-registry] WARNING: Timed out waiting for fonts: {:?} (5s). \
-                     Proceeding with available fonts.",
-                    missing
-                );
-                break;
+        // 7. Wait for ALL specific files to be processed (not just "family found").
+        //    This prevents the race condition where only one variant of a font
+        //    family (e.g. only italic) is available at snapshot time.
+        let wait_paths: std::collections::HashSet<std::path::PathBuf> = {
+            let mut paths = std::collections::HashSet::new();
+            for (path, _) in &incomplete_paths {
+                paths.insert(path.clone());
             }
-
-            // Also check if build is complete (all fonts processed)
-            if self.build_complete.load(Ordering::Acquire) {
-                break;
+            let known_paths = self.known_paths.read().unwrap();
+            for family in &missing {
+                if let Some(fam_paths) = known_paths.get(family) {
+                    for p in fam_paths {
+                        paths.insert(p.clone());
+                    }
+                }
+                for (known_fam, fam_paths) in known_paths.iter() {
+                    if known_fam.contains(family.as_str())
+                        || family.contains(known_fam.as_str())
+                    {
+                        for p in fam_paths {
+                            paths.insert(p.clone());
+                        }
+                    }
+                }
             }
+            paths
+        };
 
-            let pending = self.pending_requests.lock().unwrap();
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let _result = self.request_complete.wait_timeout(pending, remaining);
+        if !wait_paths.is_empty() {
+            loop {
+                let all_done = {
+                    let completed = self.completed_paths.lock().unwrap();
+                    wait_paths.iter().all(|p| completed.contains(p))
+                };
+                if all_done {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "[azul-font-registry] WARNING: Timed out waiting for font files (5s). \
+                         Proceeding with available fonts."
+                    );
+                    break;
+                }
+                if self.build_complete.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
 
         // 8. Resolve chains from the now-populated registry
@@ -583,6 +655,11 @@ impl FcFontRegistry {
             self.files_discovered.load(Ordering::Relaxed),
             self.faces_loaded.load(Ordering::Relaxed),
         )
+    }
+
+    /// Returns true if a disk cache was successfully loaded at startup.
+    pub fn is_cache_loaded(&self) -> bool {
+        self.cache_loaded.load(Ordering::Acquire)
     }
 
     // ── Internal methods ────────────────────────────────────────────────────
@@ -853,7 +930,12 @@ impl FcFontRegistry {
             candidates.push((id, token_similarity, style_score, pattern.clone()));
         }
 
-        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        candidates.sort_by(|a, b| {
+            b.1.cmp(&a.1) // Token similarity (higher is better)
+                .then_with(|| a.2.cmp(&b.2)) // Style score (lower is better)
+                .then_with(|| a.3.italic.cmp(&b.3.italic)) // Prefer non-italic (False < True)
+                .then_with(|| a.3.name.cmp(&b.3.name)) // Alphabetical tiebreaker
+        });
         candidates.truncate(5);
 
         candidates
@@ -1071,6 +1153,8 @@ fn get_common_font_families_for_os(os: OperatingSystem) -> Vec<String> {
     match os {
         OperatingSystem::MacOS => vec![
             "sanfrancisco".to_string(),
+            "sfns".to_string(),
+            "systemfont".to_string(),
             "helveticaneue".to_string(),
             "helvetica".to_string(),
             "arial".to_string(),
@@ -1162,6 +1246,12 @@ fn builder_thread(registry: &FcFontRegistry) {
             }
         }
 
+        // Mark this file as fully completed (patterns inserted)
+        {
+            let mut completed = registry.completed_paths.lock().unwrap();
+            completed.insert(job.path.clone());
+        }
+
         // Count this file as parsed regardless of whether it yielded faces
         registry.files_parsed.fetch_add(1, Ordering::Relaxed);
 
@@ -1241,9 +1331,12 @@ impl FcFontRegistry {
 
         let mut count = 0usize;
         let mut processed = self.processed_paths.lock().unwrap();
+        let mut completed = self.completed_paths.lock().unwrap();
         for (path_str, entry) in &manifest.entries {
             // Mark this file as already processed so builder threads skip it
-            processed.insert(PathBuf::from(path_str));
+            let pb = PathBuf::from(path_str);
+            processed.insert(pb.clone());
+            completed.insert(pb);
             for idx_entry in &entry.font_indices {
                 let id = FontId::new();
                 Self::index_pattern_tokens_static(
@@ -1265,6 +1358,7 @@ impl FcFontRegistry {
             }
         }
         drop(processed);
+        drop(completed);
 
         self.faces_loaded.store(count, Ordering::Relaxed);
         // Don't set files_parsed here — that counter tracks builder thread work.

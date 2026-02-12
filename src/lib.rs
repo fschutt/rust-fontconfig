@@ -1416,6 +1416,16 @@ impl FcFontCache {
             .collect()
     }
 
+    /// Returns true if the cache contains no font patterns
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Returns the number of font patterns in the cache
+    pub fn len(&self) -> usize {
+        self.patterns.len()
+    }
+
     /// Queries a font from the in-memory cache, returns the first found font (early return)
     /// Memory fonts are always preferred over disk fonts with the same match quality.
     pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
@@ -1485,9 +1495,12 @@ impl FcFontCache {
 
         // Sort by style score (lowest first), THEN by Unicode compatibility (highest first)
         // Style matching (weight, italic, etc.) is now the primary criterion
+        // Deterministic tiebreaker: prefer non-italic, then alphabetical by name
         matches.sort_by(|a, b| {
             a.2.cmp(&b.2) // Style score (lower is better)
                 .then_with(|| b.1.cmp(&a.1)) // Unicode compatibility (higher is better)
+                .then_with(|| a.3.italic.cmp(&b.3.italic)) // Prefer non-italic
+                .then_with(|| a.3.name.cmp(&b.3.name)) // Alphabetical tiebreaker
         });
 
         matches
@@ -2143,16 +2156,21 @@ impl FcFontCache {
         // 1. Token matches (more matches = better)
         // 2. Unicode compatibility (if ranges provided)
         // 3. Style score (lower is better)
+        // 4. Deterministic tiebreaker: prefer non-italic, then by font name
         candidates.sort_by(|a, b| {
             if !unicode_ranges.is_empty() {
                 // When we have Unicode requirements, prioritize coverage
                 b.1.cmp(&a.1) // Token similarity (higher is better) - PRIMARY
                     .then_with(|| b.2.cmp(&a.2)) // Unicode similarity (higher is better) - SECONDARY
                     .then_with(|| a.3.cmp(&b.3)) // Style score (lower is better) - TERTIARY
+                    .then_with(|| a.4.italic.cmp(&b.4.italic)) // Prefer non-italic (False < True)
+                    .then_with(|| a.4.name.cmp(&b.4.name)) // Alphabetical by name
             } else {
                 // No Unicode requirements, token similarity is primary
                 b.1.cmp(&a.1) // Token similarity (higher is better)
                     .then_with(|| a.3.cmp(&b.3)) // Style score (lower is better)
+                    .then_with(|| a.4.italic.cmp(&b.4.italic)) // Prefer non-italic (False < True)
+                    .then_with(|| a.4.name.cmp(&b.4.name)) // Alphabetical by name
             }
         });
         
@@ -2438,6 +2456,15 @@ impl FcFontCache {
             score += weight_diff as i32;
         }
 
+        // Exact weight match bonus: reward fonts whose weight matches the request exactly,
+        // with an extra bonus when both are Normal (the most common case for body text)
+        if original.weight == candidate.weight {
+            score -= 15;
+            if original.weight == FcWeight::Normal {
+                score -= 10; // Extra bonus for Normal-Normal match
+            }
+        }
+
         // Stretch calculation with special handling for condensed property
         if (original.condensed == PatternMatch::True && candidate.stretch.is_condensed())
             || (original.condensed == PatternMatch::False && !candidate.stretch.is_condensed())
@@ -2461,14 +2488,22 @@ impl FcFontCache {
 
         for (orig, cand, mismatch_penalty, dontcare_penalty) in style_props {
             if orig.needs_to_match() {
-                if !orig.matches(&cand) {
+                if orig == PatternMatch::False && cand == PatternMatch::DontCare {
+                    // Requesting non-italic but font doesn't declare: small penalty
+                    // (less than a full mismatch but more than a perfect match)
+                    score += dontcare_penalty / 2;
+                } else if !orig.matches(&cand) {
                     if cand == PatternMatch::DontCare {
                         score += dontcare_penalty;
                     } else {
                         score += mismatch_penalty;
                     }
                 } else if orig == PatternMatch::True && cand == PatternMatch::True {
-                    // Give bonus for exact True match to solve the test case
+                    // Give bonus for exact True match
+                    score -= 20;
+                } else if orig == PatternMatch::False && cand == PatternMatch::False {
+                    // Give bonus for exact False match (prefer explicitly non-italic
+                    // over fonts with unknown/DontCare italic status)
                     score -= 20;
                 }
             } else {
@@ -2479,6 +2514,50 @@ impl FcFontCache {
                 if cand == PatternMatch::True {
                     score += dontcare_penalty / 3;
                 }
+            }
+        }
+
+        // ── Name-based "base font" detection ──
+        // The shorter the font name relative to its family, the more "basic" the
+        // variant.  E.g. "System Font" (the base) should score better than
+        // "System Font Regular Italic" (a variant) when the user hasn't
+        // explicitly requested italic.
+        if let (Some(name), Some(family)) = (&candidate.name, &candidate.family) {
+            let name_lower = name.to_lowercase();
+            let family_lower = family.to_lowercase();
+
+            // Strip the family prefix from the name to get the "extra" part
+            let extra = if name_lower.starts_with(&family_lower) {
+                name_lower[family_lower.len()..].to_string()
+            } else {
+                String::new()
+            };
+
+            // Strip common neutral descriptors that don't indicate a style variant
+            let stripped = extra
+                .replace("regular", "")
+                .replace("normal", "")
+                .replace("book", "")
+                .replace("roman", "");
+            let stripped = stripped.trim();
+
+            if stripped.is_empty() {
+                // This is a "base font" – name is just the family (± "Regular")
+                score -= 50;
+            } else {
+                // Name has extra style descriptors – add a penalty per extra word
+                let extra_words = stripped.split_whitespace().count();
+                score += (extra_words as i32) * 25;
+            }
+        }
+
+        // ── Subfamily "Regular" bonus ──
+        // Fonts whose OpenType subfamily is exactly "Regular" are the canonical
+        // base variant and should be strongly preferred.
+        if let Some(ref subfamily) = candidate.metadata.font_subfamily {
+            let sf_lower = subfamily.to_lowercase();
+            if sf_lower == "regular" {
+                score -= 30;
             }
         }
 
