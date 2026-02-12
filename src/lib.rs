@@ -2471,6 +2471,14 @@ impl FcFontCache {
                     // Give bonus for exact True match to solve the test case
                     score -= 20;
                 }
+            } else {
+                // orig == DontCare: prefer "normal" fonts over styled ones.
+                // When the caller doesn't specify italic/bold/etc., a font
+                // that IS italic/bold should score slightly worse than one
+                // that isn't, so Regular is chosen over Italic by default.
+                if cand == PatternMatch::True {
+                    score += dontcare_penalty / 3;
+                }
             }
         }
 
