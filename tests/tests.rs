@@ -494,6 +494,7 @@ fn getfonts(
                 name: Some("Arial".to_string()),
                 family: Some("Arial".to_string()),
                 weight: FcWeight::Normal,
+                bold: PatternMatch::False,
                 monospace: PatternMatch::False,
                 unicode_ranges: vec![UnicodeRange {
                     start: 0x0000,

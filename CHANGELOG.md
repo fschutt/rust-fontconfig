@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-02-14
+
+### Breaking Changes
+
+- **`FontId` now uses atomic counter instead of `SystemTime`**: Font IDs are now
+  assigned via a global atomic counter (`AtomicU128`), making them deterministic
+  and reproducible across runs. Code that compared `FontId` values across sessions
+  or relied on their magnitude encoding time will break.
+
+### Added
+
+- **`FcFontRegistry`**: New async font registry with background scanning and
+  on-demand font loading. Requires the `async-registry` feature.
+  - `FcFontRegistry::new()` — creates a new registry (returns `Arc<Self>`)
+  - `register_memory_fonts()` — register in-memory fonts with priority
+  - `spawn_scout_and_builders()` — start background directory scanning + font parsing
+  - `request_fonts()` — request specific font families (prioritized loading)
+  - `into_fc_font_cache()` — convert to `FcFontCache` for compatibility
+  - `shutdown()`, `is_scan_complete()`, `is_build_complete()`, `progress()`
+
+- **Disk cache** (`cache` feature): Serializes parsed font metadata to disk via
+  `bincode`/`serde`, dramatically speeding up subsequent launches.
+  - `FcFontRegistry::load_from_disk_cache()` / `save_to_disk_cache()`
+  - `FontManifest`, `FontCacheEntry`, `FontIndexEntry` structs
+
+- **`FcFontCache::build_with_families()`**: Build a cache that only scans and
+  parses fonts matching specific family names, much faster than `build()` when
+  you know which fonts you need.
+
+- **`Debug` impl for `FcFontRegistry`**: Shows registry state (scan progress,
+  font counts, memory fonts).
+
+### Fixed
+
+- **Italic font race condition**: `FcFontRegistry` now waits for all font file
+  variants (regular, bold, italic, etc.) to be parsed before resolving font
+  queries, preventing cases where italic variants were missing from results.
+
+- **Font scoring**: When style is `DontCare`, prefer `Normal` over `Italic`
+  variants. This fixes cases where italic fonts were incorrectly chosen as the
+  default match.
+
+- **Memory font preference**: `query()` now prefers memory fonts over disk fonts
+  when both match equally, ensuring programmatically registered fonts take
+  priority.
+
+- **Test fix**: Arial Regular test pattern now explicitly sets `bold: False`
+  instead of `DontCare` for correct scoring behavior.
+
+## [1.2.2] - 2025-12-01
+
+### Added
+
+- `FcParseFontBytes`: Parse in-memory font data without building a full cache.
+
 ## [1.2.1] - 2025-11-26
 
 ### Fixed
