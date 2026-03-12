@@ -904,11 +904,17 @@ pub struct FontCacheEntry {
     pub font_indices: Vec<FontIndexEntry>,
 }
 
-/// Parsed metadata for a single font index within a font file.
+/// A single font face within a font file, for disk cache serialization.
+///
+/// Font files (especially `.ttc` collections) can contain multiple faces.
+/// Each entry pairs the parsed metadata with the face index so we can
+/// reconstruct the full registry from the cache without re-parsing.
 #[cfg(feature = "cache")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FontIndexEntry {
+    /// Parsed font metadata (name, family, weight, italic, unicode ranges, etc.)
     pub pattern: FcPattern,
+    /// Zero-based index of this face within the font file (0 for single-face files)
     pub font_index: usize,
 }
 
