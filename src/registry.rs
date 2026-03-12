@@ -1441,9 +1441,14 @@ fn get_font_cache_path() -> Option<PathBuf> {
 }
 
 /// Get the base cache directory for rust-fontconfig.
+///
+/// Returns `None` on platforms without a conventional cache directory (e.g. WASM).
 #[cfg(feature = "cache")]
 fn get_cache_base_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("rfc"))
+    #[cfg(target_family = "wasm")]
+    { None }
+    #[cfg(not(target_family = "wasm"))]
+    { dirs::cache_dir().map(|d| d.join("rfc")) }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
