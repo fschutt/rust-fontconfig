@@ -47,7 +47,6 @@ use crate::{
     expand_font_families, FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
     FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
 };
-use crate::multithread::builder_thread;
 use crate::utils::normalize_family_name;
 
 // ── Priority Queue ──────────────────────────────────────────────────────────
@@ -210,7 +209,7 @@ impl FcFontRegistry {
             std::thread::Builder::new()
                 .name(format!("rfc-font-builder-{}", i))
                 .spawn(move || {
-                    builder_thread(&registry);
+                    registry.builder_thread();
                 })
                 .expect("failed to spawn font builder thread");
         }
@@ -292,9 +291,7 @@ impl FcFontRegistry {
         //    is set BEFORE parsing, while completed_paths is set AFTER parsing
         //    and insert_font().
         let mut incomplete_paths: Vec<(PathBuf, String)> = Vec::new();
-        {
-            let known = self.known_paths.read().unwrap();
-            let completed = self.completed_paths.lock().unwrap();
+        if let (Ok(known), Ok(completed)) = (self.known_paths.read(), self.completed_paths.lock()) {
             for family in &needed_families {
                 if let Some(paths) = known.get(family) {
                     for path in paths {
@@ -324,9 +321,7 @@ impl FcFontRegistry {
         }
 
         // 6. Push Critical jobs for missing families AND incomplete file variants
-        {
-            let known_paths = self.known_paths.read().unwrap();
-            let mut queue = self.build_queue.lock().unwrap();
+        if let (Ok(known_paths), Ok(mut queue)) = (self.known_paths.read(), self.build_queue.lock()) {
 
             for family in &missing {
                 if let Some(paths) = known_paths.get(family) {
@@ -374,19 +369,20 @@ impl FcFontRegistry {
             for (path, _) in &incomplete_paths {
                 paths.insert(path.clone());
             }
-            let known_paths = self.known_paths.read().unwrap();
-            for family in &missing {
-                if let Some(fam_paths) = known_paths.get(family) {
-                    for p in fam_paths {
-                        paths.insert(p.clone());
-                    }
-                }
-                for (known_fam, fam_paths) in known_paths.iter() {
-                    if known_fam.contains(family.as_str())
-                        || family.contains(known_fam.as_str())
-                    {
+            if let Ok(known_paths) = self.known_paths.read() {
+                for family in &missing {
+                    if let Some(fam_paths) = known_paths.get(family) {
                         for p in fam_paths {
                             paths.insert(p.clone());
+                        }
+                    }
+                    for (known_fam, fam_paths) in known_paths.iter() {
+                        if known_fam.contains(family.as_str())
+                            || family.contains(known_fam.as_str())
+                        {
+                            for p in fam_paths {
+                                paths.insert(p.clone());
+                            }
                         }
                     }
                 }
@@ -396,10 +392,9 @@ impl FcFontRegistry {
 
         if !wait_paths.is_empty() {
             loop {
-                let all_done = {
-                    let completed = self.completed_paths.lock().unwrap();
-                    wait_paths.iter().all(|p| completed.contains(p))
-                };
+                let all_done = self.completed_paths.lock()
+                    .map(|completed| wait_paths.iter().all(|p| completed.contains(p)))
+                    .unwrap_or(true);
                 if all_done {
                     break;
                 }
@@ -529,7 +524,10 @@ impl FcFontRegistry {
 
     /// Check and signal any pending requests that are now satisfied.
     pub fn check_and_signal_pending_requests(&self) {
-        let mut pending = self.pending_requests.lock().unwrap();
+        let mut pending = match self.pending_requests.lock() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
         let cache = match self.cache.read() {
             Ok(c) => c,
             Err(_) => return,
@@ -608,10 +606,7 @@ fn scout_thread(registry: &FcFontRegistry) {
 
     let common_families = get_common_font_families_for_os(registry.os);
 
-    {
-        let mut known_paths = registry.known_paths.write().unwrap();
-        let mut queue = registry.build_queue.lock().unwrap();
-
+    if let (Ok(mut known_paths), Ok(mut queue)) = (registry.known_paths.write(), registry.build_queue.lock()) {
         for (path, guessed_family) in &all_font_paths {
             known_paths
                 .entry(guessed_family.clone())
