@@ -1,10 +1,92 @@
+//! Background thread implementations for the async font registry.
+//!
+//! - [`FcFontRegistry::scout_thread`]: Enumerates font directories and populates the build queue.
+//! - [`FcFontRegistry::builder_thread`]: Pops jobs from the queue, parses fonts, inserts results.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use crate::config;
 use crate::registry::FcFontRegistry;
+use crate::scoring::{assign_scout_priority, FcBuildJob};
+use crate::utils::is_font_file;
+use crate::FcFontCache;
 use crate::FcParseFont;
 
 impl FcFontRegistry {
+    /// Scout thread: enumerates font directories and populates the build queue.
+    ///
+    /// 1. Walks all OS font directories recursively, collecting font file paths.
+    /// 2. Tokenizes each filename and assigns a priority (High for common
+    ///    OS fonts, Low for everything else).
+    /// 3. Populates `known_paths` (family → file paths) and `build_queue`.
+    /// 4. Signals `scan_complete` when done.
+    pub fn scout_thread(&self) {
+        let font_dirs = config::font_directories(self.os);
+
+        let mut all_font_paths: Vec<PathBuf> = Vec::new();
+
+        for dir_path in font_dirs {
+            if self.shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            if std::fs::read_dir(&dir_path).is_err() {
+                continue;
+            }
+            collect_font_files_recursive(dir_path, &mut all_font_paths);
+        }
+
+        // Pre-tokenize common families once (not per-file)
+        let common_token_sets = config::tokenize_common_families(self.os);
+
+        if let (Ok(mut known_paths), Ok(mut queue)) =
+            (self.known_paths.write(), self.build_queue.lock())
+        {
+            for path in &all_font_paths {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let all_tokens: Vec<String> = FcFontCache::extract_font_name_tokens(stem)
+                    .into_iter()
+                    .map(|t| t.to_lowercase())
+                    .collect();
+
+                // Guessed family: style-filtered tokens joined
+                let guessed_family: String = all_tokens
+                    .iter()
+                    .filter(|t| {
+                        !config::FONT_STYLE_TOKENS
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case(t))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("");
+
+                known_paths
+                    .entry(guessed_family.clone())
+                    .or_insert_with(Vec::new)
+                    .push(path.clone());
+
+                let priority = assign_scout_priority(&all_tokens, &common_token_sets);
+
+                queue.push(FcBuildJob {
+                    priority,
+                    path: path.clone(),
+                    font_index: None,
+                    guessed_family,
+                });
+            }
+
+            queue.sort();
+        }
+
+        self.scan_complete.store(true, Ordering::Release);
+        self.queue_condvar.notify_all();
+    }
+
     /// Builder thread loop: pops jobs from the priority queue, parses fonts,
     /// and inserts results into the registry.
     pub fn builder_thread(&self) {
@@ -73,6 +155,24 @@ impl FcFontRegistry {
 
             // Check if any pending requests are now satisfied
             self.check_and_signal_pending_requests();
+        }
+    }
+}
+
+/// Recursively collect font files from a directory.
+fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        if path.is_dir() {
+            collect_font_files_recursive(path, results);
+        } else if is_font_file(&path) {
+            results.push(path);
         }
     }
 }

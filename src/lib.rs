@@ -93,6 +93,8 @@ pub mod config;
 pub mod ffi;
 
 #[cfg(feature = "async-registry")]
+pub mod scoring;
+#[cfg(feature = "async-registry")]
 pub mod registry;
 #[cfg(feature = "async-registry")]
 pub mod multithread;

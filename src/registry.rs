@@ -47,53 +47,11 @@ use crate::{
     expand_font_families, FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
     FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
 };
-use crate::config;
+use crate::scoring::{
+    family_exists_in_patterns, find_family_paths, find_incomplete_paths,
+    FcBuildJob, Priority,
+};
 use crate::utils::normalize_family_name;
-
-// ── Priority Queue ──────────────────────────────────────────────────────────
-
-/// Priority levels for font build jobs.
-/// Critical > High > Medium > Low (higher numeric value = higher priority).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Priority {
-    /// Everything else found by Scout
-    Low = 0,
-    /// Disk cache hit (cheap deserialization)
-    Medium = 1,
-    /// Common OS default fonts (sans-serif, serif, monospace)
-    High = 2,
-    /// Main thread is blocked waiting for this font
-    Critical = 3,
-}
-
-/// A job for the Builder pool to process.
-#[derive(Debug, Clone)]
-pub struct FcBuildJob {
-    pub priority: Priority,
-    pub path: PathBuf,
-    pub font_index: Option<usize>,
-    /// The guessed family name (lowercase, from filename)
-    pub guessed_family: String,
-}
-
-impl PartialEq for FcBuildJob {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.path == other.path
-    }
-}
-impl Eq for FcBuildJob {}
-
-impl PartialOrd for FcBuildJob {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for FcBuildJob {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
-    }
-}
 
 // ── Font Request Tracking ───────────────────────────────────────────────────
 
@@ -200,7 +158,7 @@ impl FcFontRegistry {
         std::thread::Builder::new()
             .name("rfc-font-scout".to_string())
             .spawn(move || {
-                scout_thread(&registry);
+                registry.scout_thread();
             })
             .expect("failed to spawn font scout thread");
 
@@ -263,100 +221,55 @@ impl FcFontRegistry {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        // 3. Check which families are completely missing from the registry
-        let mut missing: Vec<String> = Vec::new();
-        {
-            if let Ok(cache) = self.cache.read() {
-                for family in &needed_families {
-                    let found = cache.patterns.keys().any(|p| {
-                        p.name
-                            .as_ref()
-                            .map(|n| normalize_family_name(n) == *family)
-                            .unwrap_or(false)
-                            || p.family
-                                .as_ref()
-                                .map(|f| normalize_family_name(f) == *family)
-                                .unwrap_or(false)
-                    });
-                    if !found {
-                        missing.push(family.clone());
-                    }
-                }
-            }
-        }
+        // 3. Check which families are completely missing from the cache
+        let missing: Vec<String> = if let Ok(cache) = self.cache.read() {
+            needed_families
+                .iter()
+                .filter(|fam| !family_exists_in_patterns(fam, cache.patterns.keys()))
+                .cloned()
+                .collect()
+        } else {
+            needed_families.clone()
+        };
 
-        // 4. Even if families have at least one pattern, some font FILES for
-        //    that family may still be unprocessed (e.g., SFNSItalic.ttf parsed
-        //    but SFNS.ttf not yet => only italic variant available).
-        //    Use completed_paths (not processed_paths!) because processed_paths
-        //    is set BEFORE parsing, while completed_paths is set AFTER parsing
-        //    and insert_font().
-        let mut incomplete_paths: Vec<(PathBuf, String)> = Vec::new();
-        if let (Ok(known), Ok(completed)) = (self.known_paths.read(), self.completed_paths.lock()) {
-            for family in &needed_families {
-                if let Some(paths) = known.get(family) {
-                    for path in paths {
-                        if !completed.contains(path) {
-                            incomplete_paths.push((path.clone(), family.clone()));
-                        }
-                    }
-                }
-                for (known_fam, paths) in known.iter() {
-                    if known_fam != family
-                        && (known_fam.contains(family.as_str())
-                            || family.contains(known_fam.as_str()))
-                    {
-                        for path in paths {
-                            if !completed.contains(path) {
-                                incomplete_paths.push((path.clone(), known_fam.clone()));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // 4. Find font files that match needed families but haven't been
+        //    fully parsed yet. Uses completed_paths (not processed_paths!)
+        //    because processed_paths is set BEFORE parsing, while
+        //    completed_paths is set AFTER parsing + insert_font().
+        let incomplete_paths = if let (Ok(known), Ok(completed)) =
+            (self.known_paths.read(), self.completed_paths.lock())
+        {
+            find_incomplete_paths(&needed_families, &known, &completed)
+        } else {
+            Vec::new()
+        };
 
         // 5. If nothing is missing AND all files are processed, resolve immediately
         if missing.is_empty() && incomplete_paths.is_empty() {
             return self.resolve_chains(&expanded_stacks);
         }
 
-        // 6. Push Critical jobs for missing families AND incomplete file variants
-        if let (Ok(known_paths), Ok(mut queue)) = (self.known_paths.read(), self.build_queue.lock()) {
+        // 6. Boost all relevant paths to Critical priority
+        if let (Ok(known_paths), Ok(mut queue)) =
+            (self.known_paths.read(), self.build_queue.lock())
+        {
+            // Paths for completely missing families
+            let missing_paths: Vec<_> = missing
+                .iter()
+                .flat_map(|fam| {
+                    find_family_paths(fam, &known_paths)
+                        .into_iter()
+                        .map(move |p| (p, fam.clone()))
+                })
+                .collect();
 
-            for family in &missing {
-                if let Some(paths) = known_paths.get(family) {
-                    for path in paths {
-                        queue.push(FcBuildJob {
-                            priority: Priority::Critical,
-                            path: path.clone(),
-                            font_index: None,
-                            guessed_family: family.clone(),
-                        });
-                    }
-                }
-                for (known_family, paths) in known_paths.iter() {
-                    if known_family.contains(family.as_str())
-                        || family.contains(known_family.as_str())
-                    {
-                        for path in paths {
-                            queue.push(FcBuildJob {
-                                priority: Priority::Critical,
-                                path: path.clone(),
-                                font_index: None,
-                                guessed_family: known_family.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-
-            for (path, fam) in &incomplete_paths {
+            // Push Critical jobs for both missing and incomplete paths
+            for (path, family) in missing_paths.iter().chain(incomplete_paths.iter()) {
                 queue.push(FcBuildJob {
                     priority: Priority::Critical,
                     path: path.clone(),
                     font_index: None,
-                    guessed_family: fam.clone(),
+                    guessed_family: family.clone(),
                 });
             }
 
@@ -364,56 +277,43 @@ impl FcFontRegistry {
         }
         self.queue_condvar.notify_all();
 
-        // 7. Wait for ALL specific files to be processed
+        // 7. Collect all paths we need to wait for (missing + incomplete)
         let wait_paths: HashSet<PathBuf> = {
-            let mut paths = HashSet::new();
-            for (path, _) in &incomplete_paths {
-                paths.insert(path.clone());
-            }
+            let incomplete: HashSet<_> = incomplete_paths.iter().map(|(p, _)| p.clone()).collect();
+
             if let Ok(known_paths) = self.known_paths.read() {
-                for family in &missing {
-                    if let Some(fam_paths) = known_paths.get(family) {
-                        for p in fam_paths {
-                            paths.insert(p.clone());
-                        }
-                    }
-                    for (known_fam, fam_paths) in known_paths.iter() {
-                        if known_fam.contains(family.as_str())
-                            || family.contains(known_fam.as_str())
-                        {
-                            for p in fam_paths {
-                                paths.insert(p.clone());
-                            }
-                        }
-                    }
-                }
+                let missing_paths: HashSet<_> = missing
+                    .iter()
+                    .flat_map(|fam| find_family_paths(fam, &known_paths))
+                    .collect();
+                incomplete.union(&missing_paths).cloned().collect()
+            } else {
+                incomplete
             }
-            paths
         };
 
+        // 8. Block until all wait_paths are completed (or timeout / build done)
         if !wait_paths.is_empty() {
             loop {
-                let all_done = self.completed_paths.lock()
+                let all_done = self
+                    .completed_paths
+                    .lock()
                     .map(|completed| wait_paths.iter().all(|p| completed.contains(p)))
                     .unwrap_or(true);
-                if all_done {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    eprintln!(
-                        "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
-                         Proceeding with available fonts."
-                    );
-                    break;
-                }
-                if self.build_complete.load(Ordering::Acquire) {
+                if all_done || Instant::now() >= deadline || self.build_complete.load(Ordering::Acquire) {
+                    if !all_done && Instant::now() >= deadline {
+                        eprintln!(
+                            "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
+                             Proceeding with available fonts."
+                        );
+                    }
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
 
-        // 8. Resolve chains from the now-populated registry
+        // 9. Resolve chains from the now-populated registry
         self.resolve_chains(&expanded_stacks)
     }
 
@@ -539,18 +439,10 @@ impl FcFontRegistry {
                 continue;
             }
 
-            let all_found = request.families.iter().all(|family| {
-                cache.patterns.keys().any(|p| {
-                    p.name
-                        .as_ref()
-                        .map(|n| normalize_family_name(n) == *family)
-                        .unwrap_or(false)
-                        || p.family
-                            .as_ref()
-                            .map(|f| normalize_family_name(f) == *family)
-                            .unwrap_or(false)
-                })
-            });
+            let all_found = request
+                .families
+                .iter()
+                .all(|fam| family_exists_in_patterns(fam, cache.patterns.keys()));
 
             if all_found {
                 request.satisfied.store(true, Ordering::Release);
@@ -586,88 +478,3 @@ impl Drop for FcFontRegistry {
     }
 }
 
-// ── Scout Thread ────────────────────────────────────────────────────────────
-
-/// The Scout thread: enumerates font directories and populates the build queue.
-fn scout_thread(registry: &FcFontRegistry) {
-    let font_dirs = config::font_directories(registry.os);
-
-    let mut all_font_paths: Vec<PathBuf> = Vec::new();
-
-    for dir_path in font_dirs {
-        if registry.shutdown.load(Ordering::Relaxed) {
-            return;
-        }
-        if std::fs::read_dir(&dir_path).is_err() {
-            continue;
-        }
-        collect_font_files_recursive(dir_path, &mut all_font_paths);
-    }
-
-    // Pre-tokenize common families once (not per-file)
-    let common_token_sets = config::tokenize_common_families(registry.os);
-
-    if let (Ok(mut known_paths), Ok(mut queue)) = (registry.known_paths.write(), registry.build_queue.lock()) {
-        for path in &all_font_paths {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let all_tokens = crate::FcFontCache::extract_font_name_tokens(stem)
-                .into_iter()
-                .map(|t| t.to_lowercase())
-                .collect::<Vec<_>>();
-
-            // Guessed family: style-filtered tokens joined
-            let guessed_family: String = all_tokens
-                .iter()
-                .filter(|t| !config::FONT_STYLE_TOKENS.iter().any(|s| s.eq_ignore_ascii_case(t)))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("");
-
-            known_paths
-                .entry(guessed_family.clone())
-                .or_insert_with(Vec::new)
-                .push(path.clone());
-
-            // Priority: token-based matching against common families
-            let priority = if config::matches_common_family_tokens(&all_tokens, &common_token_sets) {
-                Priority::High
-            } else {
-                Priority::Low
-            };
-
-            queue.push(FcBuildJob {
-                priority,
-                path: path.clone(),
-                font_index: None,
-                guessed_family,
-            });
-        }
-
-        queue.sort();
-    }
-
-    registry.scan_complete.store(true, Ordering::Release);
-    registry.queue_condvar.notify_all();
-}
-
-/// Recursively collect font files from a directory.
-fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_font_files_recursive(path, results);
-        } else if crate::utils::is_font_file(&path) {
-            results.push(path);
-        }
-    }
-}
