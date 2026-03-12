@@ -85,11 +85,21 @@ use allsorts::tag;
 #[cfg(all(feature = "std", feature = "parsing"))]
 use std::path::PathBuf;
 
+pub mod utils;
+#[cfg(feature = "std")]
+pub mod config;
+
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
 #[cfg(feature = "async-registry")]
+pub mod scoring;
+#[cfg(feature = "async-registry")]
 pub mod registry;
+#[cfg(feature = "async-registry")]
+pub mod multithread;
+#[cfg(feature = "cache")]
+pub mod disk_cache;
 
 /// Operating system type for generic font family resolution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1131,7 +1141,7 @@ pub struct FcFontCache {
     pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
     // Font fallback chain cache (CSS stack + unicode -> resolved chain)
     #[cfg(feature = "std")]
-    chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
+    pub(crate) chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
 }
 
 impl Clone for FcFontCache {
@@ -1166,7 +1176,7 @@ impl Default for FcFontCache {
 
 impl FcFontCache {
     /// Helper method to add a font pattern to the token index
-    fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
+    pub(crate) fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
         // Extract tokens from both name and family
         let mut all_tokens = Vec::new();
         
@@ -1314,24 +1324,24 @@ impl FcFontCache {
     fn build_inner(family_filter: Option<&[String]>) -> Self {
         let mut cache = FcFontCache::default();
         
-        // Normalize filter families for matching (lowercase, remove spaces/dashes)
+        // Normalize filter families for matching
         let filter_normalized: Option<Vec<String>> = family_filter.map(|families| {
             families
                 .iter()
-                .map(|f| f.to_lowercase().replace(' ', "").replace('-', ""))
+                .map(|f| crate::utils::normalize_family_name(f))
                 .collect()
         });
-        
+
         // Helper closure to check if a pattern matches the filter
         let matches_filter = |pattern: &FcPattern| -> bool {
             match &filter_normalized {
                 None => true, // No filter = accept all
                 Some(targets) => {
                     pattern.name.as_ref().map_or(false, |name| {
-                        let name_norm = name.to_lowercase().replace(' ', "").replace('-', "");
+                        let name_norm = crate::utils::normalize_family_name(name);
                         targets.iter().any(|target| name_norm.contains(target))
                     }) || pattern.family.as_ref().map_or(false, |family| {
-                        let family_norm = family.to_lowercase().replace(' ', "").replace('-', "");
+                        let family_norm = crate::utils::normalize_family_name(family);
                         targets.iter().any(|target| family_norm.contains(target))
                     })
                 }
@@ -1900,44 +1910,20 @@ impl FcFontCache {
         // Resolve each CSS font-family to its system fallbacks
         for (_i, family) in font_families.iter().enumerate() {
             // Check if this is a generic font family
-            let (pattern, is_generic) = if Self::is_generic_family(family) {
-                // For generic families, don't filter by name, use font properties instead
-                let pattern = match family.as_str() {
-                    "sans-serif" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::False,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    "serif" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::False,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    "monospace" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::True,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    _ => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
+            let (pattern, is_generic) = if config::is_generic_family(family) {
+                let monospace = if family.eq_ignore_ascii_case("monospace") {
+                    PatternMatch::True
+                } else {
+                    PatternMatch::False
+                };
+                let pattern = FcPattern {
+                    name: None,
+                    weight,
+                    italic,
+                    oblique,
+                    monospace,
+                    unicode_ranges: Vec::new(),
+                    ..Default::default()
                 };
                 (pattern, true)
             } else {
@@ -2013,15 +1999,6 @@ impl FcFontCache {
         
         ranges.push(UnicodeRange { start: range_start, end: range_end });
         ranges
-    }
-    
-    /// Check if a font family name is a generic CSS family
-    #[cfg(feature = "std")]
-    fn is_generic_family(family: &str) -> bool {
-        matches!(
-            family.to_lowercase().as_str(),
-            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui"
-        )
     }
     
     /// Fuzzy query for fonts by name when exact match fails
@@ -2109,8 +2086,8 @@ impl FcFontCache {
             let token_matches = tokens_lower.iter()
                 .filter(|req_token| {
                     font_tokens_lower.iter().any(|font_token| {
-                        // Both already lowercase - just check if font token contains request token
-                        font_token.contains(req_token.as_str())
+                        // Both already lowercase — exact token match (index guarantees candidates)
+                        font_token == *req_token
                     })
                 })
                 .count();
@@ -2223,48 +2200,6 @@ impl FcFontCache {
         }
         
         tokens
-    }
-    
-    /// Normalize font name for comparison (remove spaces, lowercase, keep only ASCII alphanumeric)
-    /// This ensures we only compare Latin-script names, ignoring localized names
-    #[allow(dead_code)]
-    fn normalize_font_name(name: &str) -> String {
-        name.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .map(|c| c.to_ascii_lowercase())
-            .collect()
-    }
-    
-    /// Calculate Levenshtein distance between two strings
-    #[allow(dead_code)]
-    fn levenshtein_distance(s1: &str, s2: &str) -> usize {
-        let len1 = s1.chars().count();
-        let len2 = s2.chars().count();
-        
-        if len1 == 0 {
-            return len2;
-        }
-        if len2 == 0 {
-            return len1;
-        }
-        
-        let mut prev_row: Vec<usize> = (0..=len2).collect();
-        let mut curr_row = vec![0; len2 + 1];
-        
-        for (i, c1) in s1.chars().enumerate() {
-            curr_row[0] = i + 1;
-            
-            for (j, c2) in s2.chars().enumerate() {
-                let cost = if c1 == c2 { 0 } else { 1 };
-                curr_row[j + 1] = (curr_row[j] + 1)
-                    .min(prev_row[j + 1] + 1)
-                    .min(prev_row[j] + cost);
-            }
-            
-            core::mem::swap(&mut prev_row, &mut curr_row);
-        }
-        
-        prev_row[len2]
     }
     
     /// Find fonts to cover missing Unicode ranges

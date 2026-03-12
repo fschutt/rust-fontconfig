@@ -21,6 +21,7 @@ allsorts = { version = "0.16.1", default-features = false, features = ["flate2_r
 base64 = "0.22.1"
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }
+dirs = { version = "6", optional = true }
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 mmapio = { version = "0.9.1", default-features = false, optional = true }
@@ -31,5 +32,5 @@ std = ["mmapio"]
 multithreading = ["rayon"]
 parsing = ["allsorts"]
 ffi = ["parsing", "std"]
-cache = ["serde", "bincode", "std"]
+cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
