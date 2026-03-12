@@ -85,6 +85,8 @@ use allsorts::tag;
 #[cfg(all(feature = "std", feature = "parsing"))]
 use std::path::PathBuf;
 
+pub(crate) mod utils;
+
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
@@ -1314,24 +1316,24 @@ impl FcFontCache {
     fn build_inner(family_filter: Option<&[String]>) -> Self {
         let mut cache = FcFontCache::default();
         
-        // Normalize filter families for matching (lowercase, remove spaces/dashes)
+        // Normalize filter families for matching
         let filter_normalized: Option<Vec<String>> = family_filter.map(|families| {
             families
                 .iter()
-                .map(|f| f.to_lowercase().replace(' ', "").replace('-', ""))
+                .map(|f| crate::utils::normalize_family_name(f))
                 .collect()
         });
-        
+
         // Helper closure to check if a pattern matches the filter
         let matches_filter = |pattern: &FcPattern| -> bool {
             match &filter_normalized {
                 None => true, // No filter = accept all
                 Some(targets) => {
                     pattern.name.as_ref().map_or(false, |name| {
-                        let name_norm = name.to_lowercase().replace(' ', "").replace('-', "");
+                        let name_norm = crate::utils::normalize_family_name(name);
                         targets.iter().any(|target| name_norm.contains(target))
                     }) || pattern.family.as_ref().map_or(false, |family| {
-                        let family_norm = family.to_lowercase().replace(' ', "").replace('-', "");
+                        let family_norm = crate::utils::normalize_family_name(family);
                         targets.iter().any(|target| family_norm.contains(target))
                     })
                 }
@@ -2223,48 +2225,6 @@ impl FcFontCache {
         }
         
         tokens
-    }
-    
-    /// Normalize font name for comparison (remove spaces, lowercase, keep only ASCII alphanumeric)
-    /// This ensures we only compare Latin-script names, ignoring localized names
-    #[allow(dead_code)]
-    fn normalize_font_name(name: &str) -> String {
-        name.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .map(|c| c.to_ascii_lowercase())
-            .collect()
-    }
-    
-    /// Calculate Levenshtein distance between two strings
-    #[allow(dead_code)]
-    fn levenshtein_distance(s1: &str, s2: &str) -> usize {
-        let len1 = s1.chars().count();
-        let len2 = s2.chars().count();
-        
-        if len1 == 0 {
-            return len2;
-        }
-        if len2 == 0 {
-            return len1;
-        }
-        
-        let mut prev_row: Vec<usize> = (0..=len2).collect();
-        let mut curr_row = vec![0; len2 + 1];
-        
-        for (i, c1) in s1.chars().enumerate() {
-            curr_row[0] = i + 1;
-            
-            for (j, c2) in s2.chars().enumerate() {
-                let cost = if c1 == c2 { 0 } else { 1 };
-                curr_row[j + 1] = (curr_row[j] + 1)
-                    .min(prev_row[j + 1] + 1)
-                    .min(prev_row[j] + cost);
-            }
-            
-            core::mem::swap(&mut prev_row, &mut curr_row);
-        }
-        
-        prev_row[len2]
     }
     
     /// Find fonts to cover missing Unicode ranges

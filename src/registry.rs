@@ -1476,10 +1476,4 @@ fn get_cache_base_dir() -> Option<PathBuf> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Normalize a family name for comparison: lowercase, strip spaces/hyphens/underscores.
-fn normalize_family_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
+use crate::utils::normalize_family_name;
