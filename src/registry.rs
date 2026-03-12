@@ -1368,42 +1368,47 @@ impl FcFontRegistry {
         true
     }
 
-    /// Save the current registry state to the on-disk cache.
-    pub fn save_to_disk_cache(&self) {
-        let cache_path = match get_font_cache_path() {
-            Some(p) => p,
-            None => return,
-        };
+    /// Serialize the current registry state to the on-disk font cache.
+    ///
+    /// Collects all discovered font paths and their parsed metadata into a
+    /// [`FontManifest`], then writes it as bincode to the platform cache
+    /// directory (e.g. `~/.cache/rfc/fonts/manifest.bin` on Linux).
+    ///
+    /// Returns `None` if the cache path cannot be determined, the parent
+    /// directory cannot be created, or serialization / writing fails.
+    /// On WASM this is a no-op that always returns `None` (no filesystem access).
+    #[cfg(not(target_family = "wasm"))]
+    pub fn save_to_disk_cache(&self) -> Option<()> {
+        let cache_path = get_font_cache_path()?;
+        std::fs::create_dir_all(cache_path.parent()?).ok()?;
 
-        // Create parent directories
-        if let Some(parent) = cache_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let disk_fonts = self.disk_fonts.read().unwrap();
-        let metadata_map = self.metadata.read().unwrap();
+        let disk_fonts = self.disk_fonts.read().ok()?;
+        let metadata_map = self.metadata.read().ok()?;
 
         let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
 
         for (id, font_path) in disk_fonts.iter() {
-            if let Some(pattern) = metadata_map.get(id) {
-                let entry = entries
-                    .entry(font_path.path.clone())
-                    .or_insert_with(|| {
-                        let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
-                            .unwrap_or((0, 0));
-                        FontCacheEntry {
-                            mtime_secs,
-                            file_size,
-                            font_indices: Vec::new(),
-                        }
-                    });
+            let pattern = match metadata_map.get(id) {
+                Some(p) => p,
+                None => continue,
+            };
 
-                entry.font_indices.push(FontIndexEntry {
+            entries
+                .entry(font_path.path.clone())
+                .or_insert_with(|| {
+                    let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
+                        .unwrap_or((0, 0));
+                    FontCacheEntry {
+                        mtime_secs,
+                        file_size,
+                        font_indices: Vec::new(),
+                    }
+                })
+                .font_indices
+                .push(FontIndexEntry {
                     pattern: pattern.clone(),
                     font_index: font_path.font_index,
                 });
-            }
         }
 
         let manifest = FontManifest {
@@ -1411,9 +1416,16 @@ impl FcFontRegistry {
             entries,
         };
 
-        if let Ok(data) = bincode::serialize(&manifest) {
-            let _ = std::fs::write(&cache_path, data);
-        }
+        let data = bincode::serialize(&manifest).ok()?;
+        std::fs::write(&cache_path, data).ok()?;
+
+        Some(())
+    }
+
+    /// No-op on WASM — no filesystem access available.
+    #[cfg(target_family = "wasm")]
+    pub fn save_to_disk_cache(&self) -> Option<()> {
+        None
     }
 }
 
