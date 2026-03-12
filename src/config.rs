@@ -10,9 +10,6 @@ use std::path::{Path, PathBuf};
 use crate::FcFontCache;
 use crate::OperatingSystem;
 
-/// Known font file extensions (lowercase).
-pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "dfont"];
-
 /// Style tokens to filter out when guessing family names from filenames.
 ///
 /// These are the weight/style/width suffixes commonly appended to font filenames
@@ -26,17 +23,6 @@ pub const FONT_STYLE_TOKENS: &[&str] = &[
     // so we need the modifier prefixes as standalone style tokens too.
     "Extra", "Semi", "Demi",
 ];
-
-/// Check if a file has a recognized font extension.
-pub fn is_font_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| {
-            let lower = ext.to_lowercase();
-            FONT_EXTENSIONS.contains(&lower.as_str())
-        })
-        .unwrap_or(false)
-}
 
 /// Static system font directories per OS. No allocation.
 ///
@@ -219,13 +205,6 @@ mod tests {
     // ── Constants ────────────────────────────────────────────────────────
 
     #[test]
-    fn font_extensions_covers_common_formats() {
-        for ext in &["ttf", "otf", "ttc", "woff", "woff2"] {
-            assert!(FONT_EXTENSIONS.contains(ext), "missing extension: {}", ext);
-        }
-    }
-
-    #[test]
     fn font_style_tokens_covers_common_styles() {
         for token in &[
             "Regular", "Bold", "Italic", "Light", "Medium",
@@ -236,23 +215,6 @@ mod tests {
                 "missing style token: {}", token
             );
         }
-    }
-
-    // ── is_font_file ────────────────────────────────────────────────────
-
-    #[test]
-    fn is_font_file_recognizes_fonts() {
-        assert!(is_font_file(Path::new("Arial.ttf")));
-        assert!(is_font_file(Path::new("NotoSans.otf")));
-        assert!(is_font_file(Path::new("Font.TTC"))); // case insensitive
-        assert!(is_font_file(Path::new("web.woff2")));
-    }
-
-    #[test]
-    fn is_font_file_rejects_non_fonts() {
-        assert!(!is_font_file(Path::new("readme.txt")));
-        assert!(!is_font_file(Path::new("image.png")));
-        assert!(!is_font_file(Path::new("no_extension")));
     }
 
     // ── system_font_dirs ────────────────────────────────────────────────

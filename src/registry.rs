@@ -666,7 +666,7 @@ fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<PathBuf>) {
 
         if path.is_dir() {
             collect_font_files_recursive(path, results);
-        } else if config::is_font_file(&path) {
+        } else if crate::utils::is_font_file(&path) {
             results.push(path);
         }
     }
