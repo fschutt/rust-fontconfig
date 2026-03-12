@@ -1387,29 +1387,28 @@ impl FcFontRegistry {
 
         let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
 
-        for (id, font_path) in disk_fonts.iter() {
-            let pattern = match metadata_map.get(id) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            entries
-                .entry(font_path.path.clone())
-                .or_insert_with(|| {
-                    let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
-                        .unwrap_or((0, 0));
-                    FontCacheEntry {
-                        mtime_secs,
-                        file_size,
-                        font_indices: Vec::new(),
-                    }
-                })
-                .font_indices
-                .push(FontIndexEntry {
-                    pattern: pattern.clone(),
-                    font_index: font_path.font_index,
-                });
-        }
+        disk_fonts.iter()
+            .filter_map(|(id, font_path)| {
+                metadata_map.get(id).map(|pattern| (font_path, pattern))
+            })
+            .for_each(|(font_path, pattern)| {
+                entries
+                    .entry(font_path.path.clone())
+                    .or_insert_with(|| {
+                        let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
+                            .unwrap_or((0, 0));
+                        FontCacheEntry {
+                            mtime_secs,
+                            file_size,
+                            font_indices: Vec::new(),
+                        }
+                    })
+                    .font_indices
+                    .push(FontIndexEntry {
+                        pattern: pattern.clone(),
+                        font_index: font_path.font_index,
+                    });
+            });
 
         let manifest = FontManifest {
             version: FontManifest::CURRENT_VERSION,
