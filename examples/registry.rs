@@ -89,7 +89,7 @@ fn main() {
     println!(
         "  2. load_from_disk_cache()      {:>10?}  ({})",
         t2.elapsed(),
-        if had_cache { "HIT" } else { "MISS" },
+        if had_cache.is_some() { "HIT" } else { "MISS" },
     );
 
     // Step 3: Spawn background threads

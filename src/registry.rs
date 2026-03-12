@@ -1301,43 +1301,40 @@ pub struct FontIndexEntry {
 impl FcFontRegistry {
     /// Load font metadata from the on-disk cache.
     ///
-    /// If a valid cache exists, all font patterns are loaded into the registry
-    /// immediately. The Scout thread will verify staleness in the background.
-    pub fn load_from_disk_cache(&self) -> bool {
-        let cache_path = match get_font_cache_path() {
-            Some(p) => p,
-            None => return false,
-        };
-
-        let data = match std::fs::read(&cache_path) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let manifest: FontManifest = match bincode::deserialize(&data) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
+    /// Reads and deserializes the bincode font manifest from the platform
+    /// cache directory, then populates the registry with all cached patterns,
+    /// font paths, and token indices. Marks all cached file paths as
+    /// processed/completed so builder threads skip them.
+    ///
+    /// Returns `Some(())` on success, `None` if the cache is missing,
+    /// unreadable, malformed, or has a version mismatch.
+    /// On WASM this is a no-op that always returns `None`.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn load_from_disk_cache(&self) -> Option<()> {
+        let cache_path = get_font_cache_path()?;
+        let data = std::fs::read(&cache_path).ok()?;
+        let manifest: FontManifest = bincode::deserialize(&data).ok()?;
 
         if manifest.version != FontManifest::CURRENT_VERSION {
-            return false;
+            return None;
         }
 
-        let mut patterns = self.patterns.write().unwrap();
-        let mut disk_fonts = self.disk_fonts.write().unwrap();
-        let mut metadata = self.metadata.write().unwrap();
-        let mut token_index = self.token_index.write().unwrap();
-        let mut font_tokens = self.font_tokens.write().unwrap();
+        let mut patterns = self.patterns.write().ok()?;
+        let mut disk_fonts = self.disk_fonts.write().ok()?;
+        let mut metadata = self.metadata.write().ok()?;
+        let mut token_index = self.token_index.write().ok()?;
+        let mut font_tokens = self.font_tokens.write().ok()?;
+        let mut processed = self.processed_paths.lock().ok()?;
+        let mut completed = self.completed_paths.lock().ok()?;
 
-        let mut count = 0usize;
-        let mut processed = self.processed_paths.lock().unwrap();
-        let mut completed = self.completed_paths.lock().unwrap();
-        for (path_str, entry) in &manifest.entries {
-            // Mark this file as already processed so builder threads skip it
-            let pb = PathBuf::from(path_str);
-            processed.insert(pb.clone());
-            completed.insert(pb);
-            for idx_entry in &entry.font_indices {
+        let count = manifest.entries.iter()
+            .flat_map(|(path_str, entry)| {
+                let pb = PathBuf::from(path_str);
+                processed.insert(pb.clone());
+                completed.insert(pb);
+                entry.font_indices.iter().map(move |idx_entry| (path_str, idx_entry))
+            })
+            .map(|(path_str, idx_entry)| {
                 let id = FontId::new();
                 Self::index_pattern_tokens_static(
                     &mut token_index,
@@ -1346,26 +1343,24 @@ impl FcFontRegistry {
                     id,
                 );
                 patterns.insert(idx_entry.pattern.clone(), id);
-                disk_fonts.insert(
-                    id,
-                    FcFontPath {
-                        path: path_str.clone(),
-                        font_index: idx_entry.font_index,
-                    },
-                );
+                disk_fonts.insert(id, FcFontPath {
+                    path: path_str.clone(),
+                    font_index: idx_entry.font_index,
+                });
                 metadata.insert(id, idx_entry.pattern.clone());
-                count += 1;
-            }
-        }
-        drop(processed);
-        drop(completed);
+            })
+            .count();
 
         self.faces_loaded.store(count, Ordering::Relaxed);
-        // Don't set files_parsed here — that counter tracks builder thread work.
-        // files_discovered will be set by the scout thread when it runs.
         self.cache_loaded.store(true, Ordering::Release);
 
-        true
+        Some(())
+    }
+
+    /// No-op on WASM — no filesystem access available.
+    #[cfg(target_family = "wasm")]
+    pub fn load_from_disk_cache(&self) -> Option<()> {
+        None
     }
 
     /// Serialize the current registry state to the on-disk font cache.
