@@ -86,6 +86,8 @@ use allsorts::tag;
 use std::path::PathBuf;
 
 pub mod utils;
+#[cfg(feature = "std")]
+pub mod config;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;

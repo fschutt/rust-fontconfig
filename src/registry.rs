@@ -47,6 +47,7 @@ use crate::{
     expand_font_families, FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
     FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
 };
+use crate::config;
 use crate::utils::normalize_family_name;
 
 // ── Priority Queue ──────────────────────────────────────────────────────────
@@ -589,34 +590,46 @@ impl Drop for FcFontRegistry {
 
 /// The Scout thread: enumerates font directories and populates the build queue.
 fn scout_thread(registry: &FcFontRegistry) {
-    let font_dirs = get_font_directories();
+    let font_dirs = config::font_directories(registry.os);
 
-    let mut all_font_paths: Vec<(PathBuf, String)> = Vec::new();
+    let mut all_font_paths: Vec<PathBuf> = Vec::new();
 
     for dir_path in font_dirs {
         if registry.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        let _dir = match std::fs::read_dir(&dir_path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
+        if std::fs::read_dir(&dir_path).is_err() {
+            continue;
+        }
         collect_font_files_recursive(dir_path, &mut all_font_paths);
     }
 
-    let common_families = get_common_font_families_for_os(registry.os);
+    // Pre-tokenize common families once (not per-file)
+    let common_token_sets = config::tokenize_common_families(registry.os);
 
     if let (Ok(mut known_paths), Ok(mut queue)) = (registry.known_paths.write(), registry.build_queue.lock()) {
-        for (path, guessed_family) in &all_font_paths {
+        for path in &all_font_paths {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let all_tokens = crate::FcFontCache::extract_font_name_tokens(stem)
+                .into_iter()
+                .map(|t| t.to_lowercase())
+                .collect::<Vec<_>>();
+
+            // Guessed family: style-filtered tokens joined
+            let guessed_family: String = all_tokens
+                .iter()
+                .filter(|t| !config::FONT_STYLE_TOKENS.iter().any(|s| s.eq_ignore_ascii_case(t)))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("");
+
             known_paths
                 .entry(guessed_family.clone())
                 .or_insert_with(Vec::new)
                 .push(path.clone());
 
-            let priority = if common_families
-                .iter()
-                .any(|cf| guessed_family.contains(cf))
-            {
+            // Priority: token-based matching against common families
+            let priority = if config::matches_common_family_tokens(&all_tokens, &common_token_sets) {
                 Priority::High
             } else {
                 Priority::Low
@@ -626,7 +639,7 @@ fn scout_thread(registry: &FcFontRegistry) {
                 priority,
                 path: path.clone(),
                 font_index: None,
-                guessed_family: guessed_family.clone(),
+                guessed_family,
             });
         }
 
@@ -637,8 +650,8 @@ fn scout_thread(registry: &FcFontRegistry) {
     registry.queue_condvar.notify_all();
 }
 
-/// Recursively collect font files from a directory, guessing family names from filenames.
-fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<(PathBuf, String)>) {
+/// Recursively collect font files from a directory.
+fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -653,154 +666,8 @@ fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<(PathBuf, String
 
         if path.is_dir() {
             collect_font_files_recursive(path, results);
-        } else if is_font_file(&path) {
-            let guessed = guess_family_from_filename(&path);
-            results.push((path, guessed));
+        } else if config::is_font_file(&path) {
+            results.push(path);
         }
-    }
-}
-
-/// Check if a file has a font extension.
-fn is_font_file(path: &PathBuf) -> bool {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => matches!(
-            ext.to_lowercase().as_str(),
-            "ttf" | "otf" | "ttc" | "woff" | "woff2" | "dfont"
-        ),
-        None => false,
-    }
-}
-
-/// Guess the font family name from a filename.
-///
-/// Examples:
-/// - `"ArialBold.ttf"` → `"arial"`
-/// - `"NotoSansJP-Regular.otf"` → `"notosansjp"`
-/// - `"Helvetica Neue Bold Italic.ttf"` → `"helveticaneue"`
-fn guess_family_from_filename(path: &PathBuf) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-
-    let cleaned = stem
-        .replace("-Regular", "")
-        .replace("-Bold", "")
-        .replace("-Italic", "")
-        .replace("-Light", "")
-        .replace("-Medium", "")
-        .replace("-Thin", "")
-        .replace("-Black", "")
-        .replace("-ExtraLight", "")
-        .replace("-ExtraBold", "")
-        .replace("-SemiBold", "")
-        .replace("-DemiBold", "")
-        .replace("-Heavy", "")
-        .replace("-Oblique", "")
-        .replace("_Regular", "")
-        .replace("_Bold", "")
-        .replace("_Italic", "")
-        .replace("Bold", "")
-        .replace("Italic", "")
-        .replace("Regular", "")
-        .replace("Light", "")
-        .replace("Medium", "")
-        .replace("Thin", "")
-        .replace("Black", "")
-        .replace("Oblique", "");
-
-    cleaned
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
-/// Get OS-specific font directories.
-fn get_font_directories() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    #[cfg(target_os = "macos")]
-    {
-        dirs.push(PathBuf::from("/System/Library/Fonts"));
-        dirs.push(PathBuf::from("/Library/Fonts"));
-        dirs.push(PathBuf::from("/System/Library/AssetsV2"));
-        if let Ok(home) = std::env::var("HOME") {
-            dirs.push(PathBuf::from(format!("{}/Library/Fonts", home)));
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        dirs.push(PathBuf::from("/usr/share/fonts"));
-        dirs.push(PathBuf::from("/usr/local/share/fonts"));
-        if let Ok(home) = std::env::var("HOME") {
-            dirs.push(PathBuf::from(format!("{}/.fonts", home)));
-            dirs.push(PathBuf::from(format!("{}/.local/share/fonts", home)));
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let system_root = std::env::var("SystemRoot")
-            .or_else(|_| std::env::var("WINDIR"))
-            .unwrap_or_else(|_| "C:\\Windows".to_string());
-        let user_profile = std::env::var("USERPROFILE")
-            .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
-        dirs.push(PathBuf::from(format!("{}\\Fonts", system_root)));
-        dirs.push(PathBuf::from(format!(
-            "{}\\AppData\\Local\\Microsoft\\Windows\\Fonts",
-            user_profile
-        )));
-    }
-
-    dirs
-}
-
-/// Get common font families that should be loaded at High priority.
-///
-/// Returns normalized (lowercased, no spaces) family names for the current OS.
-pub fn get_common_font_families() -> Vec<String> {
-    get_common_font_families_for_os(OperatingSystem::current())
-}
-
-fn get_common_font_families_for_os(os: OperatingSystem) -> Vec<String> {
-    match os {
-        OperatingSystem::MacOS => vec![
-            "sanfrancisco".to_string(),
-            "sfns".to_string(),
-            "systemfont".to_string(),
-            "helveticaneue".to_string(),
-            "helvetica".to_string(),
-            "arial".to_string(),
-            "timesnewroman".to_string(),
-            "georgia".to_string(),
-            "menlo".to_string(),
-            "sfmono".to_string(),
-            "courier".to_string(),
-            "lucidagrande".to_string(),
-        ],
-        OperatingSystem::Linux => vec![
-            "dejavusans".to_string(),
-            "dejavuserif".to_string(),
-            "dejavusansmono".to_string(),
-            "liberation".to_string(),
-            "noto".to_string(),
-            "ubuntu".to_string(),
-            "roboto".to_string(),
-            "droidsans".to_string(),
-            "arial".to_string(),
-        ],
-        OperatingSystem::Windows => vec![
-            "segoeui".to_string(),
-            "arial".to_string(),
-            "timesnewroman".to_string(),
-            "calibri".to_string(),
-            "consolas".to_string(),
-            "couriernew".to_string(),
-            "tahoma".to_string(),
-            "verdana".to_string(),
-        ],
-        OperatingSystem::Wasm => vec![],
     }
 }
