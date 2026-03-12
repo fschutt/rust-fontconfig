@@ -1,3 +1,7 @@
+//! On-disk font cache serialization and deserialization.
+//!
+//! This entire module is gated on `feature = "cache"`.
+
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -9,7 +13,6 @@ use crate::{FcFontPath, FcPattern, FontId};
 use crate::registry::FcFontRegistry;
 
 /// Font cache manifest for on-disk serialization.
-#[cfg(feature = "cache")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FontManifest {
     /// Cache format version (bump on breaking changes)
@@ -18,13 +21,11 @@ pub struct FontManifest {
     pub entries: BTreeMap<String, FontCacheEntry>,
 }
 
-#[cfg(feature = "cache")]
 impl FontManifest {
     pub const CURRENT_VERSION: u32 = 1;
 }
 
 /// A single cached font file entry.
-#[cfg(feature = "cache")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FontCacheEntry {
     /// File modification time (seconds since epoch)
@@ -40,7 +41,6 @@ pub struct FontCacheEntry {
 /// Font files (especially `.ttc` collections) can contain multiple faces.
 /// Each entry pairs the parsed metadata with the face index so we can
 /// reconstruct the full registry from the cache without re-parsing.
-#[cfg(feature = "cache")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FontIndexEntry {
     /// Parsed font metadata (name, family, weight, italic, unicode ranges, etc.)
@@ -49,7 +49,6 @@ pub struct FontIndexEntry {
     pub font_index: usize,
 }
 
-#[cfg(feature = "cache")]
 impl FcFontRegistry {
     /// Load font metadata from the on-disk cache.
     ///
@@ -164,7 +163,6 @@ impl FcFontRegistry {
 }
 
 /// Get file mtime (seconds since epoch) and size in bytes.
-#[cfg(feature = "cache")]
 pub fn get_file_metadata(path: &str) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()
@@ -175,20 +173,19 @@ pub fn get_file_metadata(path: &str) -> Option<(u64, u64)> {
 }
 
 /// Get the path to the font cache manifest file.
-#[cfg(feature = "cache")]
 pub fn get_font_cache_path() -> Option<PathBuf> {
     let base = get_cache_base_dir()?;
     Some(base.join("fonts").join("manifest.bin"))
 }
 
 /// Get the base cache directory for rust-fontconfig.
-#[cfg(all(feature = "cache", not(target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 pub fn get_cache_base_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("rfc"))
 }
 
 /// Returns `None` on platforms without a conventional cache directory (e.g. WASM).
-#[cfg(all(feature = "cache", target_family = "wasm"))]
+#[cfg(target_family = "wasm")]
 pub fn get_cache_base_dir() -> Option<PathBuf> {
     None
 }
