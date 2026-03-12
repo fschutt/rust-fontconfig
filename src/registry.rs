@@ -1390,7 +1390,8 @@ impl FcFontRegistry {
                 let entry = entries
                     .entry(font_path.path.clone())
                     .or_insert_with(|| {
-                        let (mtime_secs, file_size) = get_file_metadata(&font_path.path);
+                        let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
+                            .unwrap_or((0, 0));
                         FontCacheEntry {
                             mtime_secs,
                             file_size,
@@ -1416,21 +1417,15 @@ impl FcFontRegistry {
     }
 }
 
-/// Get file mtime and size.
+/// Get file mtime (seconds since epoch) and size in bytes.
 #[cfg(feature = "cache")]
-fn get_file_metadata(path: &str) -> (u64, u64) {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            (mtime, meta.len())
-        }
-        Err(_) => (0, 0),
-    }
+fn get_file_metadata(path: &str) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
 }
 
 /// Get the path to the font cache manifest file.
