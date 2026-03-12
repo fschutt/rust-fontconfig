@@ -1910,44 +1910,20 @@ impl FcFontCache {
         // Resolve each CSS font-family to its system fallbacks
         for (_i, family) in font_families.iter().enumerate() {
             // Check if this is a generic font family
-            let (pattern, is_generic) = if Self::is_generic_family(family) {
-                // For generic families, don't filter by name, use font properties instead
-                let pattern = match family.as_str() {
-                    "sans-serif" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::False,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    "serif" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::False,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    "monospace" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::True,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    _ => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
+            let (pattern, is_generic) = if config::is_generic_family(family) {
+                let monospace = if family.eq_ignore_ascii_case("monospace") {
+                    PatternMatch::True
+                } else {
+                    PatternMatch::False
+                };
+                let pattern = FcPattern {
+                    name: None,
+                    weight,
+                    italic,
+                    oblique,
+                    monospace,
+                    unicode_ranges: Vec::new(),
+                    ..Default::default()
                 };
                 (pattern, true)
             } else {
@@ -2023,15 +1999,6 @@ impl FcFontCache {
         
         ranges.push(UnicodeRange { start: range_start, end: range_end });
         ranges
-    }
-    
-    /// Check if a font family name is a generic CSS family
-    #[cfg(feature = "std")]
-    fn is_generic_family(family: &str) -> bool {
-        matches!(
-            family.to_lowercase().as_str(),
-            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui"
-        )
     }
     
     /// Fuzzy query for fonts by name when exact match fails
@@ -2119,8 +2086,8 @@ impl FcFontCache {
             let token_matches = tokens_lower.iter()
                 .filter(|req_token| {
                     font_tokens_lower.iter().any(|font_token| {
-                        // Both already lowercase - just check if font token contains request token
-                        font_token.contains(req_token.as_str())
+                        // Both already lowercase — exact token match (index guarantees candidates)
+                        font_token == *req_token
                     })
                 })
                 .count();

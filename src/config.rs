@@ -10,6 +10,20 @@ use std::path::{Path, PathBuf};
 use crate::FcFontCache;
 use crate::OperatingSystem;
 
+/// Generic CSS font family keywords.
+///
+/// Recognized by [`is_generic_family`] and used wherever the code needs to
+/// distinguish generic families from specific font names.
+pub const GENERIC_FAMILIES: &[&str] = &[
+    "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
+];
+
+/// Check whether `family` is a generic CSS font family (case-insensitive).
+pub fn is_generic_family(family: &str) -> bool {
+    let lower = family.to_lowercase();
+    GENERIC_FAMILIES.iter().any(|g| *g == lower.as_str())
+}
+
 /// Style tokens to filter out when guessing family names from filenames.
 ///
 /// These are the weight/style/width suffixes commonly appended to font filenames
@@ -201,6 +215,18 @@ pub fn guess_family_from_filename(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Generic families ─────────────────────────────────────────────────
+
+    #[test]
+    fn generic_families_recognized() {
+        assert!(is_generic_family("sans-serif"));
+        assert!(is_generic_family("Sans-Serif")); // case-insensitive
+        assert!(is_generic_family("monospace"));
+        assert!(is_generic_family("SERIF"));
+        assert!(!is_generic_family("Arial"));
+        assert!(!is_generic_family("Noto Sans"));
+    }
 
     // ── Constants ────────────────────────────────────────────────────────
 
