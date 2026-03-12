@@ -85,6 +85,7 @@ impl FcFontRegistry {
 
         self.scan_complete.store(true, Ordering::Release);
         self.queue_condvar.notify_all();
+        self.progress.notify_all();
     }
 
     /// Builder thread loop: pops jobs from the priority queue, parses fonts,
@@ -114,7 +115,7 @@ impl FcFontRegistry {
                     // If scan is complete and queue is empty, we're done
                     if self.scan_complete.load(Ordering::Acquire) && queue.is_empty() {
                         self.build_complete.store(true, Ordering::Release);
-                        self.request_complete.notify_all();
+                        self.progress.notify_all();
                         return;
                     }
 
@@ -153,8 +154,8 @@ impl FcFontRegistry {
                 completed.insert(job.path.clone());
             }
 
-            // Check if any pending requests are now satisfied
-            self.check_and_signal_pending_requests();
+            // Notify waiting threads that a font has been completed
+            self.progress.notify_all();
         }
     }
 }

@@ -53,17 +53,6 @@ use crate::scoring::{
 };
 use crate::utils::normalize_family_name;
 
-// ── Font Request Tracking ───────────────────────────────────────────────────
-
-/// A pending request from the main thread for a set of font families.
-#[derive(Debug)]
-pub struct FontRequest {
-    /// Lowercased, normalized family names being requested
-    families: Vec<String>,
-    /// Set to true by a Builder thread when all families are satisfied
-    satisfied: Arc<AtomicBool>,
-}
-
 // ── The Registry ────────────────────────────────────────────────────────────
 
 /// Thread-safe, incrementally-populated font registry.
@@ -80,18 +69,20 @@ pub struct FcFontRegistry {
 
     // ── Priority queue for Builder ──
     pub build_queue: Mutex<Vec<FcBuildJob>>,
+    /// Notified when new jobs are added to `build_queue` or on shutdown.
+    /// Builder threads wait on this (paired with `build_queue`).
     pub queue_condvar: Condvar,
 
-    // ── Completion tracking ──
-    pub pending_requests: Mutex<Vec<FontRequest>>,
-    pub request_complete: Condvar,
-
     // ── Deduplication ──
+    /// Paths claimed for parsing (set BEFORE parsing, for deduplication).
     pub processed_paths: Mutex<HashSet<PathBuf>>,
-    /// Paths that have been fully parsed and whose patterns are inserted.
-    /// Unlike `processed_paths` (set before parsing for dedup), this is set
-    /// AFTER parsing + insert_font(), so it's safe to wait on.
+    /// Paths fully parsed and inserted into cache (set AFTER parsing).
     pub completed_paths: Mutex<HashSet<PathBuf>>,
+
+    // ── Progress notification ──
+    /// Notified when any progress occurs: font completed, scan done, build done.
+    /// The main thread waits on this (paired with `completed_paths`).
+    pub progress: Condvar,
 
     // ── Status ──
     pub scan_complete: AtomicBool,
@@ -122,10 +113,9 @@ impl FcFontRegistry {
             known_paths: RwLock::new(BTreeMap::new()),
             build_queue: Mutex::new(Vec::new()),
             queue_condvar: Condvar::new(),
-            pending_requests: Mutex::new(Vec::new()),
-            request_complete: Condvar::new(),
             processed_paths: Mutex::new(HashSet::new()),
             completed_paths: Mutex::new(HashSet::new()),
+            progress: Condvar::new(),
             scan_complete: AtomicBool::new(false),
             build_complete: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -209,16 +199,25 @@ impl FcFontRegistry {
             return self.resolve_chains(&expanded_stacks);
         }
 
-        // 2. Wait for Scout to finish first (typically < 100ms).
-        while !self.scan_complete.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
-                     Proceeding with available fonts."
-                );
-                return self.resolve_chains(&expanded_stacks);
+        // 2. Wait for Scout to finish (typically < 100ms).
+        //    Uses condvar instead of busy-polling.
+        if !self.scan_complete.load(Ordering::Acquire) {
+            if let Ok(mut completed) = self.completed_paths.lock() {
+                while !self.scan_complete.load(Ordering::Acquire) {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        eprintln!(
+                            "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
+                             Proceeding with available fonts."
+                        );
+                        return self.resolve_chains(&expanded_stacks);
+                    }
+                    completed = match self.progress.wait_timeout(completed, remaining) {
+                        Ok((c, _)) => c,
+                        Err(_) => return self.resolve_chains(&expanded_stacks),
+                    };
+                }
             }
-            std::thread::sleep(Duration::from_millis(1));
         }
 
         // 3. Check which families are completely missing from the cache
@@ -250,7 +249,7 @@ impl FcFontRegistry {
         }
 
         // 6. Boost all relevant paths to Critical priority
-        if let (Ok(known_paths), Ok(mut queue)) =
+        let wait_paths: HashSet<PathBuf> = if let (Ok(known_paths), Ok(mut queue)) =
             (self.known_paths.read(), self.build_queue.lock())
         {
             // Paths for completely missing families
@@ -274,46 +273,46 @@ impl FcFontRegistry {
             }
 
             queue.sort();
-        }
+
+            // Collect all paths we need to wait for
+            missing_paths
+                .iter()
+                .chain(incomplete_paths.iter())
+                .map(|(p, _)| p.clone())
+                .collect()
+        } else {
+            incomplete_paths.iter().map(|(p, _)| p.clone()).collect()
+        };
         self.queue_condvar.notify_all();
 
-        // 7. Collect all paths we need to wait for (missing + incomplete)
-        let wait_paths: HashSet<PathBuf> = {
-            let incomplete: HashSet<_> = incomplete_paths.iter().map(|(p, _)| p.clone()).collect();
-
-            if let Ok(known_paths) = self.known_paths.read() {
-                let missing_paths: HashSet<_> = missing
-                    .iter()
-                    .flat_map(|fam| find_family_paths(fam, &known_paths))
-                    .collect();
-                incomplete.union(&missing_paths).cloned().collect()
-            } else {
-                incomplete
-            }
-        };
-
-        // 8. Block until all wait_paths are completed (or timeout / build done)
+        // 7. Wait for all wait_paths to be completed.
+        //    Uses condvar instead of busy-polling with sleep(1ms).
         if !wait_paths.is_empty() {
-            loop {
-                let all_done = self
-                    .completed_paths
-                    .lock()
-                    .map(|completed| wait_paths.iter().all(|p| completed.contains(p)))
-                    .unwrap_or(true);
-                if all_done || Instant::now() >= deadline || self.build_complete.load(Ordering::Acquire) {
-                    if !all_done && Instant::now() >= deadline {
+            if let Ok(mut completed) = self.completed_paths.lock() {
+                loop {
+                    if wait_paths.iter().all(|p| completed.contains(p)) {
+                        break;
+                    }
+                    if self.build_complete.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
                         eprintln!(
                             "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
                              Proceeding with available fonts."
                         );
+                        break;
                     }
-                    break;
+                    completed = match self.progress.wait_timeout(completed, remaining) {
+                        Ok((c, _)) => c,
+                        Err(_) => break,
+                    };
                 }
-                std::thread::sleep(Duration::from_millis(1));
             }
         }
 
-        // 9. Resolve chains from the now-populated registry
+        // 8. Resolve chains from the now-populated registry
         self.resolve_chains(&expanded_stacks)
     }
 
@@ -388,6 +387,7 @@ impl FcFontRegistry {
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.queue_condvar.notify_all();
+        self.progress.notify_all();
     }
 
     /// Returns true if the Scout has finished enumerating all font directories.
@@ -423,38 +423,6 @@ impl FcFontRegistry {
         }
     }
 
-    /// Check and signal any pending requests that are now satisfied.
-    pub fn check_and_signal_pending_requests(&self) {
-        let mut pending = match self.pending_requests.lock() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let cache = match self.cache.read() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        for request in pending.iter() {
-            if request.satisfied.load(Ordering::Relaxed) {
-                continue;
-            }
-
-            let all_found = request
-                .families
-                .iter()
-                .all(|fam| family_exists_in_patterns(fam, cache.patterns.keys()));
-
-            if all_found {
-                request.satisfied.store(true, Ordering::Release);
-            }
-        }
-
-        pending.retain(|r| !r.satisfied.load(Ordering::Relaxed));
-
-        drop(pending);
-        self.request_complete.notify_all();
-    }
-
     /// Resolve font chains from the current state of the registry.
     fn resolve_chains(&self, expanded_stacks: &[Vec<String>]) -> Vec<FontFallbackChain> {
         expanded_stacks
@@ -473,8 +441,6 @@ impl FcFontRegistry {
 
 impl Drop for FcFontRegistry {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        self.queue_condvar.notify_all();
+        self.shutdown();
     }
 }
-
