@@ -109,6 +109,24 @@ struct FontRequest {
 
 // ── The Registry ────────────────────────────────────────────────────────────
 
+/// All parsed font data, protected by a single `RwLock`.
+///
+/// Grouping these fields avoids acquiring 5 separate locks on every
+/// read/write path and guarantees they stay consistent with each other.
+#[derive(Default)]
+pub struct FontIndex {
+    /// Pattern → FontId mapping (query index)
+    pub patterns: BTreeMap<FcPattern, FontId>,
+    /// FontId → disk font path
+    pub disk_fonts: BTreeMap<FontId, FcFontPath>,
+    /// FontId → parsed pattern (metadata)
+    pub metadata: BTreeMap<FontId, FcPattern>,
+    /// Lowercase token → set of FontIds (inverted index for fuzzy search)
+    pub token_index: BTreeMap<String, BTreeSet<FontId>>,
+    /// FontId → pre-tokenized lowercase name tokens
+    pub font_tokens: BTreeMap<FontId, Vec<String>>,
+}
+
 /// Thread-safe, incrementally-populated font registry.
 ///
 /// Background threads (Scout + Builder pool) populate this concurrently while
@@ -121,16 +139,7 @@ pub struct FcFontRegistry {
     known_paths: RwLock<BTreeMap<String, Vec<PathBuf>>>,
 
     // ── Populated by Builder (incremental, Phase 2+) ──
-    /// Pattern → FontId mapping (query index)
-    patterns: RwLock<BTreeMap<FcPattern, FontId>>,
-    /// FontId → disk font path
-    disk_fonts: RwLock<BTreeMap<FontId, FcFontPath>>,
-    /// FontId → parsed pattern (metadata)
-    metadata: RwLock<BTreeMap<FontId, FcPattern>>,
-    /// Lowercase token → set of FontIds (inverted index for fuzzy search)
-    token_index: RwLock<BTreeMap<String, BTreeSet<FontId>>>,
-    /// FontId → pre-tokenized lowercase name tokens
-    font_tokens: RwLock<BTreeMap<FontId, Vec<String>>>,
+    font_index: RwLock<FontIndex>,
 
     // ── In-memory fonts (bundled, embedded) ──
     memory_fonts: RwLock<BTreeMap<FontId, FcFont>>,
@@ -188,11 +197,7 @@ impl FcFontRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             known_paths: RwLock::new(BTreeMap::new()),
-            patterns: RwLock::new(BTreeMap::new()),
-            disk_fonts: RwLock::new(BTreeMap::new()),
-            metadata: RwLock::new(BTreeMap::new()),
-            token_index: RwLock::new(BTreeMap::new()),
-            font_tokens: RwLock::new(BTreeMap::new()),
+            font_index: RwLock::new(FontIndex::default()),
             memory_fonts: RwLock::new(BTreeMap::new()),
             chain_cache: Mutex::new(HashMap::new()),
             build_queue: Mutex::new(Vec::new()),
@@ -216,22 +221,14 @@ impl FcFontRegistry {
     pub fn register_memory_fonts(&self, fonts: Vec<NamedFont>) {
         for named_font in fonts {
             if let Some(parsed) = crate::FcParseFontBytes(&named_font.bytes, &named_font.name) {
-                let mut patterns = self.patterns.write().unwrap();
-                let mut metadata = self.metadata.write().unwrap();
+                let mut idx = self.font_index.write().unwrap();
                 let mut memory_fonts = self.memory_fonts.write().unwrap();
-                let mut token_index = self.token_index.write().unwrap();
-                let mut font_tokens = self.font_tokens.write().unwrap();
 
                 for (pattern, fc_font) in parsed {
                     let id = FontId::new();
-                    Self::index_pattern_tokens_static(
-                        &mut token_index,
-                        &mut font_tokens,
-                        &pattern,
-                        id,
-                    );
-                    patterns.insert(pattern.clone(), id);
-                    metadata.insert(id, pattern);
+                    Self::index_pattern_tokens_static(&mut idx, &pattern, id);
+                    idx.patterns.insert(pattern.clone(), id);
+                    idx.metadata.insert(id, pattern);
                     memory_fonts.insert(id, fc_font);
                 }
             }
@@ -320,9 +317,9 @@ impl FcFontRegistry {
         // 3. Check which families are completely missing from the registry
         let mut missing: Vec<String> = Vec::new();
         {
-            let patterns = self.patterns.read().unwrap();
+            let idx = self.font_index.read().unwrap();
             for family in &needed_families {
-                let found = patterns.keys().any(|p| {
+                let found = idx.patterns.keys().any(|p| {
                     p.name
                         .as_ref()
                         .map(|n| normalize_family_name(n) == *family)
@@ -483,7 +480,7 @@ impl FcFontRegistry {
 
     /// Get font metadata by ID.
     pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
-        self.metadata.read().unwrap().get(id).cloned()
+        self.font_index.read().unwrap().metadata.get(id).cloned()
     }
 
     /// Get font bytes for a given font ID (either from memory or disk).
@@ -493,7 +490,7 @@ impl FcFontRegistry {
             return Some(font.bytes.clone());
         }
         // Then check disk fonts
-        if let Some(path) = self.disk_fonts.read().unwrap().get(id) {
+        if let Some(path) = self.font_index.read().unwrap().disk_fonts.get(id) {
             return std::fs::read(&path.path).ok();
         }
         None
@@ -501,7 +498,7 @@ impl FcFontRegistry {
 
     /// Get the disk font path for a font ID.
     pub fn get_disk_font_path(&self, id: &FontId) -> Option<FcFontPath> {
-        self.disk_fonts.read().unwrap().get(id).cloned()
+        self.font_index.read().unwrap().disk_fonts.get(id).cloned()
     }
 
     /// Check if a font ID is a memory font.
@@ -511,9 +508,10 @@ impl FcFontRegistry {
 
     /// List all known fonts (pattern + ID pairs).
     pub fn list(&self) -> Vec<(FcPattern, FontId)> {
-        self.patterns
+        self.font_index
             .read()
             .unwrap()
+            .patterns
             .iter()
             .map(|(p, id)| (p.clone(), *id))
             .collect()
@@ -521,16 +519,15 @@ impl FcFontRegistry {
 
     /// Query the registry for a font matching the given pattern.
     pub fn query(&self, pattern: &FcPattern) -> Option<FontMatch> {
-        let patterns = self.patterns.read().unwrap();
-        let metadata_map = self.metadata.read().unwrap();
+        let idx = self.font_index.read().unwrap();
         let memory_fonts = self.memory_fonts.read().unwrap();
 
         let mut matches = Vec::new();
         let mut trace = Vec::new();
 
-        for (stored_pattern, id) in patterns.iter() {
+        for (stored_pattern, id) in idx.patterns.iter() {
             if FcFontCache::query_matches_internal(stored_pattern, pattern, &mut trace) {
-                let meta = metadata_map.get(id).unwrap_or(stored_pattern);
+                let meta = idx.metadata.get(id).unwrap_or(stored_pattern);
                 let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
                     FcFontCache::calculate_unicode_coverage(&meta.unicode_ranges) as i32
                 } else {
@@ -598,35 +595,17 @@ impl FcFontRegistry {
     pub fn into_fc_font_cache(&self) -> FcFontCache {
         let mut cache = FcFontCache::default();
 
-        // Copy patterns
-        let patterns = self.patterns.read().unwrap();
-        let disk_fonts = self.disk_fonts.read().unwrap();
-        let metadata_map = self.metadata.read().unwrap();
+        let idx = self.font_index.read().unwrap();
         let memory_fonts_map = self.memory_fonts.read().unwrap();
 
-        for (pattern, id) in patterns.iter() {
-            cache.patterns.insert(pattern.clone(), *id);
-        }
-        for (id, path) in disk_fonts.iter() {
-            cache.disk_fonts.insert(*id, path.clone());
-        }
-        for (id, meta) in metadata_map.iter() {
-            cache.metadata.insert(*id, meta.clone());
-        }
+        cache.patterns = idx.patterns.clone();
+        cache.disk_fonts = idx.disk_fonts.clone();
+        cache.metadata = idx.metadata.clone();
+        cache.token_index = idx.token_index.clone();
+        cache.font_tokens = idx.font_tokens.clone();
+
         for (id, font) in memory_fonts_map.iter() {
             cache.memory_fonts.insert(*id, font.clone());
-        }
-
-        // Rebuild token index
-        let token_index = self.token_index.read().unwrap();
-        for (token, ids) in token_index.iter() {
-            cache
-                .token_index
-                .insert(token.clone(), ids.clone());
-        }
-        let font_tokens = self.font_tokens.read().unwrap();
-        for (id, tokens) in font_tokens.iter() {
-            cache.font_tokens.insert(*id, tokens.clone());
         }
 
         cache
@@ -668,16 +647,12 @@ impl FcFontRegistry {
     fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
         let id = FontId::new();
 
-        let mut patterns = self.patterns.write().unwrap();
-        let mut disk_fonts = self.disk_fonts.write().unwrap();
-        let mut metadata = self.metadata.write().unwrap();
-        let mut token_index = self.token_index.write().unwrap();
-        let mut font_tokens = self.font_tokens.write().unwrap();
+        let mut idx = self.font_index.write().unwrap();
 
-        Self::index_pattern_tokens_static(&mut token_index, &mut font_tokens, &pattern, id);
-        patterns.insert(pattern.clone(), id);
-        disk_fonts.insert(id, path);
-        metadata.insert(id, pattern);
+        Self::index_pattern_tokens_static(&mut idx, &pattern, id);
+        idx.patterns.insert(pattern.clone(), id);
+        idx.disk_fonts.insert(id, path);
+        idx.metadata.insert(id, pattern);
 
         self.faces_loaded.fetch_add(1, Ordering::Relaxed);
 
@@ -687,10 +662,9 @@ impl FcFontRegistry {
         }
     }
 
-    /// Static helper for token indexing (doesn't need &self, works with mutable refs)
+    /// Index a pattern's name/family tokens into the font index.
     fn index_pattern_tokens_static(
-        token_index: &mut BTreeMap<String, BTreeSet<FontId>>,
-        font_tokens: &mut BTreeMap<FontId, Vec<String>>,
+        font_index: &mut FontIndex,
         pattern: &FcPattern,
         id: FontId,
     ) {
@@ -705,19 +679,19 @@ impl FcFontRegistry {
         let tokens_lower: Vec<String> = all_tokens.iter().map(|t| t.to_lowercase()).collect();
 
         for token_lower in &tokens_lower {
-            token_index
+            font_index.token_index
                 .entry(token_lower.clone())
                 .or_insert_with(BTreeSet::new)
                 .insert(id);
         }
 
-        font_tokens.insert(id, tokens_lower);
+        font_index.font_tokens.insert(id, tokens_lower);
     }
 
     /// Check and signal any pending requests that are now satisfied.
     fn check_and_signal_pending_requests(&self) {
         let mut pending = self.pending_requests.lock().unwrap();
-        let patterns = self.patterns.read().unwrap();
+        let idx = self.font_index.read().unwrap();
 
         for request in pending.iter() {
             if request.satisfied.load(Ordering::Relaxed) {
@@ -725,7 +699,7 @@ impl FcFontRegistry {
             }
 
             let all_found = request.families.iter().all(|family| {
-                patterns.keys().any(|p| {
+                idx.patterns.keys().any(|p| {
                     p.name
                         .as_ref()
                         .map(|n| normalize_family_name(n) == *family)
@@ -773,10 +747,7 @@ impl FcFontRegistry {
         italic: PatternMatch,
         oblique: PatternMatch,
     ) -> FontFallbackChain {
-        let patterns = self.patterns.read().unwrap();
-        let metadata_map = self.metadata.read().unwrap();
-        let token_index = self.token_index.read().unwrap();
-        let font_tokens_map = self.font_tokens.read().unwrap();
+        let idx = self.font_index.read().unwrap();
         let memory_fonts = self.memory_fonts.read().unwrap();
 
         let mut css_fallbacks = Vec::new();
@@ -812,9 +783,9 @@ impl FcFontRegistry {
                 };
 
                 let mut found = Vec::new();
-                for (stored_pattern, id) in patterns.iter() {
+                for (stored_pattern, id) in idx.patterns.iter() {
                     if FcFontCache::query_matches_internal(stored_pattern, &pattern, &mut trace) {
-                        let meta = metadata_map.get(id).unwrap_or(stored_pattern);
+                        let meta = idx.metadata.get(id).unwrap_or(stored_pattern);
                         found.push(FontMatch {
                             id: *id,
                             unicode_ranges: meta.unicode_ranges.clone(),
@@ -833,10 +804,7 @@ impl FcFontRegistry {
                     weight,
                     italic,
                     oblique,
-                    &patterns,
-                    &metadata_map,
-                    &token_index,
-                    &font_tokens_map,
+                    &idx,
                     &memory_fonts,
                 )
             };
@@ -861,12 +829,12 @@ impl FcFontRegistry {
         weight: FcWeight,
         italic: PatternMatch,
         oblique: PatternMatch,
-        _patterns: &BTreeMap<FcPattern, FontId>,
-        metadata_map: &BTreeMap<FontId, FcPattern>,
-        token_index: &BTreeMap<String, BTreeSet<FontId>>,
-        font_tokens_map: &BTreeMap<FontId, Vec<String>>,
+        font_index: &FontIndex,
         _memory_fonts: &BTreeMap<FontId, FcFont>,
     ) -> Vec<FontMatch> {
+        let metadata_map = &font_index.metadata;
+        let token_index = &font_index.token_index;
+        let font_tokens_map = &font_index.font_tokens;
         let tokens = FcFontCache::extract_font_name_tokens(requested_name);
         if tokens.is_empty() {
             return Vec::new();
@@ -1319,11 +1287,7 @@ impl FcFontRegistry {
             return None;
         }
 
-        let mut patterns = self.patterns.write().ok()?;
-        let mut disk_fonts = self.disk_fonts.write().ok()?;
-        let mut metadata = self.metadata.write().ok()?;
-        let mut token_index = self.token_index.write().ok()?;
-        let mut font_tokens = self.font_tokens.write().ok()?;
+        let mut idx = self.font_index.write().ok()?;
         let mut processed = self.processed_paths.lock().ok()?;
         let mut completed = self.completed_paths.lock().ok()?;
 
@@ -1336,18 +1300,13 @@ impl FcFontRegistry {
             })
             .map(|(path_str, idx_entry)| {
                 let id = FontId::new();
-                Self::index_pattern_tokens_static(
-                    &mut token_index,
-                    &mut font_tokens,
-                    &idx_entry.pattern,
-                    id,
-                );
-                patterns.insert(idx_entry.pattern.clone(), id);
-                disk_fonts.insert(id, FcFontPath {
+                Self::index_pattern_tokens_static(&mut idx, &idx_entry.pattern, id);
+                idx.patterns.insert(idx_entry.pattern.clone(), id);
+                idx.disk_fonts.insert(id, FcFontPath {
                     path: path_str.clone(),
                     font_index: idx_entry.font_index,
                 });
-                metadata.insert(id, idx_entry.pattern.clone());
+                idx.metadata.insert(id, idx_entry.pattern.clone());
             })
             .count();
 
@@ -1377,14 +1336,13 @@ impl FcFontRegistry {
         let cache_path = get_font_cache_path()?;
         std::fs::create_dir_all(cache_path.parent()?).ok()?;
 
-        let disk_fonts = self.disk_fonts.read().ok()?;
-        let metadata_map = self.metadata.read().ok()?;
+        let idx = self.font_index.read().ok()?;
 
         let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
 
-        disk_fonts.iter()
+        idx.disk_fonts.iter()
             .filter_map(|(id, font_path)| {
-                metadata_map.get(id).map(|pattern| (font_path, pattern))
+                idx.metadata.get(id).map(|pattern| (font_path, pattern))
             })
             .for_each(|(font_path, pattern)| {
                 entries
