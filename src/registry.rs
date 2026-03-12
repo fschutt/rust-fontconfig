@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -168,13 +168,6 @@ pub struct FcFontRegistry {
     shutdown: AtomicBool,
     /// Whether a disk cache was successfully loaded (skip blocking in request_fonts)
     cache_loaded: AtomicBool,
-    /// Number of font files successfully parsed by Builder threads
-    files_parsed: AtomicUsize,
-    /// Number of individual font faces loaded (a .ttc file can yield multiple)
-    faces_loaded: AtomicUsize,
-    /// Total number of font files discovered by Scout
-    files_discovered: AtomicUsize,
-
     // ── Operating system (for font family expansion) ──
     os: OperatingSystem,
 }
@@ -182,9 +175,6 @@ pub struct FcFontRegistry {
 impl std::fmt::Debug for FcFontRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FcFontRegistry")
-            .field("faces_loaded", &self.faces_loaded.load(Ordering::Relaxed))
-            .field("files_parsed", &self.files_parsed.load(Ordering::Relaxed))
-            .field("files_discovered", &self.files_discovered.load(Ordering::Relaxed))
             .field("scan_complete", &self.scan_complete.load(Ordering::Relaxed))
             .field("build_complete", &self.build_complete.load(Ordering::Relaxed))
             .field("cache_loaded", &self.cache_loaded.load(Ordering::Relaxed))
@@ -210,9 +200,6 @@ impl FcFontRegistry {
             build_complete: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             cache_loaded: AtomicBool::new(false),
-            files_parsed: AtomicUsize::new(0),
-            faces_loaded: AtomicUsize::new(0),
-            files_discovered: AtomicUsize::new(0),
             os: OperatingSystem::current(),
         })
     }
@@ -627,15 +614,6 @@ impl FcFontRegistry {
         self.build_complete.load(Ordering::Acquire)
     }
 
-    /// Returns (files_parsed, files_discovered, faces_loaded).
-    pub fn progress(&self) -> (usize, usize, usize) {
-        (
-            self.files_parsed.load(Ordering::Relaxed),
-            self.files_discovered.load(Ordering::Relaxed),
-            self.faces_loaded.load(Ordering::Relaxed),
-        )
-    }
-
     /// Returns true if a disk cache was successfully loaded at startup.
     pub fn is_cache_loaded(&self) -> bool {
         self.cache_loaded.load(Ordering::Acquire)
@@ -653,8 +631,6 @@ impl FcFontRegistry {
         idx.patterns.insert(pattern.clone(), id);
         idx.disk_fonts.insert(id, path);
         idx.metadata.insert(id, pattern);
-
-        self.faces_loaded.fetch_add(1, Ordering::Relaxed);
 
         // Invalidate chain cache since we have new fonts
         if let Ok(mut cache) = self.chain_cache.lock() {
@@ -976,10 +952,6 @@ fn scout_thread(registry: &FcFontRegistry) {
 
         // Sort queue so highest priority is at the end (pop from end)
         queue.sort();
-
-        registry
-            .files_discovered
-            .store(all_font_paths.len(), Ordering::Relaxed);
     }
 
     registry.scan_complete.store(true, Ordering::Release);
@@ -1220,9 +1192,6 @@ fn builder_thread(registry: &FcFontRegistry) {
             completed.insert(job.path.clone());
         }
 
-        // Count this file as parsed regardless of whether it yielded faces
-        registry.files_parsed.fetch_add(1, Ordering::Relaxed);
-
         // Check if any pending requests are now satisfied
         registry.check_and_signal_pending_requests();
     }
@@ -1291,14 +1260,14 @@ impl FcFontRegistry {
         let mut processed = self.processed_paths.lock().ok()?;
         let mut completed = self.completed_paths.lock().ok()?;
 
-        let count = manifest.entries.iter()
+        manifest.entries.iter()
             .flat_map(|(path_str, entry)| {
                 let pb = PathBuf::from(path_str);
                 processed.insert(pb.clone());
                 completed.insert(pb);
                 entry.font_indices.iter().map(move |idx_entry| (path_str, idx_entry))
             })
-            .map(|(path_str, idx_entry)| {
+            .for_each(|(path_str, idx_entry)| {
                 let id = FontId::new();
                 Self::index_pattern_tokens_static(&mut idx, &idx_entry.pattern, id);
                 idx.patterns.insert(idx_entry.pattern.clone(), id);
@@ -1307,10 +1276,7 @@ impl FcFontRegistry {
                     font_index: idx_entry.font_index,
                 });
                 idx.metadata.insert(id, idx_entry.pattern.clone());
-            })
-            .count();
-
-        self.faces_loaded.store(count, Ordering::Relaxed);
+            });
         self.cache_loaded.store(true, Ordering::Release);
 
         Some(())

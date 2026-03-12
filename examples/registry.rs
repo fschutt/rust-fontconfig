@@ -144,11 +144,12 @@ fn main() {
     print!("     Text '{}': ", test_text);
     print_runs(&new_cache, &new_resolved);
 
-    // Step 8: Progress stats
-    let (files_parsed, files_discovered, faces_loaded) = registry.progress();
+    // Step 8: Status
     println!(
-        "  8. Progress: {}/{} files parsed, {} faces loaded",
-        files_parsed, files_discovered, faces_loaded
+        "  8. scan_complete={}, build_complete={}, cache_loaded={}",
+        registry.is_scan_complete(),
+        registry.is_build_complete(),
+        registry.is_cache_loaded(),
     );
 
     let new_total = t_new.elapsed();
