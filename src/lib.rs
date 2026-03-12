@@ -85,13 +85,17 @@ use allsorts::tag;
 #[cfg(all(feature = "std", feature = "parsing"))]
 use std::path::PathBuf;
 
-pub(crate) mod utils;
+pub mod utils;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
 #[cfg(feature = "async-registry")]
 pub mod registry;
+#[cfg(feature = "async-registry")]
+pub mod multithread;
+#[cfg(feature = "cache")]
+pub mod disk_cache;
 
 /// Operating system type for generic font family resolution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

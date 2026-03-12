@@ -44,9 +44,10 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::{
-    FcFontCache, FcFontPath, FcPattern, FcWeight, FontFallbackChain, FontId, FontMatch,
-    NamedFont, OperatingSystem, PatternMatch,
+    expand_font_families, FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
+    FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
 };
+use crate::multithread::builder_thread;
 use crate::utils::normalize_family_name;
 
 // ── Priority Queue ──────────────────────────────────────────────────────────
@@ -98,7 +99,7 @@ impl Ord for FcBuildJob {
 
 /// A pending request from the main thread for a set of font families.
 #[derive(Debug)]
-struct FontRequest {
+pub struct FontRequest {
     /// Lowercased, normalized family names being requested
     families: Vec<String>,
     /// Set to true by a Builder thread when all families are satisfied
@@ -113,36 +114,36 @@ struct FontRequest {
 /// populate it concurrently while the main thread reads from it.
 pub struct FcFontRegistry {
     /// The underlying font cache, populated incrementally by Builder threads.
-    cache: RwLock<FcFontCache>,
+    pub cache: RwLock<FcFontCache>,
 
     // ── Populated by Scout (fast, Phase 1) ──
     /// Maps guessed lowercase family name → file paths
-    known_paths: RwLock<BTreeMap<String, Vec<PathBuf>>>,
+    pub known_paths: RwLock<BTreeMap<String, Vec<PathBuf>>>,
 
     // ── Priority queue for Builder ──
-    build_queue: Mutex<Vec<FcBuildJob>>,
-    queue_condvar: Condvar,
+    pub build_queue: Mutex<Vec<FcBuildJob>>,
+    pub queue_condvar: Condvar,
 
     // ── Completion tracking ──
-    pending_requests: Mutex<Vec<FontRequest>>,
-    request_complete: Condvar,
+    pub pending_requests: Mutex<Vec<FontRequest>>,
+    pub request_complete: Condvar,
 
     // ── Deduplication ──
-    processed_paths: Mutex<HashSet<PathBuf>>,
+    pub processed_paths: Mutex<HashSet<PathBuf>>,
     /// Paths that have been fully parsed and whose patterns are inserted.
     /// Unlike `processed_paths` (set before parsing for dedup), this is set
     /// AFTER parsing + insert_font(), so it's safe to wait on.
-    completed_paths: Mutex<HashSet<PathBuf>>,
+    pub completed_paths: Mutex<HashSet<PathBuf>>,
 
     // ── Status ──
-    scan_complete: AtomicBool,
-    build_complete: AtomicBool,
-    shutdown: AtomicBool,
+    pub scan_complete: AtomicBool,
+    pub build_complete: AtomicBool,
+    pub shutdown: AtomicBool,
     /// Whether a disk cache was successfully loaded (skip blocking in request_fonts)
-    cache_loaded: AtomicBool,
+    pub cache_loaded: AtomicBool,
 
     // ── Operating system (for font family expansion) ──
-    os: OperatingSystem,
+    pub os: OperatingSystem,
 }
 
 impl std::fmt::Debug for FcFontRegistry {
@@ -178,7 +179,7 @@ impl FcFontRegistry {
     /// Register in-memory (bundled) fonts. These are available immediately.
     pub fn register_memory_fonts(&self, fonts: Vec<NamedFont>) {
         for named_font in fonts {
-            if let Some(parsed) = crate::FcParseFontBytes(&named_font.bytes, &named_font.name) {
+            if let Some(parsed) = FcParseFontBytes(&named_font.bytes, &named_font.name) {
                 if let Ok(mut cache) = self.cache.write() {
                     cache.with_memory_fonts(parsed);
                 }
@@ -234,7 +235,7 @@ impl FcFontRegistry {
         let mut expanded_stacks: Vec<Vec<String>> = Vec::new();
 
         for stack in family_stacks {
-            let expanded = crate::expand_font_families(stack, self.os, &[]);
+            let expanded = expand_font_families(stack, self.os, &[]);
             for family in &expanded {
                 let normalized = normalize_family_name(family);
                 if !needed_families.contains(&normalized) {
@@ -511,7 +512,7 @@ impl FcFontRegistry {
     // ── Internal methods ────────────────────────────────────────────────────
 
     /// Insert a parsed font into the cache (called by Builder threads).
-    fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
+    pub fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
         if let Ok(mut cache) = self.cache.write() {
             let id = FontId::new();
             cache.index_pattern_tokens(&pattern, id);
@@ -527,7 +528,7 @@ impl FcFontRegistry {
     }
 
     /// Check and signal any pending requests that are now satisfied.
-    fn check_and_signal_pending_requests(&self) {
+    pub fn check_and_signal_pending_requests(&self) {
         let mut pending = self.pending_requests.lock().unwrap();
         let cache = match self.cache.read() {
             Ok(c) => c,
@@ -807,257 +808,4 @@ fn get_common_font_families_for_os(os: OperatingSystem) -> Vec<String> {
         ],
         OperatingSystem::Wasm => vec![],
     }
-}
-
-// ── Builder Thread ──────────────────────────────────────────────────────────
-
-/// A Builder thread: pops jobs from the priority queue, parses fonts, and inserts
-/// results into the registry.
-fn builder_thread(registry: &FcFontRegistry) {
-    loop {
-        if registry.shutdown.load(Ordering::Relaxed) {
-            return;
-        }
-
-        // Pop the highest-priority job
-        let job = {
-            let mut queue = registry.build_queue.lock().unwrap();
-
-            loop {
-                if registry.shutdown.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                if let Some(job) = queue.pop() {
-                    break job;
-                }
-
-                // If scan is complete and queue is empty, we're done
-                if registry.scan_complete.load(Ordering::Acquire) && queue.is_empty() {
-                    registry.build_complete.store(true, Ordering::Release);
-                    registry.request_complete.notify_all();
-                    return;
-                }
-
-                // Wait for new jobs
-                queue = registry
-                    .queue_condvar
-                    .wait_timeout(queue, Duration::from_millis(100))
-                    .unwrap()
-                    .0;
-            }
-        };
-
-        // Deduplication: skip if already processed
-        {
-            let mut processed = registry.processed_paths.lock().unwrap();
-            if processed.contains(&job.path) {
-                continue;
-            }
-            processed.insert(job.path.clone());
-        }
-
-        // Parse the font file
-        if let Some(results) = crate::FcParseFont(&job.path) {
-            for (pattern, font_path) in results {
-                registry.insert_font(pattern, font_path);
-            }
-        }
-
-        // Mark this file as fully completed (patterns inserted)
-        {
-            let mut completed = registry.completed_paths.lock().unwrap();
-            completed.insert(job.path.clone());
-        }
-
-        // Check if any pending requests are now satisfied
-        registry.check_and_signal_pending_requests();
-    }
-}
-
-// ── Disk Cache ──────────────────────────────────────────────────────────────
-
-/// Font cache manifest for on-disk serialization.
-#[cfg(feature = "cache")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FontManifest {
-    /// Cache format version (bump on breaking changes)
-    pub version: u32,
-    /// Entries: path → cached font data
-    pub entries: BTreeMap<String, FontCacheEntry>,
-}
-
-#[cfg(feature = "cache")]
-impl FontManifest {
-    pub const CURRENT_VERSION: u32 = 1;
-}
-
-/// A single cached font file entry.
-#[cfg(feature = "cache")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FontCacheEntry {
-    /// File modification time (seconds since epoch)
-    pub mtime_secs: u64,
-    /// File size in bytes
-    pub file_size: u64,
-    /// Parsed font data for each font index in the file
-    pub font_indices: Vec<FontIndexEntry>,
-}
-
-/// A single font face within a font file, for disk cache serialization.
-///
-/// Font files (especially `.ttc` collections) can contain multiple faces.
-/// Each entry pairs the parsed metadata with the face index so we can
-/// reconstruct the full registry from the cache without re-parsing.
-#[cfg(feature = "cache")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FontIndexEntry {
-    /// Parsed font metadata (name, family, weight, italic, unicode ranges, etc.)
-    pub pattern: FcPattern,
-    /// Zero-based index of this face within the font file (0 for single-face files)
-    pub font_index: usize,
-}
-
-#[cfg(feature = "cache")]
-impl FcFontRegistry {
-    /// Load font metadata from the on-disk cache.
-    ///
-    /// Reads and deserializes the bincode font manifest from the platform
-    /// cache directory, then populates the inner `FcFontCache` with all cached
-    /// patterns, font paths, and token indices. Marks all cached file paths as
-    /// processed/completed so builder threads skip them.
-    ///
-    /// Returns `Some(())` on success, `None` if the cache is missing,
-    /// unreadable, malformed, or has a version mismatch.
-    /// On WASM this is a no-op that always returns `None`.
-    #[cfg(not(target_family = "wasm"))]
-    pub fn load_from_disk_cache(&self) -> Option<()> {
-        let cache_path = get_font_cache_path()?;
-        let data = std::fs::read(&cache_path).ok()?;
-        let manifest: FontManifest = bincode::deserialize(&data).ok()?;
-
-        if manifest.version != FontManifest::CURRENT_VERSION {
-            return None;
-        }
-
-        let mut cache = self.cache.write().ok()?;
-        let mut processed = self.processed_paths.lock().ok()?;
-        let mut completed = self.completed_paths.lock().ok()?;
-
-        manifest.entries.iter()
-            .flat_map(|(path_str, entry)| {
-                let pb = PathBuf::from(path_str);
-                processed.insert(pb.clone());
-                completed.insert(pb);
-                entry.font_indices.iter().map(move |idx_entry| (path_str, idx_entry))
-            })
-            .for_each(|(path_str, idx_entry)| {
-                let id = FontId::new();
-                cache.index_pattern_tokens(&idx_entry.pattern, id);
-                cache.patterns.insert(idx_entry.pattern.clone(), id);
-                cache.disk_fonts.insert(id, FcFontPath {
-                    path: path_str.clone(),
-                    font_index: idx_entry.font_index,
-                });
-                cache.metadata.insert(id, idx_entry.pattern.clone());
-            });
-
-        self.cache_loaded.store(true, Ordering::Release);
-
-        Some(())
-    }
-
-    /// No-op on WASM — no filesystem access available.
-    #[cfg(target_family = "wasm")]
-    pub fn load_from_disk_cache(&self) -> Option<()> {
-        None
-    }
-
-    /// Serialize the current registry state to the on-disk font cache.
-    ///
-    /// Collects all discovered font paths and their parsed metadata into a
-    /// [`FontManifest`], then writes it as bincode to the platform cache
-    /// directory (e.g. `~/.cache/rfc/fonts/manifest.bin` on Linux).
-    ///
-    /// Returns `None` if the cache path cannot be determined, the parent
-    /// directory cannot be created, or serialization / writing fails.
-    /// On WASM this is a no-op that always returns `None` (no filesystem access).
-    #[cfg(not(target_family = "wasm"))]
-    pub fn save_to_disk_cache(&self) -> Option<()> {
-        let cache_path = get_font_cache_path()?;
-        std::fs::create_dir_all(cache_path.parent()?).ok()?;
-
-        let cache = self.cache.read().ok()?;
-
-        let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
-
-        cache.disk_fonts.iter()
-            .filter_map(|(id, font_path)| {
-                cache.metadata.get(id).map(|pattern| (font_path, pattern))
-            })
-            .for_each(|(font_path, pattern)| {
-                entries
-                    .entry(font_path.path.clone())
-                    .or_insert_with(|| {
-                        let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
-                            .unwrap_or((0, 0));
-                        FontCacheEntry {
-                            mtime_secs,
-                            file_size,
-                            font_indices: Vec::new(),
-                        }
-                    })
-                    .font_indices
-                    .push(FontIndexEntry {
-                        pattern: pattern.clone(),
-                        font_index: font_path.font_index,
-                    });
-            });
-
-        let manifest = FontManifest {
-            version: FontManifest::CURRENT_VERSION,
-            entries,
-        };
-
-        let data = bincode::serialize(&manifest).ok()?;
-        std::fs::write(&cache_path, data).ok()?;
-
-        Some(())
-    }
-
-    /// No-op on WASM — no filesystem access available.
-    #[cfg(target_family = "wasm")]
-    pub fn save_to_disk_cache(&self) -> Option<()> {
-        None
-    }
-}
-
-/// Get file mtime (seconds since epoch) and size in bytes.
-#[cfg(feature = "cache")]
-fn get_file_metadata(path: &str) -> Option<(u64, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Some((mtime, meta.len()))
-}
-
-/// Get the path to the font cache manifest file.
-#[cfg(feature = "cache")]
-fn get_font_cache_path() -> Option<PathBuf> {
-    let base = get_cache_base_dir()?;
-    Some(base.join("fonts").join("manifest.bin"))
-}
-
-/// Get the base cache directory for rust-fontconfig.
-#[cfg(all(feature = "cache", not(target_family = "wasm")))]
-fn get_cache_base_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("rfc"))
-}
-
-/// Returns `None` on platforms without a conventional cache directory (e.g. WASM).
-#[cfg(all(feature = "cache", target_family = "wasm"))]
-fn get_cache_base_dir() -> Option<PathBuf> {
-    None
 }
