@@ -1443,35 +1443,7 @@ fn get_font_cache_path() -> Option<PathBuf> {
 /// Get the base cache directory for azul.
 #[cfg(feature = "cache")]
 fn get_cache_base_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        let xdg = std::env::var("XDG_CACHE_HOME").ok();
-        let base = match xdg {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let home = std::env::var("HOME").ok()?;
-                PathBuf::from(home).join(".cache")
-            }
-        };
-        Some(base.join("azul"))
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join("Library").join("Caches").join("azul"))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-        Some(PathBuf::from(local_app_data).join("azul"))
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        None
-    }
+    dirs::cache_dir().map(|d| d.join("azul"))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
