@@ -1,17 +1,17 @@
 //! Asynchronous font registry with background scanning and on-demand blocking.
 //!
-//! `FcFontRegistry` replaces the monolithic `FcFontCache::build()` with a concurrent
-//! system where background threads race to load fonts ahead of when the main thread
-//! needs them. The main thread blocks at layout time (via `request_fonts()`) until the
-//! specific fonts it needs are ready. This guarantees no flash of unstyled content (FOUC).
+//! `FcFontRegistry` wraps an `FcFontCache` behind a `RwLock` and adds concurrent
+//! background scanning. Background threads populate the cache while the main thread
+//! reads from it. The main thread blocks at layout time (via `request_fonts()`) until
+//! the specific fonts it needs are ready.
 //!
 //! # Architecture
 //!
 //! - **Scout** (1 thread): Enumerates font directories, guesses family names from
 //!   filenames, and feeds paths to the Builder's priority queue. Takes ~5-20ms.
 //! - **Builder Pool** (N threads): Parses font files from the priority queue, verifies
-//!   CMAP tables, and writes results to the shared Registry.
-//! - **Registry** (shared state): Thread-safe, incrementally-populated font database.
+//!   CMAP tables, and writes results to the shared cache.
+//! - **Registry** (shared state): Thread-safe wrapper around `FcFontCache`.
 //!   The main thread reads from it; background threads write to it.
 //!
 //! # Usage
@@ -34,11 +34,9 @@
 //! ```
 
 use alloc::collections::btree_map::BTreeMap;
-use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,10 +44,10 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::{
-    CssFallbackGroup, FcFont, FcFontCache, FcFontPath, FcPattern,
-    FcWeight, FontChainCacheKey, FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem,
-    PatternMatch,
+    FcFontCache, FcFontPath, FcPattern, FcWeight, FontFallbackChain, FontId, FontMatch,
+    NamedFont, OperatingSystem, PatternMatch,
 };
+use crate::utils::normalize_family_name;
 
 // ── Priority Queue ──────────────────────────────────────────────────────────
 
@@ -109,43 +107,17 @@ struct FontRequest {
 
 // ── The Registry ────────────────────────────────────────────────────────────
 
-/// All parsed font data, protected by a single `RwLock`.
-///
-/// Grouping these fields avoids acquiring 5 separate locks on every
-/// read/write path and guarantees they stay consistent with each other.
-#[derive(Default)]
-pub struct FontIndex {
-    /// Pattern → FontId mapping (query index)
-    pub patterns: BTreeMap<FcPattern, FontId>,
-    /// FontId → disk font path
-    pub disk_fonts: BTreeMap<FontId, FcFontPath>,
-    /// FontId → parsed pattern (metadata)
-    pub metadata: BTreeMap<FontId, FcPattern>,
-    /// Lowercase token → set of FontIds (inverted index for fuzzy search)
-    pub token_index: BTreeMap<String, BTreeSet<FontId>>,
-    /// FontId → pre-tokenized lowercase name tokens
-    pub font_tokens: BTreeMap<FontId, Vec<String>>,
-}
-
 /// Thread-safe, incrementally-populated font registry.
 ///
-/// Background threads (Scout + Builder pool) populate this concurrently while
-/// the main thread reads from it. The main thread can block via `request_fonts()`
-/// until specific fonts are available.
+/// Wraps an `FcFontCache` behind a `RwLock` so that background threads can
+/// populate it concurrently while the main thread reads from it.
 pub struct FcFontRegistry {
+    /// The underlying font cache, populated incrementally by Builder threads.
+    cache: RwLock<FcFontCache>,
+
     // ── Populated by Scout (fast, Phase 1) ──
     /// Maps guessed lowercase family name → file paths
-    /// e.g. "arial" → ["/System/Library/Fonts/Arial.ttf", "/System/Library/Fonts/Arial Bold.ttf"]
     known_paths: RwLock<BTreeMap<String, Vec<PathBuf>>>,
-
-    // ── Populated by Builder (incremental, Phase 2+) ──
-    font_index: RwLock<FontIndex>,
-
-    // ── In-memory fonts (bundled, embedded) ──
-    memory_fonts: RwLock<BTreeMap<FontId, FcFont>>,
-
-    // ── Chain cache (computed lazily) ──
-    chain_cache: Mutex<HashMap<FontChainCacheKey, FontFallbackChain>>,
 
     // ── Priority queue for Builder ──
     build_queue: Mutex<Vec<FcBuildJob>>,
@@ -168,6 +140,7 @@ pub struct FcFontRegistry {
     shutdown: AtomicBool,
     /// Whether a disk cache was successfully loaded (skip blocking in request_fonts)
     cache_loaded: AtomicBool,
+
     // ── Operating system (for font family expansion) ──
     os: OperatingSystem,
 }
@@ -186,10 +159,8 @@ impl FcFontRegistry {
     /// Create a new empty registry.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            cache: RwLock::new(FcFontCache::default()),
             known_paths: RwLock::new(BTreeMap::new()),
-            font_index: RwLock::new(FontIndex::default()),
-            memory_fonts: RwLock::new(BTreeMap::new()),
-            chain_cache: Mutex::new(HashMap::new()),
             build_queue: Mutex::new(Vec::new()),
             queue_condvar: Condvar::new(),
             pending_requests: Mutex::new(Vec::new()),
@@ -208,15 +179,8 @@ impl FcFontRegistry {
     pub fn register_memory_fonts(&self, fonts: Vec<NamedFont>) {
         for named_font in fonts {
             if let Some(parsed) = crate::FcParseFontBytes(&named_font.bytes, &named_font.name) {
-                let mut idx = self.font_index.write().unwrap();
-                let mut memory_fonts = self.memory_fonts.write().unwrap();
-
-                for (pattern, fc_font) in parsed {
-                    let id = FontId::new();
-                    Self::index_pattern_tokens_static(&mut idx, &pattern, id);
-                    idx.patterns.insert(pattern.clone(), id);
-                    idx.metadata.insert(id, pattern);
-                    memory_fonts.insert(id, fc_font);
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.with_memory_fonts(parsed);
                 }
             }
         }
@@ -281,15 +245,12 @@ impl FcFontRegistry {
         }
 
         // Fast path: if disk cache was loaded, all previously-known fonts are
-        // already in the patterns map.  We can resolve chains immediately.
-        // Background builders will pick up any newly installed fonts later.
+        // already in the patterns map. We can resolve chains immediately.
         if self.cache_loaded.load(Ordering::Acquire) {
             return self.resolve_chains(&expanded_stacks);
         }
 
         // 2. Wait for Scout to finish first (typically < 100ms).
-        //    Without the scout's known_paths, we can't check which font
-        //    files exist for a family and whether all variants are parsed.
         while !self.scan_complete.load(Ordering::Acquire) {
             if Instant::now() >= deadline {
                 eprintln!(
@@ -304,36 +265,36 @@ impl FcFontRegistry {
         // 3. Check which families are completely missing from the registry
         let mut missing: Vec<String> = Vec::new();
         {
-            let idx = self.font_index.read().unwrap();
-            for family in &needed_families {
-                let found = idx.patterns.keys().any(|p| {
-                    p.name
-                        .as_ref()
-                        .map(|n| normalize_family_name(n) == *family)
-                        .unwrap_or(false)
-                        || p.family
+            if let Ok(cache) = self.cache.read() {
+                for family in &needed_families {
+                    let found = cache.patterns.keys().any(|p| {
+                        p.name
                             .as_ref()
-                            .map(|f| normalize_family_name(f) == *family)
+                            .map(|n| normalize_family_name(n) == *family)
                             .unwrap_or(false)
-                });
-                if !found {
-                    missing.push(family.clone());
+                            || p.family
+                                .as_ref()
+                                .map(|f| normalize_family_name(f) == *family)
+                                .unwrap_or(false)
+                    });
+                    if !found {
+                        missing.push(family.clone());
+                    }
                 }
             }
         }
 
         // 4. Even if families have at least one pattern, some font FILES for
         //    that family may still be unprocessed (e.g., SFNSItalic.ttf parsed
-        //    but SFNS.ttf not yet ⇒ only italic variant available).
+        //    but SFNS.ttf not yet => only italic variant available).
         //    Use completed_paths (not processed_paths!) because processed_paths
         //    is set BEFORE parsing, while completed_paths is set AFTER parsing
         //    and insert_font().
-        let mut incomplete_paths: Vec<(std::path::PathBuf, String)> = Vec::new();
+        let mut incomplete_paths: Vec<(PathBuf, String)> = Vec::new();
         {
             let known = self.known_paths.read().unwrap();
             let completed = self.completed_paths.lock().unwrap();
             for family in &needed_families {
-                // Check exact match
                 if let Some(paths) = known.get(family) {
                     for path in paths {
                         if !completed.contains(path) {
@@ -341,7 +302,6 @@ impl FcFontRegistry {
                         }
                     }
                 }
-                // Check partial matches (e.g. "systemfont" vs "sfns")
                 for (known_fam, paths) in known.iter() {
                     if known_fam != family
                         && (known_fam.contains(family.as_str())
@@ -378,7 +338,6 @@ impl FcFontRegistry {
                         });
                     }
                 }
-                // Also try partial matches (e.g. "arial" matches "arialblack")
                 for (known_family, paths) in known_paths.iter() {
                     if known_family.contains(family.as_str())
                         || family.contains(known_family.as_str())
@@ -395,7 +354,6 @@ impl FcFontRegistry {
                 }
             }
 
-            // Also push Critical jobs for incomplete file variants
             for (path, fam) in &incomplete_paths {
                 queue.push(FcBuildJob {
                     priority: Priority::Critical,
@@ -405,16 +363,13 @@ impl FcFontRegistry {
                 });
             }
 
-            // Sort so Critical jobs are at the end (popped first with pop())
             queue.sort();
         }
         self.queue_condvar.notify_all();
 
-        // 7. Wait for ALL specific files to be processed (not just "family found").
-        //    This prevents the race condition where only one variant of a font
-        //    family (e.g. only italic) is available at snapshot time.
-        let wait_paths: std::collections::HashSet<std::path::PathBuf> = {
-            let mut paths = std::collections::HashSet::new();
+        // 7. Wait for ALL specific files to be processed
+        let wait_paths: HashSet<PathBuf> = {
+            let mut paths = HashSet::new();
             for (path, _) in &incomplete_paths {
                 paths.insert(path.clone());
             }
@@ -465,81 +420,42 @@ impl FcFontRegistry {
         self.resolve_chains(&expanded_stacks)
     }
 
+    // ── Delegated accessors ─────────────────────────────────────────────────
+
     /// Get font metadata by ID.
     pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
-        self.font_index.read().unwrap().metadata.get(id).cloned()
+        self.cache.read().ok()?.metadata.get(id).cloned()
     }
 
     /// Get font bytes for a given font ID (either from memory or disk).
     pub fn get_font_bytes(&self, id: &FontId) -> Option<Vec<u8>> {
-        // Check memory fonts first
-        if let Some(font) = self.memory_fonts.read().unwrap().get(id) {
-            return Some(font.bytes.clone());
-        }
-        // Then check disk fonts
-        if let Some(path) = self.font_index.read().unwrap().disk_fonts.get(id) {
-            return std::fs::read(&path.path).ok();
-        }
-        None
+        self.cache.read().ok()?.get_font_bytes(id)
     }
 
     /// Get the disk font path for a font ID.
     pub fn get_disk_font_path(&self, id: &FontId) -> Option<FcFontPath> {
-        self.font_index.read().unwrap().disk_fonts.get(id).cloned()
+        self.cache.read().ok()?.disk_fonts.get(id).cloned()
     }
 
     /// Check if a font ID is a memory font.
     pub fn is_memory_font(&self, id: &FontId) -> bool {
-        self.memory_fonts.read().unwrap().contains_key(id)
+        self.cache.read().ok()
+            .map(|c| c.is_memory_font(id))
+            .unwrap_or(false)
     }
 
     /// List all known fonts (pattern + ID pairs).
     pub fn list(&self) -> Vec<(FcPattern, FontId)> {
-        self.font_index
-            .read()
-            .unwrap()
-            .patterns
-            .iter()
-            .map(|(p, id)| (p.clone(), *id))
-            .collect()
+        self.cache.read().ok()
+            .map(|c| c.list().into_iter().map(|(p, id)| (p.clone(), id)).collect())
+            .unwrap_or_default()
     }
 
     /// Query the registry for a font matching the given pattern.
     pub fn query(&self, pattern: &FcPattern) -> Option<FontMatch> {
-        let idx = self.font_index.read().unwrap();
-        let memory_fonts = self.memory_fonts.read().unwrap();
-
-        let mut matches = Vec::new();
+        let cache = self.cache.read().ok()?;
         let mut trace = Vec::new();
-
-        for (stored_pattern, id) in idx.patterns.iter() {
-            if FcFontCache::query_matches_internal(stored_pattern, pattern, &mut trace) {
-                let meta = idx.metadata.get(id).unwrap_or(stored_pattern);
-                let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
-                    FcFontCache::calculate_unicode_coverage(&meta.unicode_ranges) as i32
-                } else {
-                    FcFontCache::calculate_unicode_compatibility(
-                        &pattern.unicode_ranges,
-                        &meta.unicode_ranges,
-                    )
-                };
-                let style_score = FcFontCache::calculate_style_score(pattern, meta);
-                let is_memory = memory_fonts.contains_key(id);
-                matches.push((*id, unicode_compatibility, style_score, meta.clone(), is_memory));
-            }
-        }
-
-        matches.sort_by(|a, b| {
-            b.4.cmp(&a.4)
-                .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-
-        matches.first().map(|(id, _, _, meta, _)| FontMatch {
-            id: *id,
-            unicode_ranges: meta.unicode_ranges.clone(),
-            fallbacks: Vec::new(),
-        })
+        cache.query(pattern, &mut trace)
     }
 
     /// Resolve a complete font fallback chain for a CSS font-family stack.
@@ -550,52 +466,25 @@ impl FcFontRegistry {
         italic: PatternMatch,
         oblique: PatternMatch,
     ) -> FontFallbackChain {
-        // Check chain cache first
-        let cache_key = FontChainCacheKey {
-            font_families: font_families.to_vec(),
-            weight,
-            italic,
-            oblique,
-        };
-
-        if let Ok(cache) = self.chain_cache.lock() {
-            if let Some(cached) = cache.get(&cache_key) {
-                return cached.clone();
+        if let Ok(cache) = self.cache.read() {
+            let mut trace = Vec::new();
+            cache.resolve_font_chain_with_os(
+                font_families, weight, italic, oblique, &mut trace, self.os,
+            )
+        } else {
+            FontFallbackChain {
+                css_fallbacks: Vec::new(),
+                unicode_fallbacks: Vec::new(),
+                original_stack: font_families.to_vec(),
             }
         }
-
-        // Expand generic families
-        let expanded = crate::expand_font_families(font_families, self.os, &[]);
-
-        // Build chain
-        let chain = self.resolve_font_chain_uncached(&expanded, weight, italic, oblique);
-
-        // Cache it
-        if let Ok(mut cache) = self.chain_cache.lock() {
-            cache.insert(cache_key, chain.clone());
-        }
-
-        chain
     }
 
-    /// Convert the registry into an immutable `FcFontCache` snapshot.
+    /// Take a snapshot of the current cache state as an immutable `FcFontCache`.
     pub fn into_fc_font_cache(&self) -> FcFontCache {
-        let mut cache = FcFontCache::default();
-
-        let idx = self.font_index.read().unwrap();
-        let memory_fonts_map = self.memory_fonts.read().unwrap();
-
-        cache.patterns = idx.patterns.clone();
-        cache.disk_fonts = idx.disk_fonts.clone();
-        cache.metadata = idx.metadata.clone();
-        cache.token_index = idx.token_index.clone();
-        cache.font_tokens = idx.font_tokens.clone();
-
-        for (id, font) in memory_fonts_map.iter() {
-            cache.memory_fonts.insert(*id, font.clone());
-        }
-
-        cache
+        self.cache.read()
+            .map(|c| c.clone())
+            .unwrap_or_default()
     }
 
     /// Signal all background threads to shut down.
@@ -621,53 +510,29 @@ impl FcFontRegistry {
 
     // ── Internal methods ────────────────────────────────────────────────────
 
-    /// Insert a parsed font into the registry (called by Builder threads).
+    /// Insert a parsed font into the cache (called by Builder threads).
     fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
-        let id = FontId::new();
+        if let Ok(mut cache) = self.cache.write() {
+            let id = FontId::new();
+            cache.index_pattern_tokens(&pattern, id);
+            cache.patterns.insert(pattern.clone(), id);
+            cache.disk_fonts.insert(id, path);
+            cache.metadata.insert(id, pattern);
 
-        let mut idx = self.font_index.write().unwrap();
-
-        Self::index_pattern_tokens_static(&mut idx, &pattern, id);
-        idx.patterns.insert(pattern.clone(), id);
-        idx.disk_fonts.insert(id, path);
-        idx.metadata.insert(id, pattern);
-
-        // Invalidate chain cache since we have new fonts
-        if let Ok(mut cache) = self.chain_cache.lock() {
-            cache.clear();
+            // Invalidate chain cache since we have new fonts
+            if let Ok(mut cc) = cache.chain_cache.lock() {
+                cc.clear();
+            }
         }
-    }
-
-    /// Index a pattern's name/family tokens into the font index.
-    fn index_pattern_tokens_static(
-        font_index: &mut FontIndex,
-        pattern: &FcPattern,
-        id: FontId,
-    ) {
-        let mut all_tokens = Vec::new();
-        if let Some(name) = &pattern.name {
-            all_tokens.extend(FcFontCache::extract_font_name_tokens(name));
-        }
-        if let Some(family) = &pattern.family {
-            all_tokens.extend(FcFontCache::extract_font_name_tokens(family));
-        }
-
-        let tokens_lower: Vec<String> = all_tokens.iter().map(|t| t.to_lowercase()).collect();
-
-        for token_lower in &tokens_lower {
-            font_index.token_index
-                .entry(token_lower.clone())
-                .or_insert_with(BTreeSet::new)
-                .insert(id);
-        }
-
-        font_index.font_tokens.insert(id, tokens_lower);
     }
 
     /// Check and signal any pending requests that are now satisfied.
     fn check_and_signal_pending_requests(&self) {
         let mut pending = self.pending_requests.lock().unwrap();
-        let idx = self.font_index.read().unwrap();
+        let cache = match self.cache.read() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
 
         for request in pending.iter() {
             if request.satisfied.load(Ordering::Relaxed) {
@@ -675,7 +540,7 @@ impl FcFontRegistry {
             }
 
             let all_found = request.families.iter().all(|family| {
-                idx.patterns.keys().any(|p| {
+                cache.patterns.keys().any(|p| {
                     p.name
                         .as_ref()
                         .map(|n| normalize_family_name(n) == *family)
@@ -692,10 +557,8 @@ impl FcFontRegistry {
             }
         }
 
-        // Remove satisfied requests
         pending.retain(|r| !r.satisfied.load(Ordering::Relaxed));
 
-        // Signal waiting threads
         drop(pending);
         self.request_complete.notify_all();
     }
@@ -711,183 +574,6 @@ impl FcFontRegistry {
                     PatternMatch::DontCare,
                     PatternMatch::DontCare,
                 )
-            })
-            .collect()
-    }
-
-    /// Internal chain resolution without caching.
-    fn resolve_font_chain_uncached(
-        &self,
-        font_families: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-    ) -> FontFallbackChain {
-        let idx = self.font_index.read().unwrap();
-        let memory_fonts = self.memory_fonts.read().unwrap();
-
-        let mut css_fallbacks = Vec::new();
-        let mut trace = Vec::new();
-
-        for family in font_families {
-            let is_generic = matches!(
-                family.to_lowercase().as_str(),
-                "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui"
-            );
-
-            let matches = if is_generic {
-                // Generic families need full pattern matching
-                let pattern = match family.as_str() {
-                    "monospace" => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::True,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                    _ => FcPattern {
-                        name: None,
-                        weight,
-                        italic,
-                        oblique,
-                        monospace: PatternMatch::False,
-                        unicode_ranges: Vec::new(),
-                        ..Default::default()
-                    },
-                };
-
-                let mut found = Vec::new();
-                for (stored_pattern, id) in idx.patterns.iter() {
-                    if FcFontCache::query_matches_internal(stored_pattern, &pattern, &mut trace) {
-                        let meta = idx.metadata.get(id).unwrap_or(stored_pattern);
-                        found.push(FontMatch {
-                            id: *id,
-                            unicode_ranges: meta.unicode_ranges.clone(),
-                            fallbacks: Vec::new(),
-                        });
-                    }
-                }
-                if found.len() > 5 {
-                    found.truncate(5);
-                }
-                found
-            } else {
-                // Specific font: use token-based fuzzy matching
-                self.fuzzy_query_by_name_internal(
-                    family,
-                    weight,
-                    italic,
-                    oblique,
-                    &idx,
-                    &memory_fonts,
-                )
-            };
-
-            css_fallbacks.push(CssFallbackGroup {
-                css_name: family.clone(),
-                fonts: matches,
-            });
-        }
-
-        FontFallbackChain {
-            css_fallbacks,
-            unicode_fallbacks: Vec::new(),
-            original_stack: font_families.to_vec(),
-        }
-    }
-
-    /// Token-based fuzzy matching (same algorithm as FcFontCache but using read locks).
-    fn fuzzy_query_by_name_internal(
-        &self,
-        requested_name: &str,
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        font_index: &FontIndex,
-        _memory_fonts: &BTreeMap<FontId, FcFont>,
-    ) -> Vec<FontMatch> {
-        let metadata_map = &font_index.metadata;
-        let token_index = &font_index.token_index;
-        let font_tokens_map = &font_index.font_tokens;
-        let tokens = FcFontCache::extract_font_name_tokens(requested_name);
-        if tokens.is_empty() {
-            return Vec::new();
-        }
-
-        let tokens_lower: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
-
-        // Progressive token matching
-        let first_token = &tokens_lower[0];
-        let mut candidate_ids = match token_index.get(first_token) {
-            Some(ids) if !ids.is_empty() => ids.clone(),
-            _ => return Vec::new(),
-        };
-
-        for token in &tokens_lower[1..] {
-            if let Some(token_ids) = token_index.get(token) {
-                let intersection: BTreeSet<FontId> =
-                    candidate_ids.intersection(token_ids).copied().collect();
-                if intersection.is_empty() {
-                    break;
-                }
-                candidate_ids = intersection;
-            } else {
-                break;
-            }
-        }
-
-        let mut candidates = Vec::new();
-        for id in candidate_ids {
-            let pattern = match metadata_map.get(&id) {
-                Some(p) => p,
-                None => continue,
-            };
-            let ft = match font_tokens_map.get(&id) {
-                Some(t) => t,
-                None => continue,
-            };
-            if ft.is_empty() {
-                continue;
-            }
-
-            let token_matches = tokens_lower
-                .iter()
-                .filter(|req_token| ft.iter().any(|font_token| font_token.contains(req_token.as_str())))
-                .count();
-            if token_matches == 0 {
-                continue;
-            }
-
-            let token_similarity = (token_matches * 100 / tokens.len()) as i32;
-            let style_score = FcFontCache::calculate_style_score(
-                &FcPattern {
-                    weight,
-                    italic,
-                    oblique,
-                    ..Default::default()
-                },
-                pattern,
-            );
-
-            candidates.push((id, token_similarity, style_score, pattern.clone()));
-        }
-
-        candidates.sort_by(|a, b| {
-            b.1.cmp(&a.1) // Token similarity (higher is better)
-                .then_with(|| a.2.cmp(&b.2)) // Style score (lower is better)
-                .then_with(|| a.3.italic.cmp(&b.3.italic)) // Prefer non-italic (False < True)
-                .then_with(|| a.3.name.cmp(&b.3.name)) // Alphabetical tiebreaker
-        });
-        candidates.truncate(5);
-
-        candidates
-            .into_iter()
-            .map(|(id, _, _, pattern)| FontMatch {
-                id,
-                unicode_ranges: pattern.unicode_ranges.clone(),
-                fallbacks: Vec::new(),
             })
             .collect()
     }
@@ -919,10 +605,8 @@ fn scout_thread(registry: &FcFontRegistry) {
         collect_font_files_recursive(dir_path, &mut all_font_paths);
     }
 
-    // Determine common OS fonts for high priority
     let common_families = get_common_font_families_for_os(registry.os);
 
-    // Populate known_paths and build queue
     {
         let mut known_paths = registry.known_paths.write().unwrap();
         let mut queue = registry.build_queue.lock().unwrap();
@@ -950,7 +634,6 @@ fn scout_thread(registry: &FcFontRegistry) {
             });
         }
 
-        // Sort queue so highest priority is at the end (pop from end)
         queue.sort();
     }
 
@@ -1004,7 +687,6 @@ fn guess_family_from_filename(path: &PathBuf) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    // Strip common style suffixes
     let cleaned = stem
         .replace("-Regular", "")
         .replace("-Bold", "")
@@ -1031,7 +713,6 @@ fn guess_family_from_filename(path: &PathBuf) -> String {
         .replace("Black", "")
         .replace("Oblique", "");
 
-    // Remove non-alphanumeric, lowercase
     cleaned
         .chars()
         .filter(|c| c.is_alphanumeric())
@@ -1055,8 +736,6 @@ fn get_font_directories() -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        // Parse /etc/fonts/fonts.conf for font directories
-        // For simplicity, use the common locations directly
         dirs.push(PathBuf::from("/usr/share/fonts"));
         dirs.push(PathBuf::from("/usr/local/share/fonts"));
         if let Ok(home) = std::env::var("HOME") {
@@ -1156,7 +835,6 @@ fn builder_thread(registry: &FcFontRegistry) {
                 // If scan is complete and queue is empty, we're done
                 if registry.scan_complete.load(Ordering::Acquire) && queue.is_empty() {
                     registry.build_complete.store(true, Ordering::Release);
-                    // Signal any waiting requests that we're done
                     registry.request_complete.notify_all();
                     return;
                 }
@@ -1239,8 +917,8 @@ impl FcFontRegistry {
     /// Load font metadata from the on-disk cache.
     ///
     /// Reads and deserializes the bincode font manifest from the platform
-    /// cache directory, then populates the registry with all cached patterns,
-    /// font paths, and token indices. Marks all cached file paths as
+    /// cache directory, then populates the inner `FcFontCache` with all cached
+    /// patterns, font paths, and token indices. Marks all cached file paths as
     /// processed/completed so builder threads skip them.
     ///
     /// Returns `Some(())` on success, `None` if the cache is missing,
@@ -1256,7 +934,7 @@ impl FcFontRegistry {
             return None;
         }
 
-        let mut idx = self.font_index.write().ok()?;
+        let mut cache = self.cache.write().ok()?;
         let mut processed = self.processed_paths.lock().ok()?;
         let mut completed = self.completed_paths.lock().ok()?;
 
@@ -1269,14 +947,15 @@ impl FcFontRegistry {
             })
             .for_each(|(path_str, idx_entry)| {
                 let id = FontId::new();
-                Self::index_pattern_tokens_static(&mut idx, &idx_entry.pattern, id);
-                idx.patterns.insert(idx_entry.pattern.clone(), id);
-                idx.disk_fonts.insert(id, FcFontPath {
+                cache.index_pattern_tokens(&idx_entry.pattern, id);
+                cache.patterns.insert(idx_entry.pattern.clone(), id);
+                cache.disk_fonts.insert(id, FcFontPath {
                     path: path_str.clone(),
                     font_index: idx_entry.font_index,
                 });
-                idx.metadata.insert(id, idx_entry.pattern.clone());
+                cache.metadata.insert(id, idx_entry.pattern.clone());
             });
+
         self.cache_loaded.store(true, Ordering::Release);
 
         Some(())
@@ -1302,13 +981,13 @@ impl FcFontRegistry {
         let cache_path = get_font_cache_path()?;
         std::fs::create_dir_all(cache_path.parent()?).ok()?;
 
-        let idx = self.font_index.read().ok()?;
+        let cache = self.cache.read().ok()?;
 
         let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
 
-        idx.disk_fonts.iter()
+        cache.disk_fonts.iter()
             .filter_map(|(id, font_path)| {
-                idx.metadata.get(id).map(|pattern| (font_path, pattern))
+                cache.metadata.get(id).map(|pattern| (font_path, pattern))
             })
             .for_each(|(font_path, pattern)| {
                 entries
@@ -1376,7 +1055,3 @@ fn get_cache_base_dir() -> Option<PathBuf> {
 fn get_cache_base_dir() -> Option<PathBuf> {
     None
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-use crate::utils::normalize_family_name;

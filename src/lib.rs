@@ -1133,7 +1133,7 @@ pub struct FcFontCache {
     pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
     // Font fallback chain cache (CSS stack + unicode -> resolved chain)
     #[cfg(feature = "std")]
-    chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
+    pub(crate) chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
 }
 
 impl Clone for FcFontCache {
@@ -1168,7 +1168,7 @@ impl Default for FcFontCache {
 
 impl FcFontCache {
     /// Helper method to add a font pattern to the token index
-    fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
+    pub(crate) fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
         // Extract tokens from both name and family
         let mut all_tokens = Vec::new();
         
