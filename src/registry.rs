@@ -249,7 +249,7 @@ impl FcFontRegistry {
         // Spawn Scout thread
         let registry = Arc::clone(self);
         std::thread::Builder::new()
-            .name("azul-font-scout".to_string())
+            .name("rfc-font-scout".to_string())
             .spawn(move || {
                 scout_thread(&registry);
             })
@@ -259,7 +259,7 @@ impl FcFontRegistry {
         for i in 0..num_threads {
             let registry = Arc::clone(self);
             std::thread::Builder::new()
-                .name(format!("azul-font-builder-{}", i))
+                .name(format!("rfc-font-builder-{}", i))
                 .spawn(move || {
                     builder_thread(&registry);
                 })
@@ -309,7 +309,7 @@ impl FcFontRegistry {
         while !self.scan_complete.load(Ordering::Acquire) {
             if Instant::now() >= deadline {
                 eprintln!(
-                    "[azul-font-registry] WARNING: Timed out waiting for font scout (5s). \
+                    "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
                      Proceeding with available fonts."
                 );
                 return self.resolve_chains(&expanded_stacks);
@@ -465,7 +465,7 @@ impl FcFontRegistry {
                 }
                 if Instant::now() >= deadline {
                     eprintln!(
-                        "[azul-font-registry] WARNING: Timed out waiting for font files (5s). \
+                        "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
                          Proceeding with available fonts."
                     );
                     break;
@@ -1440,10 +1440,10 @@ fn get_font_cache_path() -> Option<PathBuf> {
     Some(base.join("fonts").join("manifest.bin"))
 }
 
-/// Get the base cache directory for azul.
+/// Get the base cache directory for rust-fontconfig.
 #[cfg(feature = "cache")]
 fn get_cache_base_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("azul"))
+    dirs::cache_dir().map(|d| d.join("rfc"))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

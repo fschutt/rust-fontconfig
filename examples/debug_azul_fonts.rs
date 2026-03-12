@@ -4,7 +4,7 @@
 //! When querying "System Font" with italic=False, the result should
 //! ALWAYS be a non-italic font, regardless of font discovery order.
 //!
-//! Run with: cargo run --example debug_azul_fonts --features "std,parsing,cache"
+//! Run with: cargo run --example debug_azul_fonts --features "std,parsing"
 
 use rust_fontconfig::{FcFontCache, FcPattern, FcWeight, PatternMatch};
 
@@ -49,7 +49,7 @@ fn main() {
     }
     println!();
     
-    // Query "System Font" with italic=False (what azul does for button text)
+    // Query "System Font" with italic=False
     let families = vec!["System Font".to_string()];
     let mut trace = Vec::new();
     
