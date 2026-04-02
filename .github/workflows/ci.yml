@@ -197,6 +197,12 @@ jobs:
       if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
       shell: cmd
       run: |
+        echo === Debug: working directory and files ===
+        cd
+        dir *.exe *.dll 2>nul || echo No exe/dll in current dir
+        dir target\release\*.exe 2>nul || echo No exe in target\release
+        dir target\release\*.dll 2>nul || echo No dll in target\release
+        echo.
         echo === Old API example ===
         .\example.exe list
         echo.
