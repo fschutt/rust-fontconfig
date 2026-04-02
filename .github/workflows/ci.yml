@@ -101,28 +101,31 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: sudo apt-get update && sudo apt-get install -y build-essential
     
-    - name: Build C example (Unix-like)
+    - name: Build C examples (Unix-like)
       if: matrix.os != 'windows-latest'
       run: |
         gcc -Wall -o example ffi/example.c -Iinclude -L./target/release -lrust_fontconfig
+        gcc -Wall -o example_registry ffi/example_registry.c -Iinclude -L./target/release -lrust_fontconfig
         cp target/release/${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.static_ext }} .
         cp target/release/${{ matrix.lib_prefix }}rust_fontconfig${{ matrix.dynamic_ext }} .
-      
-    - name: Build C example (Windows MSVC)
+
+    - name: Build C examples (Windows MSVC)
       if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
       run: |
         cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I include /link /LIBPATH:target/release rust_fontconfig.dll.lib
+        cl.exe /W4 /EHsc /Fe:example_registry.exe ffi/example_registry.c /I include /link /LIBPATH:target/release rust_fontconfig.dll.lib
         copy target\release\rust_fontconfig.lib .
         copy target\release\rust_fontconfig.dll .
         copy target\release\rust_fontconfig.dll.lib .
         dir
       shell: cmd
 
-    - name: Build C example (Windows GCC)
+    - name: Build C examples (Windows GCC)
       if: matrix.os == 'windows-latest' && matrix.compiler == 'gcc'
       shell: bash
       run: |
         gcc -Wall -o example.exe ffi/example.c -Iinclude -L./target/x86_64-pc-windows-gnu/release -lrust_fontconfig
+        gcc -Wall -o example_registry.exe ffi/example_registry.c -Iinclude -L./target/x86_64-pc-windows-gnu/release -lrust_fontconfig
         cp target/x86_64-pc-windows-gnu/release/librust_fontconfig.a .
         cp target/x86_64-pc-windows-gnu/release/rust_fontconfig.dll .
         ls -la
@@ -137,16 +140,28 @@ jobs:
       run: echo "DYLD_LIBRARY_PATH=$(pwd):$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
       shell: bash
 
-    - name: Run C example (Unix-like)
+    - name: Run C examples (Unix-like)
       if: matrix.os != 'windows-latest'
       run: |
         ./example || echo "Example exited with status $?"
+        echo "--- Running registry example (demo 1) ---"
+        ./example_registry 1 || echo "Registry example exited with status $?"
+        echo "--- Running registry example (demo 2) ---"
+        ./example_registry 2 || echo "Registry example exited with status $?"
+        echo "--- Running registry example (demo 3) ---"
+        ./example_registry 3 || echo "Registry example exited with status $?"
       shell: bash
-    
-    - name: Run C example (Windows)
+
+    - name: Run C examples (Windows)
       if: matrix.os == 'windows-latest'
       run: |
         .\example.exe help || echo "Example exited with status %ERRORLEVEL%"
+        echo --- Running registry example (demo 1) ---
+        .\example_registry.exe 1 || echo "Registry example exited with status %ERRORLEVEL%"
+        echo --- Running registry example (demo 2) ---
+        .\example_registry.exe 2 || echo "Registry example exited with status %ERRORLEVEL%"
+        echo --- Running registry example (demo 3) ---
+        .\example_registry.exe 3 || echo "Registry example exited with status %ERRORLEVEL%"
       shell: cmd
       continue-on-error: true
     
@@ -175,10 +190,12 @@ jobs:
         name: headers-${{ matrix.os }}-${{ matrix.compiler }}
         path: include/
     
-    - name: Upload C example
+    - name: Upload C examples
       uses: actions/upload-artifact@v4
       with:
-        name: example-${{ matrix.os }}-${{ matrix.compiler }}
+        name: examples-${{ matrix.os }}-${{ matrix.compiler }}
         path: |
           example${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          example_registry${{ matrix.os == 'windows-latest' && '.exe' || '' }}
           ffi/example.c
+          ffi/example_registry.c
