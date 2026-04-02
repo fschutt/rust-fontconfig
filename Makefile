@@ -36,11 +36,11 @@ endif
 
 .PHONY: all clean linux mac win
 
-linux: $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) example
+linux: $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) example example_registry
 
-mac: $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) example
+mac: $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT) example example_registry
 
-win: $(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT) example.exe
+win: $(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT) example.exe example_registry.exe
 
 # Linux build
 $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT): src/ffi.rs
@@ -58,9 +58,15 @@ $(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT): src/ffi.rs
 example: ffi/example.c include/rust_fontconfig.h $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT)
 	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -o $@ $< $(LDFLAGS)
 
+example_registry: ffi/example_registry.c include/rust_fontconfig.h $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT)
+	$(CC) $(CFLAGS) -I$(INCLUDE_DIR) -o $@ $< $(LDFLAGS)
+
 # Example build - Windows
 example.exe: ffi/example.c include/rust_fontconfig.h $(LIB_NAME)$(STATIC_EXT)
 	cl.exe /W4 /EHsc /Fe:example.exe ffi/example.c /I$(INCLUDE_DIR) /link /LIBPATH:. $(LIB_NAME)$(STATIC_EXT)
+
+example_registry.exe: ffi/example_registry.c include/rust_fontconfig.h $(LIB_NAME)$(STATIC_EXT)
+	cl.exe /W4 /EHsc /Fe:example_registry.exe ffi/example_registry.c /I$(INCLUDE_DIR) /link /LIBPATH:. $(LIB_NAME)$(STATIC_EXT)
 
 # Header file
 include/rust_fontconfig.h: ffi/rust_fontconfig.h
@@ -68,7 +74,7 @@ include/rust_fontconfig.h: ffi/rust_fontconfig.h
 	cp ffi/rust_fontconfig.h include/
 
 clean:
-	rm -f example example.exe
+	rm -f example example.exe example_registry example_registry.exe
 	rm -f $(LIB_PREFIX)$(LIB_NAME)$(STATIC_EXT) $(LIB_PREFIX)$(LIB_NAME)$(DYNAMIC_EXT)
 	rm -f $(LIB_NAME)$(STATIC_EXT) $(LIB_NAME)$(DYNAMIC_EXT)
 	cargo clean

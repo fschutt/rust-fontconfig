@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "2.0.0"
+version = "3.0.0"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -15,21 +15,53 @@ name = "rust_fontconfig"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-xmlparser = { version = "0.13.3", default-features = false }
-rayon = { version = "1.5.0", default-features = false, optional = true }
 allsorts = { version = "0.16.1", default-features = false, features = ["flate2_rust"], optional = true }
-base64 = "0.22.1"
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }
+dirs = { version = "6", optional = true }
 
+# Linux-only: fonts.conf XML parsing
+[target.'cfg(target_os="linux")'.dependencies]
+xmlparser = { version = "0.13.6", default-features = false }
+
+# Not available on WASM
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 mmapio = { version = "0.9.1", default-features = false, optional = true }
+rayon = { version = "1.11.0", default-features = false, optional = true }
 
 [features]
 default = ["std", "parsing", "multithreading"]
 std = ["mmapio"]
 multithreading = ["rayon"]
-parsing = ["allsorts"]
-ffi = ["parsing", "std"]
-cache = ["serde", "bincode", "std"]
+parsing = ["allsorts", "std"]
+ffi = ["parsing", "std", "async-registry"]
+cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
+
+[[example]]
+name = "registry"
+required-features = ["async-registry"]
+
+[[example]]
+name = "getfont"
+required-features = ["parsing"]
+
+[[example]]
+name = "query"
+required-features = ["parsing"]
+
+[[example]]
+name = "character_resolution"
+required-features = ["parsing"]
+
+[[example]]
+name = "debug_azul_fonts"
+required-features = ["parsing"]
+
+[[example]]
+name = "integration_api"
+required-features = ["parsing"]
+
+[[example]]
+name = "unicode_aware_fonts"
+required-features = ["parsing"]
