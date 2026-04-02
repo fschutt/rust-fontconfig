@@ -1421,12 +1421,14 @@ pub extern "C" fn fc_registry_request_fonts(
 
         let chains = registry.request_fonts(&rust_stacks);
 
-        let chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
+        let mut chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
             .into_iter()
             .map(|chain| {
                 Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
             })
             .collect();
+        // shrink_to_fit guarantees capacity == len, which free_raw_vec requires
+        chain_ptrs.shrink_to_fit();
 
         let (ptr, len) = vec_into_raw_parts(chain_ptrs);
         *out_count = len;

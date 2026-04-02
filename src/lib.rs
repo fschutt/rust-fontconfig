@@ -684,6 +684,7 @@ impl Default for FcStretch {
 }
 
 /// Unicode range representation for font matching
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnicodeRange {
