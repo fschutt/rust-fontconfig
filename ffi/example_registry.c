@@ -147,11 +147,13 @@ static void demo_multilingual(void) {
     if (chains && num_chains > 0) {
         FcFontCache cache = fc_registry_snapshot(registry);
 
-        /* Test with various scripts */
+        /* Test with various scripts — these should split into multiple
+           font runs when different scripts need different fonts */
         const char* texts[] = {
-            "Hello World",
-            "Bonjour le monde",
-            "Hallo Welt",
+            "Hello \xe4\xb8\x96\xe7\x95\x8c",                     /* "Hello 世界" (Latin + CJK) */
+            "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 World",  /* "Привет World" (Cyrillic + Latin) */
+            "Mixed: ABC \xe4\xb8\xad\xe6\x96\x87 123",            /* "Mixed: ABC 中文 123" */
+            "Hello World",                                          /* Pure Latin baseline */
         };
         size_t num_texts = sizeof(texts) / sizeof(texts[0]);
 
