@@ -75,15 +75,15 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
-#[cfg(feature = "parsing")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::binary::read::ReadScope;
 #[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::get_name::fontcode_get_name;
-#[cfg(feature = "parsing")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::tables::os2::Os2;
-#[cfg(feature = "parsing")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
-#[cfg(feature = "parsing")]
+#[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::tag;
 #[cfg(all(feature = "std", feature = "parsing"))]
 use std::path::PathBuf;

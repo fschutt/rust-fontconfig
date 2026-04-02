@@ -30,9 +30,14 @@ jobs:
     - uses: actions/checkout@v4
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
+    - name: Check (rlib only)
+      if: "!contains(matrix.features, 'std') && matrix.features != '' && matrix.features != '--all-features'"
+      run: cargo check --lib ${{ matrix.features }}
     - name: Check
+      if: contains(matrix.features, 'std') || matrix.features == '' || matrix.features == '--all-features'
       run: cargo check ${{ matrix.features }}
     - name: Build
+      if: contains(matrix.features, 'std') || matrix.features == '' || matrix.features == '--all-features'
       run: cargo build ${{ matrix.features }}
     - name: Test
       if: contains(matrix.features, 'std') || matrix.features == '' || matrix.features == '--all-features'
@@ -197,21 +202,19 @@ jobs:
 
     - name: Run C examples (Windows MSVC)
       if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
-      shell: bash
+      shell: cmd
       run: |
-        set -e
-        echo "=== Old API example ==="
-        ./example.exe list | head -20
-        echo "..."
-        echo ""
-        echo "=== Registry example: Demo 1 ==="
-        ./example_registry.exe 1
-        echo ""
-        echo "=== Registry example: Demo 2 ==="
-        ./example_registry.exe 2
-        echo ""
-        echo "=== Registry example: Demo 3 ==="
-        ./example_registry.exe 3
+        echo === Old API example ===
+        example.exe list
+        echo.
+        echo === Registry example: Demo 1 ===
+        example_registry.exe 1
+        echo.
+        echo === Registry example: Demo 2 ===
+        example_registry.exe 2
+        echo.
+        echo === Registry example: Demo 3 ===
+        example_registry.exe 3
 
     - name: Run C examples (Windows GCC)
       if: matrix.os == 'windows-latest' && matrix.compiler == 'gcc'
