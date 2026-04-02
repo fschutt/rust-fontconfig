@@ -53,6 +53,29 @@ static void print_font_path(FcFontRegistry registry, const FcFontId* id) {
     }
 }
 
+static void print_render_config(const FcFontRenderConfig* rc) {
+    const char* hintstyles[] = {"none", "slight", "medium", "full"};
+    const char* rgbas[] = {"unknown", "rgb", "bgr", "vrgb", "vbgr", "none"};
+    const char* lcdfilters[] = {"none", "default", "light", "legacy"};
+
+    int any = 0;
+    if (rc->antialias >= 0)     { printf("      antialias:     %s\n", rc->antialias ? "true" : "false"); any = 1; }
+    if (rc->hinting >= 0)       { printf("      hinting:       %s\n", rc->hinting ? "true" : "false"); any = 1; }
+    if (rc->hintstyle >= 0 && rc->hintstyle <= 3)
+                                { printf("      hintstyle:     %s\n", hintstyles[rc->hintstyle]); any = 1; }
+    if (rc->autohint >= 0)      { printf("      autohint:      %s\n", rc->autohint ? "true" : "false"); any = 1; }
+    if (rc->rgba >= 0 && rc->rgba <= 5)
+                                { printf("      rgba:          %s\n", rgbas[rc->rgba]); any = 1; }
+    if (rc->lcdfilter >= 0 && rc->lcdfilter <= 3)
+                                { printf("      lcdfilter:     %s\n", lcdfilters[rc->lcdfilter]); any = 1; }
+    if (rc->embeddedbitmap >= 0){ printf("      embeddedbitmap:%s\n", rc->embeddedbitmap ? "true" : "false"); any = 1; }
+    if (rc->embolden >= 0)      { printf("      embolden:      %s\n", rc->embolden ? "true" : "false"); any = 1; }
+    if (rc->dpi >= 0.0)         { printf("      dpi:           %.1f\n", rc->dpi); any = 1; }
+    if (rc->scale >= 0.0)       { printf("      scale:         %.2f\n", rc->scale); any = 1; }
+    if (rc->minspace >= 0)      { printf("      minspace:      %s\n", rc->minspace ? "true" : "false"); any = 1; }
+    if (!any)                   { printf("      (all defaults — no per-font overrides from fonts.conf)\n"); }
+}
+
 static void print_runs(FcFontChain chain, FcFontCache cache,
                         FcFontRegistry registry, const char* text) {
     size_t runs_count = 0;
@@ -209,6 +232,23 @@ static void demo_azul_pattern(void) {
                " World");
     print_runs(chains[0], cache, registry,
                "caf\xc3\xa9 na\xc3\xafve r\xc3\xa9sum\xc3\xa9");    /* café naïve résumé */
+
+    /* Show render config for Arial */
+    printf("  Per-font render config (from fonts.conf on Linux):\n\n");
+    FcPattern* query = fc_pattern_new();
+    fc_pattern_set_name(query, "Arial");
+    FcTraceMsg* trace = NULL;
+    size_t trace_count = 0;
+    FcFontMatch* match = fc_cache_query(cache, query, &trace, &trace_count);
+    if (match) {
+        printf("    Arial render config (from fonts.conf on Linux):\n");
+        FcFontRenderConfig rc = fc_cache_get_render_config(cache, &match->id);
+        print_render_config(&rc);
+        fc_font_match_free(match);
+    }
+    fc_trace_free(trace, trace_count);
+    fc_pattern_free(query);
+    printf("\n");
 
     /* ── Phase 4: Background loading continues ──────────────────────── */
     printf("--- Phase 4: Background Status ---\n\n");

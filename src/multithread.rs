@@ -3,7 +3,6 @@
 //! - [`FcFontRegistry::scout_thread`]: Enumerates font directories and populates the build queue.
 //! - [`FcFontRegistry::builder_thread`]: Pops jobs from the queue, parses fonts, inserts results.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use std::path::PathBuf;
@@ -14,7 +13,6 @@ use crate::config;
 use crate::registry::FcFontRegistry;
 use crate::scoring::{assign_scout_priority, FcBuildJob};
 use crate::utils::is_font_file;
-use crate::FcFontCache;
 use crate::FcParseFont;
 
 impl FcFontRegistry {

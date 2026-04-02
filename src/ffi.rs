@@ -93,6 +93,72 @@ pub struct FcFontMetadataC {
     version: *mut c_char,
 }
 
+/// C-compatible render config (uses -1 for "unset" instead of Option)
+#[repr(C)]
+pub struct FcFontRenderConfigC {
+    antialias: i32,      // -1=unset, 0=false, 1=true
+    hinting: i32,
+    hintstyle: i32,      // -1=unset, or FcHintStyle value
+    autohint: i32,
+    rgba: i32,           // -1=unset, or FcRgba value
+    lcdfilter: i32,      // -1=unset, or FcLcdFilter value
+    embeddedbitmap: i32,
+    embolden: i32,
+    dpi: f64,            // -1.0=unset
+    scale: f64,          // -1.0=unset
+    minspace: i32,
+}
+
+fn render_config_to_c(rc: &FcFontRenderConfig) -> FcFontRenderConfigC {
+    fn bool_opt(v: Option<bool>) -> i32 {
+        match v { Some(true) => 1, Some(false) => 0, None => -1 }
+    }
+    FcFontRenderConfigC {
+        antialias: bool_opt(rc.antialias),
+        hinting: bool_opt(rc.hinting),
+        hintstyle: rc.hintstyle.map(|v| v as i32).unwrap_or(-1),
+        autohint: bool_opt(rc.autohint),
+        rgba: rc.rgba.map(|v| v as i32).unwrap_or(-1),
+        lcdfilter: rc.lcdfilter.map(|v| v as i32).unwrap_or(-1),
+        embeddedbitmap: bool_opt(rc.embeddedbitmap),
+        embolden: bool_opt(rc.embolden),
+        dpi: rc.dpi.unwrap_or(-1.0),
+        scale: rc.scale.unwrap_or(-1.0),
+        minspace: bool_opt(rc.minspace),
+    }
+}
+
+fn c_to_render_config(rc: &FcFontRenderConfigC) -> FcFontRenderConfig {
+    fn int_bool(v: i32) -> Option<bool> {
+        match v { 0 => Some(false), 1 => Some(true), _ => None }
+    }
+    FcFontRenderConfig {
+        antialias: int_bool(rc.antialias),
+        hinting: int_bool(rc.hinting),
+        hintstyle: match rc.hintstyle {
+            0 => Some(FcHintStyle::None), 1 => Some(FcHintStyle::Slight),
+            2 => Some(FcHintStyle::Medium), 3 => Some(FcHintStyle::Full),
+            _ => None,
+        },
+        autohint: int_bool(rc.autohint),
+        rgba: match rc.rgba {
+            0 => Some(FcRgba::Unknown), 1 => Some(FcRgba::Rgb), 2 => Some(FcRgba::Bgr),
+            3 => Some(FcRgba::Vrgb), 4 => Some(FcRgba::Vbgr), 5 => Some(FcRgba::None),
+            _ => None,
+        },
+        lcdfilter: match rc.lcdfilter {
+            0 => Some(FcLcdFilter::None), 1 => Some(FcLcdFilter::Default),
+            2 => Some(FcLcdFilter::Light), 3 => Some(FcLcdFilter::Legacy),
+            _ => None,
+        },
+        embeddedbitmap: int_bool(rc.embeddedbitmap),
+        embolden: int_bool(rc.embolden),
+        dpi: if rc.dpi < 0.0 { None } else { Some(rc.dpi) },
+        scale: if rc.scale < 0.0 { None } else { Some(rc.scale) },
+        minspace: int_bool(rc.minspace),
+    }
+}
+
 /// C-compatible pattern for matching
 #[repr(C)]
 pub struct FcPatternC {
@@ -108,6 +174,7 @@ pub struct FcPatternC {
     unicode_ranges: *mut UnicodeRange,
     unicode_ranges_count: usize,
     metadata: FcFontMetadataC,
+    render_config: FcFontRenderConfigC,
 }
 
 /// Reason type for trace messages
@@ -304,6 +371,7 @@ fn pattern_to_c(pattern: &FcPattern) -> FcPatternC {
         unicode_ranges,
         unicode_ranges_count,
         metadata,
+        render_config: render_config_to_c(&pattern.render_config),
     }
 }
 
@@ -334,6 +402,7 @@ unsafe fn c_to_pattern(pattern: *const FcPatternC) -> FcPattern {
         stretch: pattern.stretch,
         unicode_ranges,
         metadata,
+        render_config: c_to_render_config(&pattern.render_config),
     }
 }
 
@@ -931,6 +1000,45 @@ pub extern "C" fn fc_cache_get_font_metadata(
 
         // Create metadata from pattern
         Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
+    }
+}
+
+/// Get per-font render config by font ID
+#[no_mangle]
+pub extern "C" fn fc_cache_get_render_config(
+    cache: *const FcFontCache,
+    id: *const FcFontIdC,
+) -> FcFontRenderConfigC {
+    let default = render_config_to_c(&FcFontRenderConfig::default());
+    if cache.is_null() || id.is_null() {
+        return default;
+    }
+    unsafe {
+        let cache = &*cache;
+        let id_rust = FontId::from_fontid_c(&*id);
+        cache.get_metadata_by_id(&id_rust)
+            .map(|p| render_config_to_c(&p.render_config))
+            .unwrap_or(default)
+    }
+}
+
+/// Get per-font render config by font ID from the registry
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_get_render_config(
+    registry: *const Arc<FcFontRegistry>,
+    id: *const FcFontIdC,
+) -> FcFontRenderConfigC {
+    let default = render_config_to_c(&FcFontRenderConfig::default());
+    if registry.is_null() || id.is_null() {
+        return default;
+    }
+    unsafe {
+        let registry = &*registry;
+        let id_rust = FontId::from_fontid_c(&*id);
+        registry.get_metadata_by_id(&id_rust)
+            .map(|p| render_config_to_c(&p.render_config))
+            .unwrap_or(default)
     }
 }
 

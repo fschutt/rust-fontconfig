@@ -97,7 +97,62 @@
      char* unique_id;
      char* version;
  } FcFontMetadata;
- 
+
+ /**
+  * Hinting style for font rendering (from Linux fonts.conf)
+  */
+ typedef enum {
+     FC_HINT_NONE = 0,
+     FC_HINT_SLIGHT = 1,
+     FC_HINT_MEDIUM = 2,
+     FC_HINT_FULL = 3
+ } FcHintStyle;
+
+ /**
+  * Subpixel rendering order (from Linux fonts.conf)
+  */
+ typedef enum {
+     FC_RGBA_UNKNOWN = 0,
+     FC_RGBA_RGB = 1,
+     FC_RGBA_BGR = 2,
+     FC_RGBA_VRGB = 3,
+     FC_RGBA_VBGR = 4,
+     FC_RGBA_NONE = 5
+ } FcRgba;
+
+ /**
+  * LCD filter mode for subpixel rendering (from Linux fonts.conf)
+  */
+ typedef enum {
+     FC_LCD_NONE = 0,
+     FC_LCD_DEFAULT = 1,
+     FC_LCD_LIGHT = 2,
+     FC_LCD_LEGACY = 3
+ } FcLcdFilter;
+
+ /**
+  * Per-font rendering configuration from system font config.
+  *
+  * On Linux, populated from fonts.conf <match target="font"> rules.
+  * On other platforms, all fields are -1 (unset).
+  *
+  * A value of -1 means "use system default" for integer fields.
+  * For double fields, -1.0 means "use system default".
+  */
+ typedef struct {
+     int antialias;          /**< -1=unset, 0=false, 1=true */
+     int hinting;            /**< -1=unset, 0=false, 1=true */
+     int hintstyle;          /**< -1=unset, or FcHintStyle value */
+     int autohint;           /**< -1=unset, 0=false, 1=true */
+     int rgba;               /**< -1=unset, or FcRgba value */
+     int lcdfilter;          /**< -1=unset, or FcLcdFilter value */
+     int embeddedbitmap;     /**< -1=unset, 0=false, 1=true */
+     int embolden;           /**< -1=unset, 0=false, 1=true */
+     double dpi;             /**< -1.0=unset, or positive DPI value */
+     double scale;           /**< -1.0=unset, or positive scale factor */
+     int minspace;           /**< -1=unset, 0=false, 1=true */
+ } FcFontRenderConfig;
+
  /**
   * Font pattern for matching
   */
@@ -114,6 +169,7 @@
      FcUnicodeRange* unicode_ranges;
      size_t unicode_ranges_count;
      FcFontMetadata metadata;
+     FcFontRenderConfig render_config;
  } FcPattern;
  
  /**
@@ -508,6 +564,13 @@
   */
  void fc_font_metadata_free(FcFontMetadata* metadata);
 
+ /**
+  * Get per-font render config by font ID.
+  * Returns a struct with -1 values for unset fields.
+  * On non-Linux, all fields are -1 (system defaults).
+  */
+ FcFontRenderConfig fc_cache_get_render_config(FcFontCache cache, const FcFontId* id);
+
  /* ============================================================================
   * Trace and Debug
   * ============================================================================ */
@@ -694,6 +757,11 @@
   * @return Font cache (must be freed with fc_cache_free)
   */
  FcFontCache fc_registry_snapshot(FcFontRegistry registry);
+
+ /**
+  * Get per-font render config by font ID from the registry.
+  */
+ FcFontRenderConfig fc_registry_get_render_config(FcFontRegistry registry, const FcFontId* id);
 
  #ifdef __cplusplus
  }

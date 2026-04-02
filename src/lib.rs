@@ -785,6 +785,95 @@ pub struct TraceMsg {
     pub reason: MatchReason,
 }
 
+/// Hinting style for font rendering.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
+pub enum FcHintStyle {
+    #[default]
+    None = 0,
+    Slight = 1,
+    Medium = 2,
+    Full = 3,
+}
+
+/// Subpixel rendering order.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
+pub enum FcRgba {
+    #[default]
+    Unknown = 0,
+    Rgb = 1,
+    Bgr = 2,
+    Vrgb = 3,
+    Vbgr = 4,
+    None = 5,
+}
+
+/// LCD filter mode for subpixel rendering.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
+pub enum FcLcdFilter {
+    #[default]
+    None = 0,
+    Default = 1,
+    Light = 2,
+    Legacy = 3,
+}
+
+/// Per-font rendering configuration from system font config (Linux fonts.conf).
+///
+/// All fields are `Option<T>` -- `None` means "use system default".
+/// On non-Linux platforms, this is always all-None (no per-font overrides).
+#[derive(Debug, Default, Clone, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
+pub struct FcFontRenderConfig {
+    pub antialias: Option<bool>,
+    pub hinting: Option<bool>,
+    pub hintstyle: Option<FcHintStyle>,
+    pub autohint: Option<bool>,
+    pub rgba: Option<FcRgba>,
+    pub lcdfilter: Option<FcLcdFilter>,
+    pub embeddedbitmap: Option<bool>,
+    pub embolden: Option<bool>,
+    pub dpi: Option<f64>,
+    pub scale: Option<f64>,
+    pub minspace: Option<bool>,
+}
+
+/// Helper newtype to provide Eq/Ord for Option<f64> via total-order bit comparison.
+/// This allows FcFontRenderConfig to be used inside FcPattern which derives Eq + Ord.
+impl Eq for FcFontRenderConfig {}
+
+impl Ord for FcFontRenderConfig {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        // Compare all non-f64 fields first
+        let ord = self.antialias.cmp(&other.antialias)
+            .then_with(|| self.hinting.cmp(&other.hinting))
+            .then_with(|| self.hintstyle.cmp(&other.hintstyle))
+            .then_with(|| self.autohint.cmp(&other.autohint))
+            .then_with(|| self.rgba.cmp(&other.rgba))
+            .then_with(|| self.lcdfilter.cmp(&other.lcdfilter))
+            .then_with(|| self.embeddedbitmap.cmp(&other.embeddedbitmap))
+            .then_with(|| self.embolden.cmp(&other.embolden))
+            .then_with(|| self.minspace.cmp(&other.minspace));
+
+        // For f64 fields, use to_bits() for total ordering
+        let ord = ord.then_with(|| {
+            let a = self.dpi.map(|v| v.to_bits());
+            let b = other.dpi.map(|v| v.to_bits());
+            a.cmp(&b)
+        });
+        ord.then_with(|| {
+            let a = self.scale.map(|v| v.to_bits());
+            let b = other.scale.map(|v| v.to_bits());
+            a.cmp(&b)
+        })
+    }
+}
+
 /// Font pattern for matching
 #[derive(Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
@@ -812,6 +901,8 @@ pub struct FcPattern {
     pub unicode_ranges: Vec<UnicodeRange>,
     // extended font metadata
     pub metadata: FcFontMetadata,
+    // per-font rendering configuration (from system fonts.conf on Linux)
+    pub render_config: FcFontRenderConfig,
 }
 
 impl core::fmt::Debug for FcPattern {
@@ -862,6 +953,12 @@ impl core::fmt::Debug for FcPattern {
         let empty_metadata = FcFontMetadata::default();
         if self.metadata != empty_metadata {
             d.field("metadata", &self.metadata);
+        }
+
+        // Only show render_config when it differs from default
+        let empty_render_config = FcFontRenderConfig::default();
+        if self.render_config != empty_render_config {
+            d.field("render_config", &self.render_config);
         }
 
         d.finish()
@@ -1353,9 +1450,15 @@ impl FcFontCache {
 
         #[cfg(target_os = "linux")]
         {
-            if let Some(font_entries) = FcScanDirectories() {
-                for (pattern, path) in font_entries {
+            if let Some((font_entries, render_configs)) = FcScanDirectories() {
+                for (mut pattern, path) in font_entries {
                     if matches_filter(&pattern) {
+                        // Apply per-font render config if a matching family rule exists
+                        if let Some(family) = pattern.name.as_ref().or(pattern.family.as_ref()) {
+                            if let Some(rc) = render_configs.get(family) {
+                                pattern.render_config = rc.clone();
+                            }
+                        }
                         let id = FontId::new();
                         cache.patterns.insert(pattern.clone(), id);
                         cache.metadata.insert(id, pattern.clone());
@@ -2478,7 +2581,7 @@ impl FcFontCache {
 }
 
 #[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
-fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
+fn FcScanDirectories() -> Option<(Vec<(FcPattern, FcFontPath)>, BTreeMap<String, FcFontRenderConfig>)> {
     use std::fs;
     use std::path::Path;
 
@@ -2490,6 +2593,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
 
     let mut font_paths = Vec::with_capacity(32);
     let mut paths_to_visit = vec![(None, PathBuf::from(BASE_FONTCONFIG_PATH))];
+    let mut render_configs: BTreeMap<String, FcFontRenderConfig> = BTreeMap::new();
 
     while let Some((prefix, path_to_visit)) = paths_to_visit.pop() {
         let path = match process_path(&prefix, path_to_visit, true) {
@@ -2511,6 +2615,9 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
             if ParseFontsConf(&xml_utf8, &mut paths_to_visit, &mut font_paths).is_none() {
                 continue;
             }
+
+            // Also parse render config blocks from this file
+            ParseFontsConfRenderConfig(&xml_utf8, &mut render_configs);
         } else if metadata.is_dir() {
             let dir_entries = match fs::read_dir(&path) {
                 Ok(dir_entries) => dir_entries,
@@ -2554,7 +2661,7 @@ fn FcScanDirectories() -> Option<Vec<(FcPattern, FcFontPath)>> {
         return None;
     }
 
-    Some(FcScanDirectoriesInner(&font_paths))
+    Some((FcScanDirectoriesInner(&font_paths), render_configs))
 }
 
 // Parses the fonts.conf file
@@ -2662,6 +2769,273 @@ fn ParseFontsConf(
     }
 
     Some(())
+}
+
+/// Parses `<match target="font">` blocks from fonts.conf XML and returns
+/// a map from family name to per-font rendering configuration.
+///
+/// Example fonts.conf snippet that this handles:
+/// ```xml
+/// <match target="font">
+///   <test name="family"><string>Inconsolata</string></test>
+///   <edit name="antialias" mode="assign"><bool>true</bool></edit>
+///   <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+/// </match>
+/// ```
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn ParseFontsConfRenderConfig(
+    input: &str,
+    configs: &mut BTreeMap<String, FcFontRenderConfig>,
+) {
+    use xmlparser::Token::*;
+    use xmlparser::Tokenizer;
+
+    // Parser state machine
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        /// Outside any relevant block
+        Idle,
+        /// Inside <match target="font">
+        InMatchFont,
+        /// Inside <test name="family"> within a match block
+        InTestFamily,
+        /// Inside <edit name="..."> within a match block
+        InEdit,
+        /// Inside a value element (<bool>, <double>, <const>, <string>) within <edit> or <test>
+        InValue,
+    }
+
+    let mut state = State::Idle;
+    let mut match_is_font_target = false;
+    let mut current_family: Option<String> = None;
+    let mut current_edit_name: Option<String> = None;
+    let mut current_value: Option<String> = None;
+    let mut value_tag: Option<String> = None;
+    let mut config = FcFontRenderConfig::default();
+    let mut in_test = false;
+    let mut test_name: Option<String> = None;
+
+    for token_result in Tokenizer::from(input) {
+        let token = match token_result {
+            Ok(token) => token,
+            Err(_) => continue,
+        };
+
+        match token {
+            ElementStart { local, .. } => {
+                let tag = local.as_str();
+                match tag {
+                    "match" => {
+                        // Reset state for a new match block
+                        match_is_font_target = false;
+                        current_family = None;
+                        config = FcFontRenderConfig::default();
+                    }
+                    "test" if state == State::InMatchFont => {
+                        in_test = true;
+                        test_name = None;
+                    }
+                    "edit" if state == State::InMatchFont => {
+                        current_edit_name = None;
+                    }
+                    "bool" | "double" | "const" | "string" | "int" => {
+                        if state == State::InTestFamily || state == State::InEdit {
+                            value_tag = Some(tag.to_owned());
+                            current_value = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Attribute { local, value, .. } => {
+                let attr_name = local.as_str();
+                let attr_value = value.as_str();
+
+                match attr_name {
+                    "target" => {
+                        if attr_value == "font" {
+                            match_is_font_target = true;
+                        }
+                    }
+                    "name" => {
+                        if in_test && state == State::InMatchFont {
+                            test_name = Some(attr_value.to_owned());
+                        } else if state == State::InMatchFont {
+                            current_edit_name = Some(attr_value.to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Text { text, .. } => {
+                let text = text.as_str().trim();
+                if !text.is_empty() && (state == State::InTestFamily || state == State::InEdit) {
+                    current_value = Some(text.to_owned());
+                }
+            }
+            ElementEnd { end, .. } => {
+                match end {
+                    xmlparser::ElementEnd::Open => {
+                        // Tag just opened (after attributes processed)
+                        if match_is_font_target && state == State::Idle {
+                            state = State::InMatchFont;
+                            match_is_font_target = false;
+                        } else if in_test {
+                            if test_name.as_deref() == Some("family") {
+                                state = State::InTestFamily;
+                            }
+                            in_test = false;
+                        } else if current_edit_name.is_some() && state == State::InMatchFont {
+                            state = State::InEdit;
+                        }
+                    }
+                    xmlparser::ElementEnd::Close(_, local) => {
+                        let tag = local.as_str();
+                        match tag {
+                            "match" => {
+                                // End of match block: store config if we have a family
+                                if let Some(family) = current_family.take() {
+                                    let empty = FcFontRenderConfig::default();
+                                    if config != empty {
+                                        configs.insert(family, config.clone());
+                                    }
+                                }
+                                state = State::Idle;
+                                config = FcFontRenderConfig::default();
+                            }
+                            "test" => {
+                                if state == State::InTestFamily {
+                                    // Extract the family name from the value we collected
+                                    if let Some(ref val) = current_value {
+                                        current_family = Some(val.clone());
+                                    }
+                                    state = State::InMatchFont;
+                                }
+                                current_value = None;
+                                value_tag = None;
+                            }
+                            "edit" => {
+                                if state == State::InEdit {
+                                    // Apply the collected value to the config
+                                    if let (Some(ref name), Some(ref val)) = (&current_edit_name, &current_value) {
+                                        apply_edit_value(&mut config, name, val, value_tag.as_deref());
+                                    }
+                                    state = State::InMatchFont;
+                                }
+                                current_edit_name = None;
+                                current_value = None;
+                                value_tag = None;
+                            }
+                            "bool" | "double" | "const" | "string" | "int" => {
+                                // value_tag and current_value already set by Text handler
+                            }
+                            _ => {}
+                        }
+                    }
+                    xmlparser::ElementEnd::Empty => {
+                        // Self-closing tags: nothing to do
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Apply a parsed edit value to the render config.
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn apply_edit_value(
+    config: &mut FcFontRenderConfig,
+    edit_name: &str,
+    value: &str,
+    value_tag: Option<&str>,
+) {
+    match edit_name {
+        "antialias" => {
+            config.antialias = parse_bool_value(value);
+        }
+        "hinting" => {
+            config.hinting = parse_bool_value(value);
+        }
+        "autohint" => {
+            config.autohint = parse_bool_value(value);
+        }
+        "embeddedbitmap" => {
+            config.embeddedbitmap = parse_bool_value(value);
+        }
+        "embolden" => {
+            config.embolden = parse_bool_value(value);
+        }
+        "minspace" => {
+            config.minspace = parse_bool_value(value);
+        }
+        "hintstyle" => {
+            config.hintstyle = parse_hintstyle_const(value);
+        }
+        "rgba" => {
+            config.rgba = parse_rgba_const(value);
+        }
+        "lcdfilter" => {
+            config.lcdfilter = parse_lcdfilter_const(value);
+        }
+        "dpi" => {
+            if let Ok(v) = value.parse::<f64>() {
+                config.dpi = Some(v);
+            }
+        }
+        "scale" => {
+            if let Ok(v) = value.parse::<f64>() {
+                config.scale = Some(v);
+            }
+        }
+        _ => {
+            // Unknown edit property, ignore
+        }
+    }
+}
+
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn parse_bool_value(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn parse_hintstyle_const(value: &str) -> Option<FcHintStyle> {
+    match value {
+        "hintnone" => Some(FcHintStyle::None),
+        "hintslight" => Some(FcHintStyle::Slight),
+        "hintmedium" => Some(FcHintStyle::Medium),
+        "hintfull" => Some(FcHintStyle::Full),
+        _ => None,
+    }
+}
+
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn parse_rgba_const(value: &str) -> Option<FcRgba> {
+    match value {
+        "unknown" => Some(FcRgba::Unknown),
+        "rgb" => Some(FcRgba::Rgb),
+        "bgr" => Some(FcRgba::Bgr),
+        "vrgb" => Some(FcRgba::Vrgb),
+        "vbgr" => Some(FcRgba::Vbgr),
+        "none" => Some(FcRgba::None),
+        _ => None,
+    }
+}
+
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn parse_lcdfilter_const(value: &str) -> Option<FcLcdFilter> {
+    match value {
+        "lcdnone" => Some(FcLcdFilter::None),
+        "lcddefault" => Some(FcLcdFilter::Default),
+        "lcdlight" => Some(FcLcdFilter::Light),
+        "lcdlegacy" => Some(FcLcdFilter::Legacy),
+        _ => None,
+    }
 }
 
 // Unicode range bit positions to actual ranges (full table from OpenType spec).
@@ -3020,6 +3394,7 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
                                 stretch,
                                 unicode_ranges: unicode_ranges.clone(),
                                 metadata: metadata.clone(),
+                                render_config: FcFontRenderConfig::default(),
                             },
                             font_index,
                         ))
