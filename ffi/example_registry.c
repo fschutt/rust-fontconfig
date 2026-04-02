@@ -2,15 +2,29 @@
  * @file example_registry.c
  * @brief Demonstrates the async registry (background thread) API.
  *
- * The registry spawns background threads to scan and parse system fonts
- * while the main thread does other work. At layout time, request_fonts()
- * blocks only until the specific fonts needed are ready.
+ * This mirrors how the "azul" GUI framework uses rust-fontconfig for
+ * fast startup:
  *
- * Build (macOS):
+ *   App startup (instant):
+ *     1. fc_registry_new()    — create registry, returns immediately
+ *     2. fc_registry_spawn()  — launch scout + builder threads, returns immediately
+ *     → Window appears, user sees content
+ *
+ *   First layout pass (blocks only for what we need):
+ *     3. fc_registry_request_fonts({"Arial","sans-serif"}, {"monospace"})
+ *        — blocks until ONLY those font stacks are resolved
+ *        — builder threads prioritize these over the other 800+ fonts
+ *     4. fc_registry_snapshot() — take a cache snapshot for rendering
+ *     → First frame renders with correct fonts
+ *
+ *   Subsequent frames:
+ *     5. Background threads keep parsing remaining fonts
+ *     6. If new CSS font-family appears, request_fonts() again
+ *        — blocks only if that specific font isn't loaded yet
+ *
+ * Build:
  *   make
- *   gcc -Wall -g -I include -o example_registry ffi/example_registry.c \
- *       -L. -lrust_fontconfig
- *   ./example_registry
+ *   ./example_registry [1|2|3]
  */
 
 #include <stdio.h>
@@ -20,302 +34,354 @@
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
-static void print_separator(const char* title) {
-    printf("\n");
-    printf("======================================================================\n");
-    printf("  %s\n", title);
-    printf("======================================================================\n\n");
-}
-
 static void print_font_id(const FcFontId* id) {
     char buf[64];
-    if (fc_font_id_to_string(id, buf, sizeof(buf))) {
+    if (fc_font_id_to_string(id, buf, sizeof(buf)))
         printf("%s", buf);
-    } else {
+    else
         printf("(unknown)");
+}
+
+static void print_font_path(FcFontRegistry registry, const FcFontId* id) {
+    FcFontPath* path = fc_registry_get_font_path(registry, id);
+    if (path) {
+        printf("%s", path->path);
+        if (path->font_index > 0)
+            printf(" [index %zu]", path->font_index);
+        fc_font_path_free(path);
+    } else {
+        printf("(memory font)");
     }
 }
 
-/* ── Demo 1: Basic registry lifecycle ─────────────────────────────────── */
+static void print_runs(FcFontChain chain, FcFontCache cache,
+                        FcFontRegistry registry, const char* text) {
+    size_t runs_count = 0;
+    FcResolvedFontRun* runs = fc_chain_query_for_text(chain, cache, text, &runs_count);
 
-static void demo_basic_lifecycle(void) {
-    print_separator("Demo 1: Basic Registry Lifecycle");
+    printf("    Input:  \"%s\"\n", text);
+    printf("    Runs:   %zu\n", runs_count);
 
-    /* 1. Create the registry (instant — no scanning yet) */
-    printf("1. Creating registry...\n");
-    FcFontRegistry registry = fc_registry_new();
-    if (!registry) {
-        fprintf(stderr, "Failed to create registry\n");
-        return;
+    for (size_t i = 0; i < runs_count; i++) {
+        printf("      [%3zu..%3zu] \"%s\"", runs[i].start_byte, runs[i].end_byte, runs[i].text);
+        if (runs[i].has_font) {
+            /* Look up the font's real name via metadata */
+            FcFontMetadata* meta = fc_registry_get_metadata(registry, &runs[i].font_id);
+            if (meta && meta->full_name)
+                printf("  -->  %s", meta->full_name);
+            else
+                printf("  -->  font ");
+
+            if (runs[i].css_source[0] != '\0')
+                printf("  (matched via \"%s\")", runs[i].css_source);
+
+            if (meta) fc_font_metadata_free(meta);
+        } else {
+            printf("  -->  (no font found)");
+        }
+        printf("\n");
     }
-    printf("   Done.\n\n");
-
-    /* 2. Spawn background threads (returns immediately) */
-    printf("2. Spawning scout + builder threads...\n");
-    fc_registry_spawn(registry);
-    printf("   Done (threads running in background).\n\n");
-
-    /* 3. Simulate doing other work while fonts load */
-    printf("3. Doing other work (window creation, DOM parsing, etc.)...\n");
-    printf("   Scout complete? %s\n",
-           fc_registry_is_scan_complete(registry) ? "yes" : "not yet");
-    printf("   Build complete? %s\n",
-           fc_registry_is_build_complete(registry) ? "yes" : "not yet");
     printf("\n");
 
-    /* 4. Request the fonts we actually need (blocks until ready) */
-    printf("4. Requesting fonts we need for layout...\n");
+    fc_resolved_runs_free(runs, runs_count);
+}
+
+/* ── Demo 1: Azul-style fast startup ─────────────────────────────────── */
+
+static void demo_azul_pattern(void) {
+    printf("====================================================================\n");
+    printf("  Demo 1: Azul-Style Fast Startup\n");
+    printf("====================================================================\n");
+    printf("\n");
+    printf("  This mirrors how the azul GUI framework uses rust-fontconfig.\n");
+    printf("  The key insight: don't wait for all 800+ system fonts to load.\n");
+    printf("  Only block for the fonts the current frame actually needs.\n");
+    printf("\n");
+
+    /* ── Phase 1: App startup (instant) ─────────────────────────────── */
+    printf("--- Phase 1: App Startup (instant) ---\n\n");
+
+    printf("  fc_registry_new() ...\n");
+    FcFontRegistry registry = fc_registry_new();
+    printf("  Done. (No scanning happened yet.)\n\n");
+
+    printf("  fc_registry_spawn() ...\n");
+    fc_registry_spawn(registry);
+    printf("  Done. Scout + builder threads now running in background.\n\n");
+
+    /* Check immediate status — scout may or may not be done yet */
+    size_t count0 = 0;
+    FcFontInfo* f0 = fc_registry_list_fonts(registry, &count0);
+    fc_font_info_free(f0, count0);
+    printf("  Status right after spawn:\n");
+    printf("    Scout complete:  %s\n", fc_registry_is_scan_complete(registry) ? "yes" : "no");
+    printf("    Build complete:  %s\n", fc_registry_is_build_complete(registry) ? "no" : "no");
+    printf("    Fonts loaded:    %zu  (background threads are still working)\n", count0);
+    printf("\n");
+    printf("  At this point, the window can appear and show a loading state,\n");
+    printf("  skeleton UI, or cached content. No blocking has occurred.\n");
+    printf("\n");
+
+    /* ── Phase 2: First layout pass ─────────────────────────────────── */
+    printf("--- Phase 2: First Layout Pass (blocks only for needed fonts) ---\n\n");
+
+    printf("  The layout engine needs these CSS font-family stacks:\n");
+    printf("    Stack 0: [\"Arial\", \"Helvetica\", \"sans-serif\"]\n");
+    printf("    Stack 1: [\"Georgia\", \"Times New Roman\", \"serif\"]\n");
+    printf("    Stack 2: [\"Courier New\", \"monospace\"]\n");
+    printf("\n");
+    printf("  Calling fc_registry_request_fonts() ...\n");
+    printf("  This BLOCKS until exactly these fonts are parsed and ready.\n");
+    printf("  The builder threads re-prioritize: these stacks become CRITICAL.\n");
+    printf("\n");
 
     const char* stack0[] = {"Arial", "Helvetica", "sans-serif"};
-    const char* stack1[] = {"Courier New", "monospace"};
-    const char** stacks[] = {stack0, stack1};
-    size_t counts[] = {3, 2};
+    const char* stack1[] = {"Georgia", "Times New Roman", "serif"};
+    const char* stack2[] = {"Courier New", "monospace"};
+    const char** stacks[] = {stack0, stack1, stack2};
+    size_t counts[] = {3, 3, 2};
     size_t num_chains = 0;
 
     FcFontChain* chains = fc_registry_request_fonts(
-        registry, stacks, counts, 2, &num_chains);
+        registry, stacks, counts, 3, &num_chains);
 
-    printf("   Got %zu font chains.\n\n", num_chains);
+    /* Check status after request_fonts returns */
+    size_t count1 = 0;
+    FcFontInfo* f1 = fc_registry_list_fonts(registry, &count1);
+    fc_font_info_free(f1, count1);
 
-    /* 5. Use the chains to resolve text */
-    if (chains && num_chains >= 2) {
-        /* Take a snapshot for query_for_text */
-        FcFontCache cache = fc_registry_snapshot(registry);
+    printf("  request_fonts() returned.\n");
+    printf("    Chains resolved:  %zu\n", num_chains);
+    printf("    Fonts loaded:     %zu  (NOT all system fonts — just what we need + common)\n", count1);
+    printf("    Scout complete:   %s\n", fc_registry_is_scan_complete(registry) ? "yes" : "no");
+    printf("    Build complete:   %s\n", fc_registry_is_build_complete(registry) ? "yes" : "no");
+    printf("\n");
 
-        const char* text = "Hello, World!";
-        size_t runs_count = 0;
-        FcResolvedFontRun* runs = fc_chain_query_for_text(
-            chains[0], cache, text, &runs_count);
+    /* Take a snapshot for text rendering */
+    FcFontCache cache = fc_registry_snapshot(registry);
 
-        printf("5. Text \"%s\" resolved to %zu run(s):\n", text, runs_count);
-        for (size_t i = 0; i < runs_count; i++) {
-            printf("   Run %zu: \"%s\"", i, runs[i].text);
-            if (runs[i].has_font) {
-                printf(" -> font ");
-                print_font_id(&runs[i].font_id);
-                printf(" (via %s)", runs[i].css_source);
-            } else {
-                printf(" -> (no font)");
+    /* Show what each chain resolved to */
+    printf("  Resolved font chains:\n\n");
+    const char* stack_names[] = {
+        "sans-serif stack (Arial, Helvetica, sans-serif)",
+        "serif stack (Georgia, Times New Roman, serif)",
+        "monospace stack (Courier New, monospace)",
+    };
+    for (size_t i = 0; i < num_chains; i++) {
+        printf("    Chain %zu: %s\n", i, stack_names[i]);
+
+        /* Show the CSS fallback groups */
+        size_t groups_count = 0;
+        FcCssFallbackGroup* groups = fc_chain_get_css_fallbacks(chains[i], &groups_count);
+        for (size_t g = 0; g < groups_count; g++) {
+            printf("      \"%s\" -> %zu font(s)", groups[g].css_name, groups[g].fonts_count);
+            if (groups[g].fonts_count > 0) {
+                printf(": ");
+                print_font_id(&groups[g].fonts[0].id);
+                /* Print font file path */
+                printf(" (");
+                print_font_path(registry, &groups[g].fonts[0].id);
+                printf(")");
             }
             printf("\n");
         }
-
-        fc_resolved_runs_free(runs, runs_count);
-        fc_cache_free(cache);
+        fc_css_fallback_groups_free(groups, groups_count);
+        printf("\n");
     }
+
+    /* ── Phase 3: Render text with the resolved chains ──────────────── */
+    printf("--- Phase 3: Render Text ---\n\n");
+
+    printf("  Using the sans-serif chain for text layout:\n\n");
+    print_runs(chains[0], cache, registry, "Hello, World!");
+    print_runs(chains[0], cache, registry, "The quick brown fox jumps over the lazy dog.");
+
+    printf("  Using the serif chain:\n\n");
+    print_runs(chains[1], cache, registry, "Lorem ipsum dolor sit amet.");
+
+    printf("  Using the monospace chain:\n\n");
+    print_runs(chains[2], cache, registry, "fn main() { println!(\"Hello\"); }");
+
+    printf("  Multilingual text (sans-serif chain):\n\n");
+    print_runs(chains[0], cache, registry,
+               "Hello \xe4\xb8\x96\xe7\x95\x8c");                    /* Hello 世界 */
+    print_runs(chains[0], cache, registry,
+               "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82"  /* Привет */
+               " World");
+    print_runs(chains[0], cache, registry,
+               "caf\xc3\xa9 na\xc3\xafve r\xc3\xa9sum\xc3\xa9");    /* café naïve résumé */
+
+    /* ── Phase 4: Background loading continues ──────────────────────── */
+    printf("--- Phase 4: Background Status ---\n\n");
+
+    size_t count2 = 0;
+    FcFontInfo* f2 = fc_registry_list_fonts(registry, &count2);
+    printf("  Fonts now loaded: %zu\n", count2);
+    printf("  Build complete:   %s\n", fc_registry_is_build_complete(registry) ? "yes" : "not yet — builders still parsing in background");
+    printf("\n");
+    printf("  If a new CSS rule appears (e.g. @font-face or a new element with\n");
+    printf("  font-family: \"Fira Code\"), we simply call request_fonts() again.\n");
+    printf("  It blocks only if that specific font hasn't been parsed yet.\n");
+    fc_font_info_free(f2, count2);
+
+    /* Cleanup */
+    fc_cache_free(cache);
+    for (size_t i = 0; i < num_chains; i++)
+        fc_font_chain_free(chains[i]);
+    fc_registry_chains_free(chains, num_chains);
+    fc_registry_free(registry);
+
+    printf("\n  Registry freed (background threads shut down).\n\n");
+}
+
+/* ── Demo 2: Blocking on a second font stack mid-frame ───────────────── */
+
+static void demo_incremental_loading(void) {
+    printf("====================================================================\n");
+    printf("  Demo 2: Incremental Font Loading (block on demand)\n");
+    printf("====================================================================\n");
+    printf("\n");
+    printf("  Shows what happens when the app discovers it needs MORE fonts\n");
+    printf("  after the first layout pass. request_fonts() blocks again, but\n");
+    printf("  only for the new fonts — previously loaded fonts are instant.\n");
     printf("\n");
 
-    /* 6. Check final status */
-    printf("6. Final status:\n");
-    printf("   Scout complete? %s\n",
-           fc_registry_is_scan_complete(registry) ? "yes" : "no");
-    printf("   Build complete? %s\n",
+    FcFontRegistry registry = fc_registry_new();
+    fc_registry_spawn(registry);
+
+    /* --- First request: basic UI fonts --- */
+    printf("  First request: [\"Arial\", \"sans-serif\"]\n");
+
+    const char* stack0[] = {"Arial", "sans-serif"};
+    const char** stacks0[] = {stack0};
+    size_t counts0[] = {2};
+    size_t n0 = 0;
+    FcFontChain* chains0 = fc_registry_request_fonts(registry, stacks0, counts0, 1, &n0);
+
+    size_t loaded_after_first = 0;
+    FcFontInfo* f = fc_registry_list_fonts(registry, &loaded_after_first);
+    fc_font_info_free(f, loaded_after_first);
+    printf("    Fonts loaded after first request: %zu\n", loaded_after_first);
+    printf("    Build complete: %s\n\n",
            fc_registry_is_build_complete(registry) ? "yes" : "no");
 
-    size_t font_count = 0;
-    FcFontInfo* fonts = fc_registry_list_fonts(registry, &font_count);
-    printf("   Total fonts loaded: %zu\n", font_count);
-    fc_font_info_free(fonts, font_count);
+    /* --- Second request: code editor opened, needs monospace --- */
+    printf("  User opens code editor. Now we also need monospace fonts.\n");
+    printf("  Second request: [\"Menlo\", \"Consolas\", \"Courier New\", \"monospace\"]\n");
 
-    /* 7. Clean up (shuts down threads) */
-    for (size_t i = 0; i < num_chains; i++) {
-        fc_font_chain_free(chains[i]);
-    }
-    fc_registry_chains_free(chains, num_chains);
+    const char* stack1[] = {"Menlo", "Consolas", "Courier New", "monospace"};
+    const char** stacks1[] = {stack1};
+    size_t counts1[] = {4};
+    size_t n1 = 0;
+    FcFontChain* chains1 = fc_registry_request_fonts(registry, stacks1, counts1, 1, &n1);
+
+    size_t loaded_after_second = 0;
+    f = fc_registry_list_fonts(registry, &loaded_after_second);
+    fc_font_info_free(f, loaded_after_second);
+    printf("    Fonts loaded after second request: %zu\n", loaded_after_second);
+    printf("    Build complete: %s\n\n",
+           fc_registry_is_build_complete(registry) ? "yes" : "no");
+
+    /* --- Third request: user pastes Japanese text --- */
+    printf("  User pastes Japanese text. We need CJK fonts.\n");
+    printf("  Third request: [\"Hiragino Sans\", \"Noto Sans CJK JP\", \"sans-serif\"]\n");
+
+    const char* stack2[] = {"Hiragino Sans", "Noto Sans CJK JP", "sans-serif"};
+    const char** stacks2[] = {stack2};
+    size_t counts2[] = {3};
+    size_t n2 = 0;
+    FcFontChain* chains2 = fc_registry_request_fonts(registry, stacks2, counts2, 1, &n2);
+
+    size_t loaded_after_third = 0;
+    f = fc_registry_list_fonts(registry, &loaded_after_third);
+    fc_font_info_free(f, loaded_after_third);
+    printf("    Fonts loaded after third request: %zu\n", loaded_after_third);
+    printf("    Build complete: %s\n\n",
+           fc_registry_is_build_complete(registry) ? "yes" : "no");
+
+    /* Show text rendering with all three chains */
+    FcFontCache cache = fc_registry_snapshot(registry);
+
+    printf("  Rendering with all three chains:\n\n");
+    printf("  Sans-serif:\n");
+    print_runs(chains0[0], cache, registry, "Quick UI text");
+    printf("  Monospace:\n");
+    print_runs(chains1[0], cache, registry, "let x = 42;");
+    printf("  CJK:\n");
+    print_runs(chains2[0], cache, registry,
+               "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\xe3\x81\xae"  /* 日本語の */
+               "\xe3\x83\x86\xe3\x82\xad\xe3\x82\xb9\xe3\x83\x88"); /* テキスト */
+
+    /* Cleanup */
+    fc_cache_free(cache);
+    for (size_t i = 0; i < n0; i++) fc_font_chain_free(chains0[i]);
+    for (size_t i = 0; i < n1; i++) fc_font_chain_free(chains1[i]);
+    for (size_t i = 0; i < n2; i++) fc_font_chain_free(chains2[i]);
+    fc_registry_chains_free(chains0, n0);
+    fc_registry_chains_free(chains1, n1);
+    fc_registry_chains_free(chains2, n2);
     fc_registry_free(registry);
-    printf("\n   Registry freed.\n");
+    printf("  Done.\n\n");
 }
 
-/* ── Demo 2: Multilingual text with priority loading ─────────────────── */
-
-static void demo_multilingual(void) {
-    print_separator("Demo 2: Multilingual Priority Loading");
-
-    FcFontRegistry registry = fc_registry_new();
-    fc_registry_spawn(registry);
-
-    /* Request fonts for multilingual text */
-    const char* stack[] = {"Arial", "Noto Sans", "Noto Sans CJK SC", "sans-serif"};
-    const char** stacks[] = {stack};
-    size_t counts[] = {4};
-    size_t num_chains = 0;
-
-    printf("Requesting fonts for multilingual layout...\n");
-    FcFontChain* chains = fc_registry_request_fonts(
-        registry, stacks, counts, 1, &num_chains);
-
-    if (chains && num_chains > 0) {
-        FcFontCache cache = fc_registry_snapshot(registry);
-
-        /* Test with various scripts — these should split into multiple
-           font runs when different scripts need different fonts */
-        const char* texts[] = {
-            "Hello \xe4\xb8\x96\xe7\x95\x8c",                     /* "Hello 世界" (Latin + CJK) */
-            "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 World",  /* "Привет World" (Cyrillic + Latin) */
-            "Mixed: ABC \xe4\xb8\xad\xe6\x96\x87 123",            /* "Mixed: ABC 中文 123" */
-            "Hello World",                                          /* Pure Latin baseline */
-        };
-        size_t num_texts = sizeof(texts) / sizeof(texts[0]);
-
-        for (size_t t = 0; t < num_texts; t++) {
-            size_t runs_count = 0;
-            FcResolvedFontRun* runs = fc_chain_query_for_text(
-                chains[0], cache, texts[t], &runs_count);
-
-            printf("\n  \"%s\"\n", texts[t]);
-            for (size_t i = 0; i < runs_count; i++) {
-                printf("    [%zu..%zu] \"%s\"",
-                       runs[i].start_byte, runs[i].end_byte, runs[i].text);
-                if (runs[i].has_font) {
-                    printf(" -> ");
-                    print_font_id(&runs[i].font_id);
-                }
-                printf("\n");
-            }
-            fc_resolved_runs_free(runs, runs_count);
-        }
-
-        for (size_t i = 0; i < num_chains; i++) {
-            fc_font_chain_free(chains[i]);
-        }
-        fc_registry_chains_free(chains, num_chains);
-        fc_cache_free(cache);
-    }
-
-    fc_registry_free(registry);
-}
-
-/* ── Demo 3: Query and metadata from registry ────────────────────────── */
-
-static void demo_query_and_metadata(void) {
-    print_separator("Demo 3: Query + Metadata from Registry");
-
-    FcFontRegistry registry = fc_registry_new();
-    fc_registry_spawn(registry);
-
-    /* Request a specific font to ensure it's loaded */
-    const char* stack[] = {"Times New Roman", "serif"};
-    const char** stacks[] = {stack};
-    size_t counts[] = {2};
-    size_t num_chains = 0;
-
-    FcFontChain* chains = fc_registry_request_fonts(
-        registry, stacks, counts, 1, &num_chains);
-
-    /* Query from the registry */
-    FcPattern* pattern = fc_pattern_new();
-    fc_pattern_set_name(pattern, "Times New Roman");
-
-    FcFontMatch* match = fc_registry_query(registry, pattern);
-    if (match) {
-        printf("Found: ");
-        print_font_id(&match->id);
-        printf("\n");
-
-        /* Get metadata */
-        FcFontMetadata* meta = fc_registry_get_metadata(registry, &match->id);
-        if (meta) {
-            if (meta->full_name)
-                printf("  Full name:  %s\n", meta->full_name);
-            if (meta->font_family)
-                printf("  Family:     %s\n", meta->font_family);
-            if (meta->version)
-                printf("  Version:    %s\n", meta->version);
-            if (meta->manufacturer)
-                printf("  Vendor:     %s\n", meta->manufacturer);
-            fc_font_metadata_free(meta);
-        }
-
-        /* Get font path */
-        FcFontPath* path = fc_registry_get_font_path(registry, &match->id);
-        if (path) {
-            printf("  Path:       %s (index %zu)\n", path->path, path->font_index);
-            fc_font_path_free(path);
-        }
-
-        fc_font_match_free(match);
-    } else {
-        printf("Font not found.\n");
-    }
-
-    fc_pattern_free(pattern);
-    for (size_t i = 0; i < num_chains; i++) {
-        fc_font_chain_free(chains[i]);
-    }
-    fc_registry_chains_free(chains, num_chains);
-    fc_registry_free(registry);
-}
-
-/* ── Demo 4: Compare old (blocking) vs new (async) API ───────────────── */
+/* ── Demo 3: Old blocking API vs new async API ───────────────────────── */
 
 static void demo_old_vs_new(void) {
-    print_separator("Demo 4: Old API (blocking) vs New API (async)");
+    printf("====================================================================\n");
+    printf("  Demo 3: Old API (blocking) vs New API (async)\n");
+    printf("====================================================================\n\n");
 
-    /* --- Old API: blocks until ALL fonts are scanned --- */
-    printf("OLD API: fc_cache_build() — scans ALL system fonts upfront...\n");
+    /* --- Old API --- */
+    printf("  OLD API: fc_cache_build()\n");
+    printf("    Scans and parses ALL system fonts before returning.\n");
+    printf("    Building...\n");
     FcFontCache old_cache = fc_cache_build();
 
     size_t old_count = 0;
     FcFontInfo* old_fonts = fc_cache_list_fonts(old_cache, &old_count);
-    printf("  Loaded %zu fonts (had to wait for all of them).\n", old_count);
-    fc_font_info_free(old_fonts, old_count);
+    printf("    Loaded %zu fonts. App was BLOCKED until all finished.\n", old_count);
+    printf("\n");
 
-    /* Query with old API */
-    FcPattern* pattern = fc_pattern_new();
-    fc_pattern_set_name(pattern, "Arial");
-    FcTraceMsg* trace = NULL;
-    size_t trace_count = 0;
-    FcFontMatch* old_match = fc_cache_query(old_cache, pattern, &trace, &trace_count);
-    if (old_match) {
-        printf("  Old API found Arial: ");
-        print_font_id(&old_match->id);
+    /* Show a few fonts from the old cache */
+    printf("    First 5 fonts:\n");
+    for (size_t i = 0; i < 5 && i < old_count; i++) {
+        printf("      %s", old_fonts[i].name ? old_fonts[i].name : "(unnamed)");
+        if (old_fonts[i].family)
+            printf(" [%s]", old_fonts[i].family);
         printf("\n");
-        fc_font_match_free(old_match);
     }
-    fc_trace_free(trace, trace_count);
+    fc_font_info_free(old_fonts, old_count);
     fc_cache_free(old_cache);
 
     printf("\n");
 
-    /* --- New API: only blocks for the fonts we need --- */
-    printf("NEW API: fc_registry_new() + fc_registry_request_fonts()...\n");
+    /* --- New API --- */
+    printf("  NEW API: fc_registry_new() + fc_registry_request_fonts()\n");
+    printf("    Only blocks for the fonts the current frame needs.\n");
+    printf("    Creating and spawning...\n");
     FcFontRegistry registry = fc_registry_new();
     fc_registry_spawn(registry);
 
+    printf("    Requesting [\"Arial\", \"sans-serif\"] ...\n");
     const char* stack[] = {"Arial", "sans-serif"};
     const char** stacks[] = {stack};
     size_t counts[] = {2};
-    size_t num_chains = 0;
+    size_t n = 0;
+    FcFontChain* chains = fc_registry_request_fonts(registry, stacks, counts, 1, &n);
 
-    FcFontChain* chains = fc_registry_request_fonts(
-        registry, stacks, counts, 1, &num_chains);
-    printf("  Got %zu chain(s) — only waited for Arial + sans-serif.\n",
-           num_chains);
-
-    /* The registry may still be loading other fonts in the background */
     size_t new_count = 0;
     FcFontInfo* new_fonts = fc_registry_list_fonts(registry, &new_count);
-    printf("  Fonts loaded so far: %zu (background threads still working)\n",
-           new_count);
-    printf("  Build complete? %s\n",
-           fc_registry_is_build_complete(registry) ? "yes" : "not yet");
+    printf("    Loaded %zu of %zu total system fonts.\n", new_count, old_count);
+    printf("    Build complete: %s\n", fc_registry_is_build_complete(registry) ? "yes" : "no");
+    printf("    The remaining %zu fonts are still loading in the background.\n",
+           old_count > new_count ? old_count - new_count : 0);
+    printf("    The app can render its first frame NOW.\n");
     fc_font_info_free(new_fonts, new_count);
 
-    /* Query same font from the new API */
-    FcFontMatch* new_match = fc_registry_query(registry, pattern);
-    if (new_match) {
-        printf("  New API found Arial: ");
-        print_font_id(&new_match->id);
-        printf("\n");
-        fc_font_match_free(new_match);
-    }
-
-    fc_pattern_free(pattern);
-    for (size_t i = 0; i < num_chains; i++) {
-        fc_font_chain_free(chains[i]);
-    }
-    fc_registry_chains_free(chains, num_chains);
+    for (size_t i = 0; i < n; i++) fc_font_chain_free(chains[i]);
+    fc_registry_chains_free(chains, n);
     fc_registry_free(registry);
+    printf("\n  Done.\n\n");
 }
 
 /* ── Main ────────────────────────────────────────────────────────────── */
@@ -323,18 +389,12 @@ static void demo_old_vs_new(void) {
 int main(int argc, char** argv) {
     const char* demo = (argc > 1) ? argv[1] : "all";
 
-    if (strcmp(demo, "all") == 0 || strcmp(demo, "1") == 0) {
-        demo_basic_lifecycle();
-    }
-    if (strcmp(demo, "all") == 0 || strcmp(demo, "2") == 0) {
-        demo_multilingual();
-    }
-    if (strcmp(demo, "all") == 0 || strcmp(demo, "3") == 0) {
-        demo_query_and_metadata();
-    }
-    if (strcmp(demo, "all") == 0 || strcmp(demo, "4") == 0) {
+    if (strcmp(demo, "all") == 0 || strcmp(demo, "1") == 0)
+        demo_azul_pattern();
+    if (strcmp(demo, "all") == 0 || strcmp(demo, "2") == 0)
+        demo_incremental_loading();
+    if (strcmp(demo, "all") == 0 || strcmp(demo, "3") == 0)
         demo_old_vs_new();
-    }
 
     return 0;
 }
