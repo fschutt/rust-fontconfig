@@ -3,11 +3,15 @@
 //! This module provides C-compatible bindings for the rust-fontconfig library.
 
 use crate::*;
+#[cfg(feature = "async-registry")]
+use crate::registry::FcFontRegistry;
 use std::ffi::{c_char, c_uint, c_void, CStr, CString};
 use std::fmt::Write;
 use std::mem;
 use std::ptr;
 use std::slice;
+#[cfg(feature = "async-registry")]
+use std::sync::Arc;
 
 /// C-compatible font ID representation
 #[repr(C)]
@@ -1405,5 +1409,351 @@ pub extern "C" fn fc_css_fallback_groups_free(groups: *mut FcCssFallbackGroupC, 
         }
 
         let _ = Vec::from_raw_parts(groups, count, count);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Registry (async/background thread) API
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Create a new font registry (returns immediately, no scanning yet).
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_new() -> *mut Arc<FcFontRegistry> {
+    let registry = FcFontRegistry::new();
+    Box::into_raw(Box::new(registry))
+}
+
+/// Spawn the Scout thread and Builder pool. Returns immediately.
+/// The scout enumerates font directories (~5-20ms), builders parse font files
+/// in priority order in the background.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_spawn(registry: *const Arc<FcFontRegistry>) {
+    if registry.is_null() {
+        return;
+    }
+    unsafe {
+        let registry = &*registry;
+        registry.spawn_scout_and_builders();
+    }
+}
+
+/// Block until the requested font families are loaded, then return
+/// resolved font chains. Each element in `family_stacks` is a
+/// null-terminated CSS font-family stack (array of C strings).
+///
+/// Returns an array of FcFontChain pointers (one per stack).
+/// The caller must free each chain with fc_font_chain_free() and the
+/// array itself with fc_registry_chains_free().
+///
+/// Hard timeout: 5 seconds.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_request_fonts(
+    registry: *const Arc<FcFontRegistry>,
+    family_stacks: *const *const *const c_char,
+    stack_counts: *const usize,
+    num_stacks: usize,
+    out_count: *mut usize,
+) -> *mut *mut FcFontFallbackChainC {
+    if registry.is_null()
+        || family_stacks.is_null()
+        || stack_counts.is_null()
+        || out_count.is_null()
+        || num_stacks == 0
+    {
+        if !out_count.is_null() {
+            unsafe { *out_count = 0; }
+        }
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let registry = &*registry;
+        let stacks_slice = slice::from_raw_parts(family_stacks, num_stacks);
+        let counts_slice = slice::from_raw_parts(stack_counts, num_stacks);
+
+        let mut rust_stacks: Vec<Vec<String>> = Vec::with_capacity(num_stacks);
+        for i in 0..num_stacks {
+            let count = counts_slice[i];
+            let families = slice::from_raw_parts(stacks_slice[i], count);
+            let stack: Vec<String> = families
+                .iter()
+                .filter_map(|&s| {
+                    if s.is_null() {
+                        None
+                    } else {
+                        Some(CStr::from_ptr(s).to_string_lossy().into_owned())
+                    }
+                })
+                .collect();
+            rust_stacks.push(stack);
+        }
+
+        let chains = registry.request_fonts(&rust_stacks);
+
+        let mut chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
+            .into_iter()
+            .map(|chain| {
+                Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
+            })
+            .collect();
+
+        *out_count = chain_ptrs.len();
+        let ptr = chain_ptrs.as_mut_ptr();
+        mem::forget(chain_ptrs);
+        ptr
+    }
+}
+
+/// Free the array returned by fc_registry_request_fonts.
+/// Does NOT free the individual chains (use fc_font_chain_free for each).
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_chains_free(
+    chains: *mut *mut FcFontFallbackChainC,
+    count: usize,
+) {
+    if chains.is_null() || count == 0 {
+        return;
+    }
+    unsafe {
+        let _ = Vec::from_raw_parts(chains, count, count);
+    }
+}
+
+/// Check if the scout has finished enumerating all font directories.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_is_scan_complete(
+    registry: *const Arc<FcFontRegistry>,
+) -> bool {
+    if registry.is_null() {
+        return false;
+    }
+    unsafe { (*registry).is_scan_complete() }
+}
+
+/// Check if all queued font files have been parsed.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_is_build_complete(
+    registry: *const Arc<FcFontRegistry>,
+) -> bool {
+    if registry.is_null() {
+        return false;
+    }
+    unsafe { (*registry).is_build_complete() }
+}
+
+/// Signal all background threads to shut down.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_shutdown(registry: *const Arc<FcFontRegistry>) {
+    if registry.is_null() {
+        return;
+    }
+    unsafe {
+        (*registry).shutdown();
+    }
+}
+
+/// Free a font registry. Shuts down threads first if still running.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_free(registry: *mut Arc<FcFontRegistry>) {
+    if !registry.is_null() {
+        unsafe {
+            let arc = Box::from_raw(registry);
+            arc.shutdown();
+            drop(arc);
+        }
+    }
+}
+
+/// Query a single font from the registry (thread-safe).
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_query(
+    registry: *const Arc<FcFontRegistry>,
+    pattern: *const FcPatternC,
+) -> *mut FcFontMatchC {
+    if registry.is_null() || pattern.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let registry = &*registry;
+        let pattern_rust = c_to_pattern(pattern);
+
+        match registry.query(&pattern_rust) {
+            Some(match_obj) => {
+                let cache = registry.into_fc_font_cache();
+                let match_c = font_match_to_c(&cache, &match_obj);
+                Box::into_raw(Box::new(match_c))
+            }
+            None => ptr::null_mut(),
+        }
+    }
+}
+
+/// List all fonts currently loaded in the registry.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_list_fonts(
+    registry: *const Arc<FcFontRegistry>,
+    count: *mut usize,
+) -> *mut FcFontInfoC {
+    if registry.is_null() || count.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let registry = &*registry;
+        let font_list = registry.list();
+
+        if font_list.is_empty() {
+            *count = 0;
+            return ptr::null_mut();
+        }
+
+        let mut font_info = Vec::with_capacity(font_list.len());
+        for (pattern, id) in &font_list {
+            font_info.push(FcFontInfoC {
+                id: FcFontIdC::from_fontid(id),
+                name: option_string_to_c_char(pattern.name.as_ref()),
+                family: option_string_to_c_char(pattern.family.as_ref()),
+            });
+        }
+
+        *count = font_info.len();
+        let ptr = font_info.as_mut_ptr();
+        mem::forget(font_info);
+        ptr
+    }
+}
+
+/// Resolve a font chain from the registry (thread-safe, uses current state).
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_resolve_font_chain(
+    registry: *const Arc<FcFontRegistry>,
+    families: *const *const c_char,
+    families_count: usize,
+    weight: FcWeight,
+    italic: PatternMatch,
+    oblique: PatternMatch,
+) -> *mut FcFontFallbackChainC {
+    if registry.is_null() || families.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let registry = &*registry;
+        let families_slice = slice::from_raw_parts(families, families_count);
+        let families_rust: Vec<String> = families_slice
+            .iter()
+            .filter_map(|&s| {
+                if s.is_null() {
+                    None
+                } else {
+                    Some(CStr::from_ptr(s).to_string_lossy().into_owned())
+                }
+            })
+            .collect();
+
+        let chain = registry.resolve_font_chain(&families_rust, weight, italic, oblique);
+        Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
+    }
+}
+
+/// Get font path by ID from the registry.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_get_font_path(
+    registry: *const Arc<FcFontRegistry>,
+    id: *const FcFontIdC,
+) -> *mut FcFontPathC {
+    if registry.is_null() || id.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let registry = &*registry;
+        let id_rust = FontId::from_fontid_c(&*id);
+
+        match registry.get_disk_font_path(&id_rust) {
+            Some(path) => {
+                let path_c = FcFontPathC {
+                    path: CString::new(path.path.clone())
+                        .unwrap_or_default()
+                        .into_raw(),
+                    font_index: path.font_index,
+                };
+                Box::into_raw(Box::new(path_c))
+            }
+            None => ptr::null_mut(),
+        }
+    }
+}
+
+/// Get font metadata by ID from the registry.
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_get_metadata(
+    registry: *const Arc<FcFontRegistry>,
+    id: *const FcFontIdC,
+) -> *mut FcFontMetadataC {
+    if registry.is_null() || id.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let registry = &*registry;
+        let id_rust = FontId::from_fontid_c(&*id);
+
+        match registry.get_metadata_by_id(&id_rust) {
+            Some(pattern) => {
+                let metadata = Box::new(FcFontMetadataC {
+                    copyright: option_string_to_c_char(pattern.metadata.copyright.as_ref()),
+                    designer: option_string_to_c_char(pattern.metadata.designer.as_ref()),
+                    designer_url: option_string_to_c_char(pattern.metadata.designer_url.as_ref()),
+                    font_family: option_string_to_c_char(pattern.metadata.font_family.as_ref()),
+                    font_subfamily: option_string_to_c_char(pattern.metadata.font_subfamily.as_ref()),
+                    full_name: option_string_to_c_char(pattern.metadata.full_name.as_ref()),
+                    id_description: option_string_to_c_char(pattern.metadata.id_description.as_ref()),
+                    license: option_string_to_c_char(pattern.metadata.license.as_ref()),
+                    license_url: option_string_to_c_char(pattern.metadata.license_url.as_ref()),
+                    manufacturer: option_string_to_c_char(pattern.metadata.manufacturer.as_ref()),
+                    manufacturer_url: option_string_to_c_char(pattern.metadata.manufacturer_url.as_ref()),
+                    postscript_name: option_string_to_c_char(pattern.metadata.postscript_name.as_ref()),
+                    preferred_family: option_string_to_c_char(pattern.metadata.preferred_family.as_ref()),
+                    preferred_subfamily: option_string_to_c_char(pattern.metadata.preferred_subfamily.as_ref()),
+                    trademark: option_string_to_c_char(pattern.metadata.trademark.as_ref()),
+                    unique_id: option_string_to_c_char(pattern.metadata.unique_id.as_ref()),
+                    version: option_string_to_c_char(pattern.metadata.version.as_ref()),
+                });
+                Box::into_raw(metadata)
+            }
+            None => ptr::null_mut(),
+        }
+    }
+}
+
+/// Take a snapshot of the registry as an immutable FcFontCache.
+/// Useful for passing to fc_chain_query_for_text().
+#[cfg(feature = "async-registry")]
+#[no_mangle]
+pub extern "C" fn fc_registry_snapshot(
+    registry: *const Arc<FcFontRegistry>,
+) -> *mut FcFontCache {
+    if registry.is_null() {
+        return ptr::null_mut();
+    }
+    unsafe {
+        let registry = &*registry;
+        let cache = registry.into_fc_font_cache();
+        Box::into_raw(Box::new(cache))
     }
 }

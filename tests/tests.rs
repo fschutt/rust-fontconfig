@@ -147,7 +147,7 @@ fn test_unicode_range_matching() {
         .expect("Cyrillic font not found");
 
     // Test querying with Unicode ranges
-    let mut trace = Vec::new();
+    let mut trace: Vec<TraceMsg> = Vec::new();
 
     // Query for Latin characters
     let latin_query = FcPattern {
@@ -199,32 +199,35 @@ fn test_unicode_range_matching() {
     assert_eq!(cache.get_memory_font(&cyrillic_id).is_some(), true);
 
     // Query for text that needs multiple fonts using resolve_font_chain + query_for_text
-    let text = "Hello Привет 你好"; // Latin, Cyrillic, and CJK
-    
-    // Build a generic font chain from our in-memory fonts
-    let families: Vec<String> = cache.list().iter()
-        .filter_map(|(pattern, _)| pattern.family.clone())
-        .collect();
-    
-    let chain = cache.resolve_font_chain(
-        &families,
-        FcWeight::Normal,
-        PatternMatch::DontCare,
-        PatternMatch::DontCare,
-        &mut trace,
-    );
-    
-    let runs = chain.query_for_text(&cache, text);
-    
-    // Collect unique fonts used
-    let unique_fonts: std::collections::HashSet<_> = runs.iter()
-        .filter_map(|r| r.font_id)
-        .collect();
-    
-    assert!(
-        unique_fonts.len() >= 2,
-        "Should use multiple fonts for multilingual text"
-    );
+    #[cfg(feature = "std")]
+    {
+        let text = "Hello Привет 你好"; // Latin, Cyrillic, and CJK
+
+        // Build a generic font chain from our in-memory fonts
+        let families: Vec<String> = cache.list().iter()
+            .filter_map(|(pattern, _)| pattern.family.clone())
+            .collect();
+
+        let chain = cache.resolve_font_chain(
+            &families,
+            FcWeight::Normal,
+            PatternMatch::DontCare,
+            PatternMatch::DontCare,
+            &mut trace,
+        );
+
+        let runs = chain.query_for_text(&cache, text);
+
+        // Collect unique fonts used
+        let unique_fonts: std::collections::HashSet<_> = runs.iter()
+            .filter_map(|r| r.font_id)
+            .collect();
+
+        assert!(
+            unique_fonts.len() >= 2,
+            "Should use multiple fonts for multilingual text"
+        );
+    }
 }
 
 #[test]
@@ -616,7 +619,7 @@ fn test_font_search() {
     }
 
     // Test 2: Search for any monospace font using list() with filter
-    let mut trace = Vec::new();
+    let mut trace: Vec<TraceMsg> = Vec::new();
     
     let results: Vec<_> = cache.list().into_iter()
         .filter(|(pattern, _)| pattern.monospace == PatternMatch::True)
@@ -631,51 +634,54 @@ fn test_font_search() {
     assert!(result_ids.contains(&fira_id), "Should include Fira Code");
 
     // Test 4: Search for a font that can render CJK text using resolve_font_chain
-    let cjk_text = "你好"; // Hello in Chinese
-    
-    // Build font chain from all available fonts
-    let families: Vec<String> = cache.list().iter()
-        .filter_map(|(pattern, _)| pattern.family.clone())
-        .collect();
-    
-    let chain = cache.resolve_font_chain(
-        &families,
-        FcWeight::Normal,
-        PatternMatch::DontCare,
-        PatternMatch::DontCare,
-        &mut trace,
-    );
-    
-    let runs = chain.query_for_text(&cache, cjk_text);
-    assert!(!runs.is_empty(), "Should find fonts for CJK text");
+    #[cfg(feature = "std")]
+    {
+        let cjk_text = "你好"; // Hello in Chinese
 
-    let result_ids: Vec<FontId> = runs.iter()
-        .filter_map(|r| r.font_id)
-        .collect();
-    assert!(
-        result_ids.contains(&noto_cjk_id),
-        "Should include Noto Sans CJK"
-    );
+        // Build font chain from all available fonts
+        let families: Vec<String> = cache.list().iter()
+            .filter_map(|(pattern, _)| pattern.family.clone())
+            .collect();
 
-    // Test 5: Multiple fonts for mixed text
-    trace.clear();
-    let mixed_text = "Hello 你好"; // Latin and CJK
+        let chain = cache.resolve_font_chain(
+            &families,
+            FcWeight::Normal,
+            PatternMatch::DontCare,
+            PatternMatch::DontCare,
+            &mut trace,
+        );
 
-    let runs = chain.query_for_text(&cache, mixed_text);
-    
-    // Collect unique fonts
-    let unique_fonts: std::collections::HashSet<_> = runs.iter()
-        .filter_map(|r| r.font_id)
-        .collect();
-    
-    assert!(
-        unique_fonts.len() >= 1,
-        "Should find at least one font for mixed text"
-    );
+        let runs = chain.query_for_text(&cache, cjk_text);
+        assert!(!runs.is_empty(), "Should find fonts for CJK text");
 
-    // Verify that we got both Latin and CJK capable fonts
-    let cjk_found = unique_fonts.contains(&noto_cjk_id);
-    assert!(cjk_found, "Should find a CJK-capable font");
+        let result_ids: Vec<FontId> = runs.iter()
+            .filter_map(|r| r.font_id)
+            .collect();
+        assert!(
+            result_ids.contains(&noto_cjk_id),
+            "Should include Noto Sans CJK"
+        );
+
+        // Test 5: Multiple fonts for mixed text
+        trace.clear();
+        let mixed_text = "Hello 你好"; // Latin and CJK
+
+        let runs = chain.query_for_text(&cache, mixed_text);
+
+        // Collect unique fonts
+        let unique_fonts: std::collections::HashSet<_> = runs.iter()
+            .filter_map(|r| r.font_id)
+            .collect();
+
+        assert!(
+            unique_fonts.len() >= 1,
+            "Should find at least one font for mixed text"
+        );
+
+        // Verify that we got both Latin and CJK capable fonts
+        let cjk_found = unique_fonts.contains(&noto_cjk_id);
+        assert!(cjk_found, "Should find a CJK-capable font");
+    }
 }
 
 #[test]

@@ -39,8 +39,10 @@
 //! use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 //!
 //! fn main() {
+//!     # #[cfg(feature = "std")]
+//!     # {
 //!     let cache = FcFontCache::build();
-//!     
+//!
 //!     // Build font fallback chain (without text parameter)
 //!     let font_chain = cache.resolve_font_chain(
 //!         &["Arial".to_string(), "sans-serif".to_string()],
@@ -49,15 +51,16 @@
 //!         PatternMatch::DontCare,
 //!         &mut Vec::new(),
 //!     );
-//!     
+//!
 //!     // Query which fonts to use for specific text
 //!     let text = "Hello 你好 Здравствуйте";
 //!     let font_runs = font_chain.query_for_text(&cache, text);
-//!     
+//!
 //!     println!("Text split into {} font runs:", font_runs.len());
 //!     for run in font_runs {
 //!         println!("  '{}' -> font {:?}", run.text, run.font_id);
 //!     }
+//!     # }
 //! }
 //! ```
 

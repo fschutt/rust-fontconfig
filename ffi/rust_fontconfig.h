@@ -12,6 +12,7 @@
  #ifndef RUST_FONTCONFIG_H
  #define RUST_FONTCONFIG_H
  
+ #include <stddef.h>
  #include <stdint.h>
  #include <stdbool.h>
  
@@ -534,9 +535,168 @@
   * Free array of font info
   */
  void fc_font_info_free(FcFontInfo* info, size_t count);
- 
+
+ /* ============================================================================
+  * Async Registry API (background thread scanning)
+  *
+  * The registry spawns background threads to scan and parse system fonts
+  * while your application does other work (window creation, DOM construction).
+  *
+  * Workflow:
+  *   1. fc_registry_new()    — create the registry (instant)
+  *   2. fc_registry_spawn()  — launch scout + builder threads (instant)
+  *   3. ... do other work ...
+  *   4. fc_registry_request_fonts()  — block until needed fonts are ready
+  *   5. Use chains with fc_chain_query_for_text()
+  *   6. fc_registry_free()   — shutdown threads + free
+  *
+  * All fc_registry_* functions are thread-safe.
+  * ============================================================================ */
+
+ /**
+  * Font registry opaque pointer
+  *
+  * Wraps an FcFontCache behind a lock so background threads can populate it
+  * while the main thread reads from it.
+  */
+ typedef struct FcFontRegistryStruct* FcFontRegistry;
+
+ /**
+  * Create a new font registry. Returns immediately (no scanning yet).
+  * Call fc_registry_spawn() to start background threads.
+  */
+ FcFontRegistry fc_registry_new(void);
+
+ /**
+  * Spawn the Scout thread and Builder pool. Returns immediately.
+  *
+  * - Scout (~5-20ms): enumerates font directories, assigns priorities.
+  * - Builders (N threads): parse font files from the priority queue.
+  *
+  * Common OS fonts (Arial, San Francisco, etc.) are prioritized.
+  */
+ void fc_registry_spawn(FcFontRegistry registry);
+
+ /**
+  * Block until the requested font families are loaded, then return
+  * resolved font chains.
+  *
+  * @param registry        The font registry
+  * @param family_stacks   Array of font-family stacks. Each stack is an
+  *                         array of C strings (e.g., {"Arial","sans-serif"}).
+  * @param stack_counts    Number of families in each stack
+  * @param num_stacks      Number of stacks
+  * @param out_count       Receives the number of returned chains
+  * @return Array of FcFontChain pointers (one per stack). Free each chain
+  *         with fc_font_chain_free(), then the array with
+  *         fc_registry_chains_free().
+  *
+  * Hard timeout: 5 seconds. If fonts are not found by then, returns the
+  * best available match.
+  *
+  * Example:
+  * @code
+  * const char* stack0[] = {"Arial", "Helvetica", "sans-serif"};
+  * const char* stack1[] = {"Fira Code", "monospace"};
+  * const char** stacks[] = {stack0, stack1};
+  * size_t counts[] = {3, 2};
+  * size_t num_chains = 0;
+  *
+  * FcFontChain* chains = fc_registry_request_fonts(
+  *     registry, stacks, counts, 2, &num_chains);
+  *
+  * // Use chains[0], chains[1] with fc_chain_query_for_text()...
+  *
+  * for (size_t i = 0; i < num_chains; i++)
+  *     fc_font_chain_free(chains[i]);
+  * fc_registry_chains_free(chains, num_chains);
+  * @endcode
+  */
+ FcFontChain* fc_registry_request_fonts(
+     FcFontRegistry registry,
+     const char*** family_stacks,
+     const size_t* stack_counts,
+     size_t num_stacks,
+     size_t* out_count
+ );
+
+ /**
+  * Free the array returned by fc_registry_request_fonts().
+  * Does NOT free the individual chains — use fc_font_chain_free() for each.
+  */
+ void fc_registry_chains_free(FcFontChain* chains, size_t count);
+
+ /**
+  * Check if the scout has finished enumerating all font directories.
+  * Non-blocking.
+  */
+ bool fc_registry_is_scan_complete(FcFontRegistry registry);
+
+ /**
+  * Check if all queued font files have been parsed. Non-blocking.
+  */
+ bool fc_registry_is_build_complete(FcFontRegistry registry);
+
+ /**
+  * Signal all background threads to shut down. Non-blocking.
+  */
+ void fc_registry_shutdown(FcFontRegistry registry);
+
+ /**
+  * Free a font registry. Shuts down background threads if still running.
+  */
+ void fc_registry_free(FcFontRegistry registry);
+
+ /**
+  * Query a single font from the registry (thread-safe).
+  * @return Font match or NULL if no match found (must be freed with fc_font_match_free)
+  */
+ FcFontMatch* fc_registry_query(FcFontRegistry registry, const FcPattern* pattern);
+
+ /**
+  * List all fonts currently loaded in the registry.
+  * @param registry The font registry
+  * @param count Pointer to store the number of fonts found
+  * @return Array of font info (must be freed with fc_font_info_free)
+  */
+ FcFontInfo* fc_registry_list_fonts(FcFontRegistry registry, size_t* count);
+
+ /**
+  * Resolve a font chain from the registry (thread-safe).
+  * Uses whatever fonts are currently loaded — call after request_fonts()
+  * for complete results.
+  */
+ FcFontChain fc_registry_resolve_font_chain(
+     FcFontRegistry registry,
+     const char** families,
+     size_t families_count,
+     FcWeight weight,
+     FcPatternMatch italic,
+     FcPatternMatch oblique
+ );
+
+ /**
+  * Get font path by ID from the registry.
+  * @return NULL if not found (must be freed with fc_font_path_free)
+  */
+ FcFontPath* fc_registry_get_font_path(FcFontRegistry registry, const FcFontId* id);
+
+ /**
+  * Get font metadata by ID from the registry.
+  * @return NULL if not found (must be freed with fc_font_metadata_free)
+  */
+ FcFontMetadata* fc_registry_get_metadata(FcFontRegistry registry, const FcFontId* id);
+
+ /**
+  * Take a snapshot of the registry as an immutable FcFontCache.
+  * Useful for passing to fc_chain_query_for_text() without holding
+  * the registry lock.
+  * @return Font cache (must be freed with fc_cache_free)
+  */
+ FcFontCache fc_registry_snapshot(FcFontRegistry registry);
+
  #ifdef __cplusplus
  }
  #endif
- 
+
  #endif /* RUST_FONTCONFIG_H */

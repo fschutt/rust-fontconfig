@@ -31,6 +31,34 @@ default = ["std", "parsing", "multithreading"]
 std = ["mmapio"]
 multithreading = ["rayon"]
 parsing = ["allsorts"]
-ffi = ["parsing", "std"]
+ffi = ["parsing", "std", "async-registry"]
 cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
+
+[[example]]
+name = "registry"
+required-features = ["async-registry"]
+
+[[example]]
+name = "getfont"
+required-features = ["std", "parsing"]
+
+[[example]]
+name = "query"
+required-features = ["std", "parsing"]
+
+[[example]]
+name = "character_resolution"
+required-features = ["std", "parsing"]
+
+[[example]]
+name = "debug_azul_fonts"
+required-features = ["std", "parsing"]
+
+[[example]]
+name = "integration_api"
+required-features = ["std", "parsing"]
+
+[[example]]
+name = "unicode_aware_fonts"
+required-features = ["std", "parsing"]
