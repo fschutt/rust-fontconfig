@@ -33,7 +33,7 @@ rayon = { version = "1.11.0", default-features = false, optional = true }
 default = ["std", "parsing", "multithreading"]
 std = ["mmapio"]
 multithreading = ["rayon"]
-parsing = ["allsorts"]
+parsing = ["allsorts", "std"]
 ffi = ["parsing", "std", "async-registry"]
 cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
@@ -44,24 +44,24 @@ required-features = ["async-registry"]
 
 [[example]]
 name = "getfont"
-required-features = ["std", "parsing"]
+required-features = ["parsing"]
 
 [[example]]
 name = "query"
-required-features = ["std", "parsing"]
+required-features = ["parsing"]
 
 [[example]]
 name = "character_resolution"
-required-features = ["std", "parsing"]
+required-features = ["parsing"]
 
 [[example]]
 name = "debug_azul_fonts"
-required-features = ["std", "parsing"]
+required-features = ["parsing"]
 
 [[example]]
 name = "integration_api"
-required-features = ["std", "parsing"]
+required-features = ["parsing"]
 
 [[example]]
 name = "unicode_aware_fonts"
-required-features = ["std", "parsing"]
+required-features = ["parsing"]
