@@ -178,6 +178,103 @@ unsafe fn c_char_to_option_string(s: *const c_char) -> Option<String> {
     }
 }
 
+/// Convert Rust FcFontMetadata to C FcFontMetadataC
+fn metadata_to_c(metadata: &FcFontMetadata) -> FcFontMetadataC {
+    FcFontMetadataC {
+        copyright: option_string_to_c_char(metadata.copyright.as_ref()),
+        designer: option_string_to_c_char(metadata.designer.as_ref()),
+        designer_url: option_string_to_c_char(metadata.designer_url.as_ref()),
+        font_family: option_string_to_c_char(metadata.font_family.as_ref()),
+        font_subfamily: option_string_to_c_char(metadata.font_subfamily.as_ref()),
+        full_name: option_string_to_c_char(metadata.full_name.as_ref()),
+        id_description: option_string_to_c_char(metadata.id_description.as_ref()),
+        license: option_string_to_c_char(metadata.license.as_ref()),
+        license_url: option_string_to_c_char(metadata.license_url.as_ref()),
+        manufacturer: option_string_to_c_char(metadata.manufacturer.as_ref()),
+        manufacturer_url: option_string_to_c_char(metadata.manufacturer_url.as_ref()),
+        postscript_name: option_string_to_c_char(metadata.postscript_name.as_ref()),
+        preferred_family: option_string_to_c_char(metadata.preferred_family.as_ref()),
+        preferred_subfamily: option_string_to_c_char(metadata.preferred_subfamily.as_ref()),
+        trademark: option_string_to_c_char(metadata.trademark.as_ref()),
+        unique_id: option_string_to_c_char(metadata.unique_id.as_ref()),
+        version: option_string_to_c_char(metadata.version.as_ref()),
+    }
+}
+
+/// Convert C FcFontMetadataC to Rust FcFontMetadata
+unsafe fn c_to_metadata(m: &FcFontMetadataC) -> FcFontMetadata {
+    FcFontMetadata {
+        copyright: c_char_to_option_string(m.copyright),
+        designer: c_char_to_option_string(m.designer),
+        designer_url: c_char_to_option_string(m.designer_url),
+        font_family: c_char_to_option_string(m.font_family),
+        font_subfamily: c_char_to_option_string(m.font_subfamily),
+        full_name: c_char_to_option_string(m.full_name),
+        id_description: c_char_to_option_string(m.id_description),
+        license: c_char_to_option_string(m.license),
+        license_url: c_char_to_option_string(m.license_url),
+        manufacturer: c_char_to_option_string(m.manufacturer),
+        manufacturer_url: c_char_to_option_string(m.manufacturer_url),
+        postscript_name: c_char_to_option_string(m.postscript_name),
+        preferred_family: c_char_to_option_string(m.preferred_family),
+        preferred_subfamily: c_char_to_option_string(m.preferred_subfamily),
+        trademark: c_char_to_option_string(m.trademark),
+        unique_id: c_char_to_option_string(m.unique_id),
+        version: c_char_to_option_string(m.version),
+    }
+}
+
+/// Free all C strings inside a FcFontMetadataC
+unsafe fn free_metadata_c(m: &mut FcFontMetadataC) {
+    free_c_string(m.copyright);
+    free_c_string(m.designer);
+    free_c_string(m.designer_url);
+    free_c_string(m.font_family);
+    free_c_string(m.font_subfamily);
+    free_c_string(m.full_name);
+    free_c_string(m.id_description);
+    free_c_string(m.license);
+    free_c_string(m.license_url);
+    free_c_string(m.manufacturer);
+    free_c_string(m.manufacturer_url);
+    free_c_string(m.postscript_name);
+    free_c_string(m.preferred_family);
+    free_c_string(m.preferred_subfamily);
+    free_c_string(m.trademark);
+    free_c_string(m.unique_id);
+    free_c_string(m.version);
+}
+
+/// Transfer ownership of a Vec into a raw pointer and length.
+fn vec_into_raw_parts<T>(vec: Vec<T>) -> (*mut T, usize) {
+    let mut vec = vec;
+    let ptr = vec.as_mut_ptr();
+    let len = vec.len();
+    mem::forget(vec);
+    (ptr, len)
+}
+
+/// Reconstruct and drop a Vec previously leaked via `vec_into_raw_parts`.
+unsafe fn free_raw_vec<T>(ptr: *mut T, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
+}
+
+/// Convert a C string array to a Rust Vec<String>.
+unsafe fn c_string_array_to_vec(arr: *const *const c_char, count: usize) -> Vec<String> {
+    slice::from_raw_parts(arr, count)
+        .iter()
+        .filter_map(|&s| {
+            if s.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(s).to_string_lossy().into_owned())
+            }
+        })
+        .collect()
+}
+
 /// Convert Rust FcPattern to C FcPatternC
 fn pattern_to_c(pattern: &FcPattern) -> FcPatternC {
     let name = option_string_to_c_char(pattern.name.as_ref());
@@ -185,36 +282,14 @@ fn pattern_to_c(pattern: &FcPattern) -> FcPatternC {
 
     let unicode_ranges_count = pattern.unicode_ranges.len();
     let unicode_ranges = if unicode_ranges_count > 0 {
-        let mut ranges = Vec::with_capacity(unicode_ranges_count);
-        for range in &pattern.unicode_ranges {
-            ranges.push(*range);
-        }
-        let ptr = ranges.as_mut_ptr();
-        mem::forget(ranges);
+        let ranges: Vec<UnicodeRange> = pattern.unicode_ranges.clone();
+        let (ptr, _) = vec_into_raw_parts(ranges);
         ptr
     } else {
         ptr::null_mut()
     };
 
-    let metadata = FcFontMetadataC {
-        copyright: option_string_to_c_char(pattern.metadata.copyright.as_ref()),
-        designer: option_string_to_c_char(pattern.metadata.designer.as_ref()),
-        designer_url: option_string_to_c_char(pattern.metadata.designer_url.as_ref()),
-        font_family: option_string_to_c_char(pattern.metadata.font_family.as_ref()),
-        font_subfamily: option_string_to_c_char(pattern.metadata.font_subfamily.as_ref()),
-        full_name: option_string_to_c_char(pattern.metadata.full_name.as_ref()),
-        id_description: option_string_to_c_char(pattern.metadata.id_description.as_ref()),
-        license: option_string_to_c_char(pattern.metadata.license.as_ref()),
-        license_url: option_string_to_c_char(pattern.metadata.license_url.as_ref()),
-        manufacturer: option_string_to_c_char(pattern.metadata.manufacturer.as_ref()),
-        manufacturer_url: option_string_to_c_char(pattern.metadata.manufacturer_url.as_ref()),
-        postscript_name: option_string_to_c_char(pattern.metadata.postscript_name.as_ref()),
-        preferred_family: option_string_to_c_char(pattern.metadata.preferred_family.as_ref()),
-        preferred_subfamily: option_string_to_c_char(pattern.metadata.preferred_subfamily.as_ref()),
-        trademark: option_string_to_c_char(pattern.metadata.trademark.as_ref()),
-        unique_id: option_string_to_c_char(pattern.metadata.unique_id.as_ref()),
-        version: option_string_to_c_char(pattern.metadata.version.as_ref()),
-    };
+    let metadata = metadata_to_c(&pattern.metadata);
 
     FcPatternC {
         name,
@@ -245,25 +320,7 @@ unsafe fn c_to_pattern(pattern: *const FcPatternC) -> FcPattern {
             slice::from_raw_parts(pattern.unicode_ranges, pattern.unicode_ranges_count).to_vec();
     }
 
-    let metadata = FcFontMetadata {
-        copyright: c_char_to_option_string(pattern.metadata.copyright),
-        designer: c_char_to_option_string(pattern.metadata.designer),
-        designer_url: c_char_to_option_string(pattern.metadata.designer_url),
-        font_family: c_char_to_option_string(pattern.metadata.font_family),
-        font_subfamily: c_char_to_option_string(pattern.metadata.font_subfamily),
-        full_name: c_char_to_option_string(pattern.metadata.full_name),
-        id_description: c_char_to_option_string(pattern.metadata.id_description),
-        license: c_char_to_option_string(pattern.metadata.license),
-        license_url: c_char_to_option_string(pattern.metadata.license_url),
-        manufacturer: c_char_to_option_string(pattern.metadata.manufacturer),
-        manufacturer_url: c_char_to_option_string(pattern.metadata.manufacturer_url),
-        postscript_name: c_char_to_option_string(pattern.metadata.postscript_name),
-        preferred_family: c_char_to_option_string(pattern.metadata.preferred_family),
-        preferred_subfamily: c_char_to_option_string(pattern.metadata.preferred_subfamily),
-        trademark: c_char_to_option_string(pattern.metadata.trademark),
-        unique_id: c_char_to_option_string(pattern.metadata.unique_id),
-        version: c_char_to_option_string(pattern.metadata.version),
-    };
+    let metadata = c_to_metadata(&pattern.metadata);
 
     FcPattern {
         name,
@@ -291,32 +348,10 @@ unsafe fn free_pattern_c(pattern: *mut FcPatternC) {
     free_c_string(pattern.name);
     free_c_string(pattern.family);
 
-    if !pattern.unicode_ranges.is_null() && pattern.unicode_ranges_count > 0 {
-        let _ = Vec::from_raw_parts(
-            pattern.unicode_ranges,
-            pattern.unicode_ranges_count,
-            pattern.unicode_ranges_count,
-        );
-    }
+    free_raw_vec(pattern.unicode_ranges, pattern.unicode_ranges_count);
 
     // Free metadata strings
-    free_c_string(pattern.metadata.copyright);
-    free_c_string(pattern.metadata.designer);
-    free_c_string(pattern.metadata.designer_url);
-    free_c_string(pattern.metadata.font_family);
-    free_c_string(pattern.metadata.font_subfamily);
-    free_c_string(pattern.metadata.full_name);
-    free_c_string(pattern.metadata.id_description);
-    free_c_string(pattern.metadata.license);
-    free_c_string(pattern.metadata.license_url);
-    free_c_string(pattern.metadata.manufacturer);
-    free_c_string(pattern.metadata.manufacturer_url);
-    free_c_string(pattern.metadata.postscript_name);
-    free_c_string(pattern.metadata.preferred_family);
-    free_c_string(pattern.metadata.preferred_subfamily);
-    free_c_string(pattern.metadata.trademark);
-    free_c_string(pattern.metadata.unique_id);
-    free_c_string(pattern.metadata.version);
+    free_metadata_c(&mut pattern.metadata);
 
     let _ = Box::from_raw(pattern);
 }
@@ -327,12 +362,8 @@ fn font_match_to_c(cache: &FcFontCache, match_obj: &FontMatch) -> FcFontMatchC {
 
     let unicode_ranges_count = match_obj.unicode_ranges.len();
     let unicode_ranges = if unicode_ranges_count > 0 {
-        let mut ranges = Vec::with_capacity(unicode_ranges_count);
-        for range in &match_obj.unicode_ranges {
-            ranges.push(*range);
-        }
-        let ptr = ranges.as_mut_ptr();
-        mem::forget(ranges);
+        let ranges: Vec<UnicodeRange> = match_obj.unicode_ranges.clone();
+        let (ptr, _) = vec_into_raw_parts(ranges);
         ptr
     } else {
         ptr::null_mut()
@@ -347,12 +378,8 @@ fn font_match_to_c(cache: &FcFontCache, match_obj: &FontMatch) -> FcFontMatchC {
         for fallback in &computed_fallbacks {
             let fallback_ranges_count = fallback.unicode_ranges.len();
             let fallback_ranges = if fallback_ranges_count > 0 {
-                let mut ranges = Vec::with_capacity(fallback_ranges_count);
-                for range in &fallback.unicode_ranges {
-                    ranges.push(*range);
-                }
-                let ptr = ranges.as_mut_ptr();
-                mem::forget(ranges);
+                let ranges: Vec<UnicodeRange> = fallback.unicode_ranges.clone();
+                let (ptr, _) = vec_into_raw_parts(ranges);
                 ptr
             } else {
                 ptr::null_mut()
@@ -364,8 +391,7 @@ fn font_match_to_c(cache: &FcFontCache, match_obj: &FontMatch) -> FcFontMatchC {
                 unicode_ranges_count: fallback_ranges_count,
             });
         }
-        let ptr = fb.as_mut_ptr();
-        mem::forget(fb);
+        let (ptr, _) = vec_into_raw_parts(fb);
         ptr
     } else {
         ptr::null_mut()
@@ -388,32 +414,16 @@ unsafe fn free_font_match_c(match_obj: *mut FcFontMatchC) {
 
     let match_obj = &mut *match_obj;
 
-    if !match_obj.unicode_ranges.is_null() && match_obj.unicode_ranges_count > 0 {
-        let _ = Vec::from_raw_parts(
-            match_obj.unicode_ranges,
-            match_obj.unicode_ranges_count,
-            match_obj.unicode_ranges_count,
-        );
-    }
+    free_raw_vec(match_obj.unicode_ranges, match_obj.unicode_ranges_count);
 
     if !match_obj.fallbacks.is_null() && match_obj.fallbacks_count > 0 {
         let fallbacks = slice::from_raw_parts_mut(match_obj.fallbacks, match_obj.fallbacks_count);
 
         for fallback in fallbacks {
-            if !fallback.unicode_ranges.is_null() && fallback.unicode_ranges_count > 0 {
-                let _ = Vec::from_raw_parts(
-                    fallback.unicode_ranges,
-                    fallback.unicode_ranges_count,
-                    fallback.unicode_ranges_count,
-                );
-            }
+            free_raw_vec(fallback.unicode_ranges, fallback.unicode_ranges_count);
         }
 
-        let _ = Vec::from_raw_parts(
-            match_obj.fallbacks,
-            match_obj.fallbacks_count,
-            match_obj.fallbacks_count,
-        );
+        free_raw_vec(match_obj.fallbacks, match_obj.fallbacks_count);
     }
 
     let _ = Box::from_raw(match_obj);
@@ -444,9 +454,7 @@ fn trace_msgs_to_c(trace: &[TraceMsg]) -> (*mut FcTraceMsgC, usize) {
         });
     }
 
-    let ptr = trace_c.as_mut_ptr();
-    let count = trace_c.len();
-    mem::forget(trace_c);
+    let (ptr, count) = vec_into_raw_parts(trace_c);
 
     (ptr, count)
 }
@@ -622,22 +630,16 @@ pub extern "C" fn fc_pattern_add_unicode_range(
             ));
 
             // Free the old array
-            let _ = Vec::from_raw_parts(
-                pattern.unicode_ranges,
-                pattern.unicode_ranges_count,
-                pattern.unicode_ranges_count,
-            );
+            free_raw_vec(pattern.unicode_ranges, pattern.unicode_ranges_count);
         }
 
         // Add the new range
         new_ranges.push(new_range);
 
         // Update the pattern
-        pattern.unicode_ranges = new_ranges.as_mut_ptr();
-        pattern.unicode_ranges_count = new_ranges.len();
-
-        // Forget the vector to avoid double-free
-        mem::forget(new_ranges);
+        let (ptr, len) = vec_into_raw_parts(new_ranges);
+        pattern.unicode_ranges = ptr;
+        pattern.unicode_ranges_count = len;
     }
 }
 
@@ -667,7 +669,7 @@ pub extern "C" fn fc_font_matches_free(matches: *mut *mut FcFontMatchC, count: u
             }
         }
 
-        let _ = Vec::from_raw_parts(matches, count, count);
+        free_raw_vec(matches, count);
     }
 }
 
@@ -695,9 +697,7 @@ pub extern "C" fn fc_font_free(font: *mut FcFontC) {
     unsafe {
         let font = &mut *font;
 
-        if !font.bytes.is_null() && font.bytes_len > 0 {
-            let _ = Vec::from_raw_parts(font.bytes, font.bytes_len, font.bytes_len);
-        }
+        free_raw_vec(font.bytes, font.bytes_len);
 
         free_c_string(font.id);
         let _ = Box::from_raw(font);
@@ -750,7 +750,7 @@ pub extern "C" fn fc_trace_free(trace: *mut FcTraceMsgC, count: usize) {
             }
         }
 
-        let _ = Vec::from_raw_parts(trace, count, count);
+        free_raw_vec(trace, count);
     }
 }
 
@@ -816,7 +816,7 @@ pub extern "C" fn fc_font_info_free(info: *mut FcFontInfoC, count: usize) {
             free_c_string(item.family);
         }
 
-        let _ = Vec::from_raw_parts(info, count, count);
+        free_raw_vec(info, count);
     }
 }
 
@@ -829,25 +829,7 @@ pub extern "C" fn fc_font_metadata_free(metadata: *mut FcFontMetadataC) {
 
     unsafe {
         let metadata = &mut *metadata;
-
-        free_c_string(metadata.copyright);
-        free_c_string(metadata.designer);
-        free_c_string(metadata.designer_url);
-        free_c_string(metadata.font_family);
-        free_c_string(metadata.font_subfamily);
-        free_c_string(metadata.full_name);
-        free_c_string(metadata.id_description);
-        free_c_string(metadata.license);
-        free_c_string(metadata.license_url);
-        free_c_string(metadata.manufacturer);
-        free_c_string(metadata.manufacturer_url);
-        free_c_string(metadata.postscript_name);
-        free_c_string(metadata.preferred_family);
-        free_c_string(metadata.preferred_subfamily);
-        free_c_string(metadata.trademark);
-        free_c_string(metadata.unique_id);
-        free_c_string(metadata.version);
-
+        free_metadata_c(metadata);
         let _ = Box::from_raw(metadata);
     }
 }
@@ -948,29 +930,7 @@ pub extern "C" fn fc_cache_get_font_metadata(
         };
 
         // Create metadata from pattern
-        let metadata = Box::new(FcFontMetadataC {
-            copyright: option_string_to_c_char(pattern.metadata.copyright.as_ref()),
-            designer: option_string_to_c_char(pattern.metadata.designer.as_ref()),
-            designer_url: option_string_to_c_char(pattern.metadata.designer_url.as_ref()),
-            font_family: option_string_to_c_char(pattern.metadata.font_family.as_ref()),
-            font_subfamily: option_string_to_c_char(pattern.metadata.font_subfamily.as_ref()),
-            full_name: option_string_to_c_char(pattern.metadata.full_name.as_ref()),
-            id_description: option_string_to_c_char(pattern.metadata.id_description.as_ref()),
-            license: option_string_to_c_char(pattern.metadata.license.as_ref()),
-            license_url: option_string_to_c_char(pattern.metadata.license_url.as_ref()),
-            manufacturer: option_string_to_c_char(pattern.metadata.manufacturer.as_ref()),
-            manufacturer_url: option_string_to_c_char(pattern.metadata.manufacturer_url.as_ref()),
-            postscript_name: option_string_to_c_char(pattern.metadata.postscript_name.as_ref()),
-            preferred_family: option_string_to_c_char(pattern.metadata.preferred_family.as_ref()),
-            preferred_subfamily: option_string_to_c_char(
-                pattern.metadata.preferred_subfamily.as_ref(),
-            ),
-            trademark: option_string_to_c_char(pattern.metadata.trademark.as_ref()),
-            unique_id: option_string_to_c_char(pattern.metadata.unique_id.as_ref()),
-            version: option_string_to_c_char(pattern.metadata.version.as_ref()),
-        });
-
-        Box::into_raw(metadata)
+        Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
     }
 }
 
@@ -1035,9 +995,8 @@ pub extern "C" fn fc_cache_list_fonts(
             });
         }
 
-        *count = font_info.len();
-        let ptr = font_info.as_mut_ptr();
-        mem::forget(font_info);
+        let (ptr, len) = vec_into_raw_parts(font_info);
+        *count = len;
 
         ptr
     }
@@ -1152,17 +1111,7 @@ pub extern "C" fn fc_resolve_font_chain(
         let cache = &*cache;
         
         // Convert C string array to Vec<String>
-        let families_slice = slice::from_raw_parts(families, families_count);
-        let families_rust: Vec<String> = families_slice
-            .iter()
-            .filter_map(|&s| {
-                if s.is_null() {
-                    None
-                } else {
-                    Some(CStr::from_ptr(s).to_string_lossy().into_owned())
-                }
-            })
-            .collect();
+        let families_rust = c_string_array_to_vec(families, families_count);
 
         let mut trace_msgs = Vec::new();
         let chain = cache.resolve_font_chain(&families_rust, weight, italic, oblique, &mut trace_msgs);
@@ -1239,9 +1188,8 @@ pub extern "C" fn fc_chain_query_for_text(
             });
         }
 
-        *runs_count = runs_c.len();
-        let ptr = runs_c.as_mut_ptr();
-        mem::forget(runs_c);
+        let (ptr, len) = vec_into_raw_parts(runs_c);
+        *runs_count = len;
 
         ptr
     }
@@ -1262,7 +1210,7 @@ pub extern "C" fn fc_resolved_runs_free(runs: *mut FcResolvedFontRunC, count: us
             free_c_string(run.css_source);
         }
 
-        let _ = Vec::from_raw_parts(runs, count, count);
+        free_raw_vec(runs, count);
     }
 }
 
@@ -1291,9 +1239,8 @@ pub extern "C" fn fc_chain_get_original_stack(
             stack_c.push(name_c);
         }
 
-        *stack_count = stack_c.len();
-        let ptr = stack_c.as_mut_ptr();
-        mem::forget(stack_c);
+        let (ptr, len) = vec_into_raw_parts(stack_c);
+        *stack_count = len;
 
         ptr
     }
@@ -1311,7 +1258,7 @@ pub extern "C" fn fc_string_array_free(arr: *mut *mut c_char, count: usize) {
         for s in arr_slice {
             free_c_string(*s);
         }
-        let _ = Vec::from_raw_parts(arr, count, count);
+        free_raw_vec(arr, count);
     }
 }
 
@@ -1344,9 +1291,8 @@ pub extern "C" fn fc_chain_get_css_fallbacks(
                 for font in &group.fonts {
                     let ranges_count = font.unicode_ranges.len();
                     let ranges = if ranges_count > 0 {
-                        let mut ranges_vec: Vec<UnicodeRange> = font.unicode_ranges.clone();
-                        let ptr = ranges_vec.as_mut_ptr();
-                        mem::forget(ranges_vec);
+                        let ranges_vec: Vec<UnicodeRange> = font.unicode_ranges.clone();
+                        let (ptr, _) = vec_into_raw_parts(ranges_vec);
                         ptr
                     } else {
                         ptr::null_mut()
@@ -1358,8 +1304,7 @@ pub extern "C" fn fc_chain_get_css_fallbacks(
                         unicode_ranges_count: ranges_count,
                     });
                 }
-                let ptr = fonts_c.as_mut_ptr();
-                mem::forget(fonts_c);
+                let (ptr, _) = vec_into_raw_parts(fonts_c);
                 ptr
             } else {
                 ptr::null_mut()
@@ -1372,9 +1317,8 @@ pub extern "C" fn fc_chain_get_css_fallbacks(
             });
         }
 
-        *groups_count = groups_c.len();
-        let ptr = groups_c.as_mut_ptr();
-        mem::forget(groups_c);
+        let (ptr, len) = vec_into_raw_parts(groups_c);
+        *groups_count = len;
 
         ptr
     }
@@ -1396,19 +1340,13 @@ pub extern "C" fn fc_css_fallback_groups_free(groups: *mut FcCssFallbackGroupC, 
             if !group.fonts.is_null() && group.fonts_count > 0 {
                 let fonts_slice = slice::from_raw_parts_mut(group.fonts, group.fonts_count);
                 for font in fonts_slice {
-                    if !font.unicode_ranges.is_null() && font.unicode_ranges_count > 0 {
-                        let _ = Vec::from_raw_parts(
-                            font.unicode_ranges,
-                            font.unicode_ranges_count,
-                            font.unicode_ranges_count,
-                        );
-                    }
+                    free_raw_vec(font.unicode_ranges, font.unicode_ranges_count);
                 }
-                let _ = Vec::from_raw_parts(group.fonts, group.fonts_count, group.fonts_count);
+                free_raw_vec(group.fonts, group.fonts_count);
             }
         }
 
-        let _ = Vec::from_raw_parts(groups, count, count);
+        free_raw_vec(groups, count);
     }
 }
 
@@ -1477,32 +1415,21 @@ pub extern "C" fn fc_registry_request_fonts(
         let mut rust_stacks: Vec<Vec<String>> = Vec::with_capacity(num_stacks);
         for i in 0..num_stacks {
             let count = counts_slice[i];
-            let families = slice::from_raw_parts(stacks_slice[i], count);
-            let stack: Vec<String> = families
-                .iter()
-                .filter_map(|&s| {
-                    if s.is_null() {
-                        None
-                    } else {
-                        Some(CStr::from_ptr(s).to_string_lossy().into_owned())
-                    }
-                })
-                .collect();
+            let stack = c_string_array_to_vec(stacks_slice[i], count);
             rust_stacks.push(stack);
         }
 
         let chains = registry.request_fonts(&rust_stacks);
 
-        let mut chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
+        let chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
             .into_iter()
             .map(|chain| {
                 Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
             })
             .collect();
 
-        *out_count = chain_ptrs.len();
-        let ptr = chain_ptrs.as_mut_ptr();
-        mem::forget(chain_ptrs);
+        let (ptr, len) = vec_into_raw_parts(chain_ptrs);
+        *out_count = len;
         ptr
     }
 }
@@ -1519,7 +1446,7 @@ pub extern "C" fn fc_registry_chains_free(
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(chains, count, count);
+        free_raw_vec(chains, count);
     }
 }
 
@@ -1627,9 +1554,8 @@ pub extern "C" fn fc_registry_list_fonts(
             });
         }
 
-        *count = font_info.len();
-        let ptr = font_info.as_mut_ptr();
-        mem::forget(font_info);
+        let (ptr, len) = vec_into_raw_parts(font_info);
+        *count = len;
         ptr
     }
 }
@@ -1651,17 +1577,7 @@ pub extern "C" fn fc_registry_resolve_font_chain(
 
     unsafe {
         let registry = &*registry;
-        let families_slice = slice::from_raw_parts(families, families_count);
-        let families_rust: Vec<String> = families_slice
-            .iter()
-            .filter_map(|&s| {
-                if s.is_null() {
-                    None
-                } else {
-                    Some(CStr::from_ptr(s).to_string_lossy().into_owned())
-                }
-            })
-            .collect();
+        let families_rust = c_string_array_to_vec(families, families_count);
 
         let chain = registry.resolve_font_chain(&families_rust, weight, italic, oblique);
         Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
@@ -1715,26 +1631,7 @@ pub extern "C" fn fc_registry_get_metadata(
 
         match registry.get_metadata_by_id(&id_rust) {
             Some(pattern) => {
-                let metadata = Box::new(FcFontMetadataC {
-                    copyright: option_string_to_c_char(pattern.metadata.copyright.as_ref()),
-                    designer: option_string_to_c_char(pattern.metadata.designer.as_ref()),
-                    designer_url: option_string_to_c_char(pattern.metadata.designer_url.as_ref()),
-                    font_family: option_string_to_c_char(pattern.metadata.font_family.as_ref()),
-                    font_subfamily: option_string_to_c_char(pattern.metadata.font_subfamily.as_ref()),
-                    full_name: option_string_to_c_char(pattern.metadata.full_name.as_ref()),
-                    id_description: option_string_to_c_char(pattern.metadata.id_description.as_ref()),
-                    license: option_string_to_c_char(pattern.metadata.license.as_ref()),
-                    license_url: option_string_to_c_char(pattern.metadata.license_url.as_ref()),
-                    manufacturer: option_string_to_c_char(pattern.metadata.manufacturer.as_ref()),
-                    manufacturer_url: option_string_to_c_char(pattern.metadata.manufacturer_url.as_ref()),
-                    postscript_name: option_string_to_c_char(pattern.metadata.postscript_name.as_ref()),
-                    preferred_family: option_string_to_c_char(pattern.metadata.preferred_family.as_ref()),
-                    preferred_subfamily: option_string_to_c_char(pattern.metadata.preferred_subfamily.as_ref()),
-                    trademark: option_string_to_c_char(pattern.metadata.trademark.as_ref()),
-                    unique_id: option_string_to_c_char(pattern.metadata.unique_id.as_ref()),
-                    version: option_string_to_c_char(pattern.metadata.version.as_ref()),
-                });
-                Box::into_raw(metadata)
+                Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
             }
             None => ptr::null_mut(),
         }

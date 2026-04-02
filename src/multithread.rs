@@ -53,17 +53,7 @@ impl FcFontRegistry {
                     .map(|t| t.to_lowercase())
                     .collect();
 
-                // Guessed family: style-filtered tokens joined
-                let guessed_family: String = all_tokens
-                    .iter()
-                    .filter(|t| {
-                        !config::FONT_STYLE_TOKENS
-                            .iter()
-                            .any(|s| s.eq_ignore_ascii_case(t))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("");
+                let guessed_family = config::guess_family_from_filename(path);
 
                 known_paths
                     .entry(guessed_family.clone())
