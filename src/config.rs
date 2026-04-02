@@ -148,12 +148,7 @@ pub fn common_font_families(os: OperatingSystem) -> &'static [&'static str] {
 pub fn tokenize_common_families(os: OperatingSystem) -> Vec<Vec<String>> {
     common_font_families(os)
         .iter()
-        .map(|family| {
-            FcFontCache::extract_font_name_tokens(family)
-                .into_iter()
-                .map(|t| t.to_lowercase())
-                .collect()
-        })
+        .map(|family| tokenize_lowercase(family))
         .collect()
 }
 
@@ -185,10 +180,20 @@ pub fn matches_common_family_tokens(
 /// - `"ArialBold"` → `["arial"]`
 /// - `"NotoSansJP-Regular"` → `["noto", "sans", "jp"]`
 /// - `"HelveticaNeue-BoldItalic"` → `["helvetica", "neue"]`
-pub fn tokenize_font_stem(stem: &str) -> Vec<String> {
-    FcFontCache::extract_font_name_tokens(stem)
+/// Tokenize a name into lowercase tokens (no style filtering).
+///
+/// Useful for priority scoring where style tokens like "Bold" are still relevant.
+pub fn tokenize_lowercase(name: &str) -> Vec<String> {
+    FcFontCache::extract_font_name_tokens(name)
         .into_iter()
         .map(|t| t.to_lowercase())
+        .collect()
+}
+
+/// Tokenize a font filename stem into lowercase tokens, filtering out style tokens.
+pub fn tokenize_font_stem(stem: &str) -> Vec<String> {
+    tokenize_lowercase(stem)
+        .into_iter()
         .filter(|t| !FONT_STYLE_TOKENS.iter().any(|s| s.eq_ignore_ascii_case(t)))
         .collect()
 }
@@ -370,9 +375,6 @@ mod tests {
 
     /// Helper: tokenize a stem into all lowercase tokens (including style tokens).
     fn tokenize_all(stem: &str) -> Vec<String> {
-        FcFontCache::extract_font_name_tokens(stem)
-            .into_iter()
-            .map(|t| t.to_lowercase())
-            .collect()
+        tokenize_lowercase(stem)
     }
 }

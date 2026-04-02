@@ -340,9 +340,6 @@ mod tests {
 
     /// Helper: tokenize a stem into all lowercase tokens.
     fn tokenize_all(stem: &str) -> Vec<String> {
-        crate::FcFontCache::extract_font_name_tokens(stem)
-            .into_iter()
-            .map(|t| t.to_lowercase())
-            .collect()
+        crate::config::tokenize_lowercase(stem)
     }
 }

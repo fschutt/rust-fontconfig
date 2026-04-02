@@ -43,35 +43,31 @@ impl FcFontRegistry {
         // Pre-tokenize common families once (not per-file)
         let common_token_sets = config::tokenize_common_families(self.os);
 
-        if let (Ok(mut known_paths), Ok(mut queue)) =
-            (self.known_paths.write(), self.build_queue.lock())
-        {
-            for path in &all_font_paths {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                let all_tokens: Vec<String> = FcFontCache::extract_font_name_tokens(stem)
-                    .into_iter()
-                    .map(|t| t.to_lowercase())
-                    .collect();
+        let Ok(mut known_paths) = self.known_paths.write() else { return };
+        let Ok(mut queue) = self.build_queue.lock() else { return };
 
-                let guessed_family = config::guess_family_from_filename(path);
+        for path in &all_font_paths {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let all_tokens = config::tokenize_lowercase(stem);
+            let guessed_family = config::guess_family_from_filename(path);
 
-                known_paths
-                    .entry(guessed_family.clone())
-                    .or_insert_with(Vec::new)
-                    .push(path.clone());
+            known_paths
+                .entry(guessed_family.clone())
+                .or_insert_with(Vec::new)
+                .push(path.clone());
 
-                let priority = assign_scout_priority(&all_tokens, &common_token_sets);
-
-                queue.push(FcBuildJob {
-                    priority,
-                    path: path.clone(),
-                    font_index: None,
-                    guessed_family,
-                });
-            }
-
-            queue.sort();
+            let priority = assign_scout_priority(&all_tokens, &common_token_sets);
+            queue.push(FcBuildJob {
+                priority,
+                path: path.clone(),
+                font_index: None,
+                guessed_family,
+            });
         }
+
+        queue.sort();
+        drop(queue);
+        drop(known_paths);
 
         self.scan_complete.store(true, Ordering::Release);
         self.queue_condvar.notify_all();

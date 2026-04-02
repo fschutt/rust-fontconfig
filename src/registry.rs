@@ -127,11 +127,11 @@ impl FcFontRegistry {
     /// Register in-memory (bundled) fonts. These are available immediately.
     pub fn register_memory_fonts(&self, fonts: Vec<NamedFont>) {
         for named_font in fonts {
-            if let Some(parsed) = FcParseFontBytes(&named_font.bytes, &named_font.name) {
-                if let Ok(mut cache) = self.cache.write() {
-                    cache.with_memory_fonts(parsed);
-                }
-            }
+            let Some(parsed) = FcParseFontBytes(&named_font.bytes, &named_font.name) else {
+                continue;
+            };
+            let Ok(mut cache) = self.cache.write() else { continue };
+            cache.with_memory_fonts(parsed);
         }
     }
 
@@ -202,46 +202,44 @@ impl FcFontRegistry {
         // 2. Wait for Scout to finish (typically < 100ms).
         //    Uses condvar instead of busy-polling.
         if !self.scan_complete.load(Ordering::Acquire) {
-            if let Ok(mut completed) = self.completed_paths.lock() {
-                while !self.scan_complete.load(Ordering::Acquire) {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        eprintln!(
-                            "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
-                             Proceeding with available fonts."
-                        );
-                        return self.resolve_chains(&expanded_stacks);
-                    }
-                    completed = match self.progress.wait_timeout(completed, remaining) {
-                        Ok((c, _)) => c,
-                        Err(_) => return self.resolve_chains(&expanded_stacks),
-                    };
+            let Ok(mut completed) = self.completed_paths.lock() else {
+                return self.resolve_chains(&expanded_stacks);
+            };
+            while !self.scan_complete.load(Ordering::Acquire) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    eprintln!(
+                        "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
+                         Proceeding with available fonts."
+                    );
+                    return self.resolve_chains(&expanded_stacks);
                 }
+                completed = match self.progress.wait_timeout(completed, remaining) {
+                    Ok((c, _)) => c,
+                    Err(_) => return self.resolve_chains(&expanded_stacks),
+                };
             }
         }
 
         // 3. Check which families are completely missing from the cache
-        let missing: Vec<String> = if let Ok(cache) = self.cache.read() {
-            needed_families
-                .iter()
-                .filter(|fam| !family_exists_in_patterns(fam, cache.patterns.keys()))
-                .cloned()
-                .collect()
-        } else {
-            needed_families.clone()
-        };
+        let missing: Vec<String> = self.cache.read()
+            .map(|cache| {
+                needed_families
+                    .iter()
+                    .filter(|fam| !family_exists_in_patterns(fam, cache.patterns.keys()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_else(|_| needed_families.clone());
 
         // 4. Find font files that match needed families but haven't been
         //    fully parsed yet. Uses completed_paths (not processed_paths!)
         //    because processed_paths is set BEFORE parsing, while
         //    completed_paths is set AFTER parsing + insert_font().
-        let incomplete_paths = if let (Ok(known), Ok(completed)) =
-            (self.known_paths.read(), self.completed_paths.lock())
-        {
-            find_incomplete_paths(&needed_families, &known, &completed)
-        } else {
-            Vec::new()
-        };
+        let incomplete_paths = self.known_paths.read().ok()
+            .zip(self.completed_paths.lock().ok())
+            .map(|(known, completed)| find_incomplete_paths(&needed_families, &known, &completed))
+            .unwrap_or_default();
 
         // 5. If nothing is missing AND all files are processed, resolve immediately
         if missing.is_empty() && incomplete_paths.is_empty() {
@@ -288,27 +286,28 @@ impl FcFontRegistry {
         // 7. Wait for all wait_paths to be completed.
         //    Uses condvar instead of busy-polling with sleep(1ms).
         if !wait_paths.is_empty() {
-            if let Ok(mut completed) = self.completed_paths.lock() {
-                loop {
-                    if wait_paths.iter().all(|p| completed.contains(p)) {
-                        break;
-                    }
-                    if self.build_complete.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        eprintln!(
-                            "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
-                             Proceeding with available fonts."
-                        );
-                        break;
-                    }
-                    completed = match self.progress.wait_timeout(completed, remaining) {
-                        Ok((c, _)) => c,
-                        Err(_) => break,
-                    };
+            let Ok(mut completed) = self.completed_paths.lock() else {
+                return self.resolve_chains(&expanded_stacks);
+            };
+            loop {
+                if wait_paths.iter().all(|p| completed.contains(p)) {
+                    break;
                 }
+                if self.build_complete.load(Ordering::Acquire) {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    eprintln!(
+                        "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
+                         Proceeding with available fonts."
+                    );
+                    break;
+                }
+                completed = match self.progress.wait_timeout(completed, remaining) {
+                    Ok((c, _)) => c,
+                    Err(_) => break,
+                };
             }
         }
 
@@ -362,18 +361,17 @@ impl FcFontRegistry {
         italic: PatternMatch,
         oblique: PatternMatch,
     ) -> FontFallbackChain {
-        if let Ok(cache) = self.cache.read() {
-            let mut trace = Vec::new();
-            cache.resolve_font_chain_with_os(
-                font_families, weight, italic, oblique, &mut trace, self.os,
-            )
-        } else {
-            FontFallbackChain {
+        let Ok(cache) = self.cache.read() else {
+            return FontFallbackChain {
                 css_fallbacks: Vec::new(),
                 unicode_fallbacks: Vec::new(),
                 original_stack: font_families.to_vec(),
-            }
-        }
+            };
+        };
+        let mut trace = Vec::new();
+        cache.resolve_font_chain_with_os(
+            font_families, weight, italic, oblique, &mut trace, self.os,
+        )
     }
 
     /// Take a snapshot of the current cache state as an immutable `FcFontCache`.
@@ -409,18 +407,14 @@ impl FcFontRegistry {
 
     /// Insert a parsed font into the cache (called by Builder threads).
     pub fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
-        if let Ok(mut cache) = self.cache.write() {
-            let id = FontId::new();
-            cache.index_pattern_tokens(&pattern, id);
-            cache.patterns.insert(pattern.clone(), id);
-            cache.disk_fonts.insert(id, path);
-            cache.metadata.insert(id, pattern);
-
-            // Invalidate chain cache since we have new fonts
-            if let Ok(mut cc) = cache.chain_cache.lock() {
-                cc.clear();
-            }
-        }
+        let Ok(mut cache) = self.cache.write() else { return };
+        let id = FontId::new();
+        cache.index_pattern_tokens(&pattern, id);
+        cache.patterns.insert(pattern.clone(), id);
+        cache.disk_fonts.insert(id, path);
+        cache.metadata.insert(id, pattern);
+        // Invalidate chain cache — scope the inner lock so it drops before cache
+        let _ = cache.chain_cache.lock().map(|mut cc| cc.clear());
     }
 
     /// Resolve font chains from the current state of the registry.

@@ -961,42 +961,28 @@ impl FontFallbackChain {
     /// Returns None if no font in the chain can render this character
     pub fn resolve_char(&self, cache: &FcFontCache, ch: char) -> Option<(FontId, String)> {
         let codepoint = ch as u32;
-        
-        // First check CSS fallbacks in order
+
+        // Check CSS fallbacks in order
         for group in &self.css_fallbacks {
             for font in &group.fonts {
-                if let Some(meta) = cache.get_metadata_by_id(&font.id) {
-                    // Check if this font's unicode ranges cover the character
-                    if meta.unicode_ranges.is_empty() {
-                        // Font has no unicode range info - skip it, don't assume it covers everything
-                        // This is important because fonts that don't properly declare their ranges
-                        // should not be used as a catch-all
-                        continue;
-                    } else {
-                        // Check if character is in any of the font's ranges
-                        for range in &meta.unicode_ranges {
-                            if codepoint >= range.start && codepoint <= range.end {
-                                return Some((font.id, group.css_name.clone()));
-                            }
-                        }
-                        // Character not in any range - continue to next font
-                    }
+                let Some(meta) = cache.get_metadata_by_id(&font.id) else { continue };
+                if meta.unicode_ranges.is_empty() {
+                    continue; // No range info — don't assume it covers everything
+                }
+                if meta.unicode_ranges.iter().any(|r| codepoint >= r.start && codepoint <= r.end) {
+                    return Some((font.id, group.css_name.clone()));
                 }
             }
         }
-        
-        // If not found in CSS fallbacks, check Unicode fallbacks
+
+        // Check Unicode fallbacks
         for font in &self.unicode_fallbacks {
-            if let Some(meta) = cache.get_metadata_by_id(&font.id) {
-                // Check if this font's unicode ranges cover the character
-                for range in &meta.unicode_ranges {
-                    if codepoint >= range.start && codepoint <= range.end {
-                        return Some((font.id, "(unicode-fallback)".to_string()));
-                    }
-                }
+            let Some(meta) = cache.get_metadata_by_id(&font.id) else { continue };
+            if meta.unicode_ranges.iter().any(|r| codepoint >= r.start && codepoint <= r.end) {
+                return Some((font.id, "(unicode-fallback)".to_string()));
             }
         }
-        
+
         None
     }
     
@@ -1645,6 +1631,10 @@ impl FcFontCache {
     }
 
     /// Check if a pattern matches the query, with detailed tracing
+    fn trace_path(k: &FcPattern) -> String {
+        k.name.as_ref().cloned().unwrap_or_else(|| "<unknown>".to_string())
+    }
+
     pub fn query_matches_internal(
         k: &FcPattern,
         pattern: &FcPattern,
@@ -1652,18 +1642,10 @@ impl FcFontCache {
     ) -> bool {
         // Check name - substring match
         if let Some(ref name) = pattern.name {
-            let matches = k
-                .name
-                .as_ref()
-                .map_or(false, |k_name| k_name.contains(name));
-
-            if !matches {
+            if !k.name.as_ref().map_or(false, |kn| kn.contains(name)) {
                 trace.push(TraceMsg {
                     level: TraceLevel::Info,
-                    path: k
-                        .name
-                        .as_ref()
-                        .map_or_else(|| "<unknown>".to_string(), Clone::clone),
+                    path: Self::trace_path(k),
                     reason: MatchReason::NameMismatch {
                         requested: pattern.name.clone(),
                         found: k.name.clone(),
@@ -1675,18 +1657,10 @@ impl FcFontCache {
 
         // Check family - substring match
         if let Some(ref family) = pattern.family {
-            let matches = k
-                .family
-                .as_ref()
-                .map_or(false, |k_family| k_family.contains(family));
-
-            if !matches {
+            if !k.family.as_ref().map_or(false, |kf| kf.contains(family)) {
                 trace.push(TraceMsg {
                     level: TraceLevel::Info,
-                    path: k
-                        .name
-                        .as_ref()
-                        .map_or_else(|| "<unknown>".to_string(), Clone::clone),
+                    path: Self::trace_path(k),
                     reason: MatchReason::FamilyMismatch {
                         requested: pattern.family.clone(),
                         found: k.family.clone(),
@@ -1744,10 +1718,7 @@ impl FcFontCache {
 
                 trace.push(TraceMsg {
                     level: TraceLevel::Info,
-                    path: k
-                        .name
-                        .as_ref()
-                        .map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                    path: Self::trace_path(k),
                     reason: MatchReason::StyleMismatch {
                         property: property_name,
                         requested,
@@ -1762,10 +1733,7 @@ impl FcFontCache {
         if pattern.weight != FcWeight::Normal && pattern.weight != k.weight {
             trace.push(TraceMsg {
                 level: TraceLevel::Info,
-                path: k
-                    .name
-                    .as_ref()
-                    .map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                path: Self::trace_path(k),
                 reason: MatchReason::WeightMismatch {
                     requested: pattern.weight,
                     found: k.weight,
@@ -1778,10 +1746,7 @@ impl FcFontCache {
         if pattern.stretch != FcStretch::Normal && pattern.stretch != k.stretch {
             trace.push(TraceMsg {
                 level: TraceLevel::Info,
-                path: k
-                    .name
-                    .as_ref()
-                    .map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                path: Self::trace_path(k),
                 reason: MatchReason::StretchMismatch {
                     requested: pattern.stretch,
                     found: k.stretch,
@@ -1809,10 +1774,7 @@ impl FcFontCache {
             if !has_overlap {
                 trace.push(TraceMsg {
                     level: TraceLevel::Info,
-                    path: k
-                        .name
-                        .as_ref()
-                        .map_or_else(|| "<unknown>".to_string(), |s| s.clone()),
+                    path: Self::trace_path(k),
                     reason: MatchReason::UnicodeRangeMismatch {
                         character: '\0', // No specific character to report
                         ranges: k.unicode_ranges.clone(),
@@ -1882,10 +1844,8 @@ impl FcFontCache {
             oblique,
         };
         
-        if let Ok(cache) = self.chain_cache.lock() {
-            if let Some(cached) = cache.get(&cache_key) {
-                return cached.clone();
-            }
+        if let Some(cached) = self.chain_cache.lock().ok().and_then(|c| c.get(&cache_key).cloned()) {
+            return cached;
         }
         
         // Expand generic CSS families to OS-specific fonts (no unicode ranges needed anymore)
@@ -3184,11 +3144,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
         paths
             .par_iter()
             .filter_map(|(prefix, p)| {
-                if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
-                    Some(FcScanSingleDirectoryRecursive(path))
-                } else {
-                    None
-                }
+                process_path(prefix, PathBuf::from(p), false).map(FcScanSingleDirectoryRecursive)
             })
             .flatten()
             .collect()
@@ -3198,11 +3154,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
         paths
             .iter()
             .filter_map(|(prefix, p)| {
-                if let Some(path) = process_path(prefix, PathBuf::from(p), false) {
-                    Some(FcScanSingleDirectoryRecursive(path))
-                } else {
-                    None
-                }
+                process_path(prefix, PathBuf::from(p), false).map(FcScanSingleDirectoryRecursive)
             })
             .flatten()
             .collect()
