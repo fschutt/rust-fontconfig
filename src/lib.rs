@@ -1950,7 +1950,7 @@ impl FcFontCache {
         if let Some(cached) = self.chain_cache.lock().ok().and_then(|c| c.get(&cache_key).cloned()) {
             return cached;
         }
-        
+
         // Expand generic CSS families to OS-specific fonts (no unicode ranges needed anymore)
         let expanded_families = expand_font_families(font_families, os, &[]);
         
@@ -2042,11 +2042,33 @@ impl FcFontCache {
             });
         }
         
-        // Unicode fallbacks are now resolved lazily in query_for_text()
-        // This avoids the expensive unicode coverage check during chain building
+        // Populate unicode_fallbacks for major script blocks.
+        // CSS fallback fonts may falsely claim CJK coverage via OS/2 bits
+        // without having actual glyphs, so we always search for fallback fonts
+        // and let resolve_char() prefer CSS fallbacks first (they come first in order).
+        let important_ranges = [
+            UnicodeRange { start: 0x0400, end: 0x04FF }, // Cyrillic
+            UnicodeRange { start: 0x0600, end: 0x06FF }, // Arabic
+            UnicodeRange { start: 0x0900, end: 0x097F }, // Devanagari
+            UnicodeRange { start: 0x3040, end: 0x309F }, // Hiragana
+            UnicodeRange { start: 0x30A0, end: 0x30FF }, // Katakana
+            UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK Unified Ideographs
+            UnicodeRange { start: 0xAC00, end: 0xD7A3 }, // Hangul Syllables
+        ];
+        let all_uncovered = vec![false; important_ranges.len()];
+        let unicode_fallbacks = self.find_unicode_fallbacks(
+            &important_ranges,
+            &all_uncovered,
+            &css_fallbacks,
+            weight,
+            italic,
+            oblique,
+            trace,
+        );
+
         FontFallbackChain {
             css_fallbacks,
-            unicode_fallbacks: Vec::new(), // Will be populated on-demand
+            unicode_fallbacks,
             original_stack: font_families.to_vec(),
         }
     }
@@ -2285,15 +2307,14 @@ impl FcFontCache {
     /// Find fonts to cover missing Unicode ranges
     /// Uses intelligent matching: prefers fonts with similar names to existing ones
     /// Early quits once all Unicode ranges are covered for performance
-    #[allow(dead_code)]
     fn find_unicode_fallbacks(
         &self,
         unicode_ranges: &[UnicodeRange],
         covered_chars: &[bool],
         existing_groups: &[CssFallbackGroup],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
+        _weight: FcWeight,
+        _italic: PatternMatch,
+        _oblique: PatternMatch,
         trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatch> {
         // Extract uncovered ranges
@@ -2307,19 +2328,22 @@ impl FcFontCache {
         if uncovered_ranges.is_empty() {
             return Vec::new();
         }
-        
-        // Query for fonts that cover these ranges
+
+        // Query for fonts that cover these ranges.
+        // Use DontCare for weight/italic/oblique — we want ANY font that covers
+        // the missing characters, regardless of style. The similarity sort below
+        // will prefer fonts matching the existing chain's style anyway.
         let pattern = FcPattern {
-            name: None, // Wildcard - match any font
-            weight,
-            italic,
-            oblique,
+            name: None,
+            weight: FcWeight::Normal, // Normal weight is not filtered by query_matches_internal (line 1836)
+            italic: PatternMatch::DontCare,
+            oblique: PatternMatch::DontCare,
             unicode_ranges: uncovered_ranges.clone(),
             ..Default::default()
         };
         
         let mut candidates = self.query_internal(&pattern, trace);
-        
+
         // Intelligent sorting: prefer fonts with similar names to existing ones
         // Extract font family prefixes from existing fonts (e.g., "Noto Sans" from "Noto Sans JP")
         let existing_prefixes: Vec<String> = existing_groups
@@ -2395,7 +2419,6 @@ impl FcFontCache {
     
     /// Calculate similarity score between a font and existing font prefixes
     /// Higher score = more similar
-    #[allow(dead_code)]
     fn calculate_font_similarity_score(
         font_meta: Option<&FcPattern>,
         existing_prefixes: &[String],
