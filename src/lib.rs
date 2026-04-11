@@ -85,7 +85,7 @@ use allsorts::tables::os2::Os2;
 use allsorts::tables::{FontTableProvider, HheaTable, HmtxTable, MaxpTable};
 #[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::tag;
-#[cfg(all(feature = "std", feature = "parsing"))]
+#[cfg(feature = "std")]
 use std::path::PathBuf;
 
 pub mod utils;
@@ -1360,16 +1360,40 @@ impl FcFontCache {
         }
     }
 
-    /// Builds a new font cache
-    #[cfg(not(all(feature = "std", feature = "parsing")))]
-    pub fn build() -> Self {
-        Self::default()
-    }
+    /// Returns an empty font cache (no_std / no filesystem).
+    #[cfg(not(feature = "std"))]
+    pub fn build() -> Self { Self::default() }
 
-    /// Builds a new font cache from all fonts discovered on the system
+    /// Scans system font directories using filename heuristics (no allsorts).
+    #[cfg(all(feature = "std", not(feature = "parsing")))]
+    pub fn build() -> Self { Self::build_from_filenames() }
+
+    /// Scans and parses all system fonts via allsorts for full metadata.
     #[cfg(all(feature = "std", feature = "parsing"))]
-    pub fn build() -> Self {
-        Self::build_inner(None)
+    pub fn build() -> Self { Self::build_inner(None) }
+
+    /// Filename-only scan: discovers fonts on disk, guesses metadata from
+    /// the filename using [`config::tokenize_font_stem`].
+    #[cfg(all(feature = "std", not(feature = "parsing")))]
+    fn build_from_filenames() -> Self {
+        let mut cache = Self::default();
+        for dir in crate::config::font_directories(OperatingSystem::current()) {
+            for path in FcCollectFontFilesRecursive(dir) {
+                let pattern = match pattern_from_filename(&path) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let id = FontId::new();
+                cache.disk_fonts.insert(id, FcFontPath {
+                    path: path.to_string_lossy().to_string(),
+                    font_index: 0,
+                });
+                cache.index_pattern_tokens(&pattern, id);
+                cache.metadata.insert(id, pattern.clone());
+                cache.patterns.insert(pattern, id);
+            }
+        }
+        cache
     }
     
     /// Builds a font cache with only specific font families (and their fallbacks).
@@ -3559,42 +3583,41 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing"))]
-fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> {
-    let mut files_to_parse = Vec::new();
+/// Recursively collect all files from a directory (no parsing, no allsorts).
+#[cfg(feature = "std")]
+fn FcCollectFontFilesRecursive(dir: PathBuf) -> Vec<PathBuf> {
+    let mut files = Vec::new();
     let mut dirs_to_parse = vec![dir];
 
-    'outer: loop {
-        let mut new_dirs_to_parse = Vec::new();
-
-        'inner: for dir in dirs_to_parse.clone() {
-            let dir = match std::fs::read_dir(dir) {
+    loop {
+        let mut new_dirs = Vec::new();
+        for dir in &dirs_to_parse {
+            let entries = match std::fs::read_dir(dir) {
                 Ok(o) => o,
-                Err(_) => continue 'inner,
+                Err(_) => continue,
             };
-
-            for (path, pathbuf) in dir.filter_map(|entry| {
-                let entry = entry.ok()?;
+            for entry in entries.flatten() {
                 let path = entry.path();
-                let pathbuf = path.to_path_buf();
-                Some((path, pathbuf))
-            }) {
                 if path.is_dir() {
-                    new_dirs_to_parse.push(pathbuf);
+                    new_dirs.push(path);
                 } else {
-                    files_to_parse.push(pathbuf);
+                    files.push(path);
                 }
             }
         }
-
-        if new_dirs_to_parse.is_empty() {
-            break 'outer;
-        } else {
-            dirs_to_parse = new_dirs_to_parse;
+        if new_dirs.is_empty() {
+            break;
         }
+        dirs_to_parse = new_dirs;
     }
 
-    FcParseFontFiles(&files_to_parse)
+    files
+}
+
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> {
+    let files = FcCollectFontFilesRecursive(dir);
+    FcParseFontFiles(&files)
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -3621,7 +3644,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
     result.into_iter().flat_map(|f| f.into_iter()).collect()
 }
 
-#[cfg(all(feature = "std", feature = "parsing"))]
+#[cfg(feature = "std")]
 /// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
 ///
 /// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
@@ -4064,4 +4087,48 @@ fn detect_monospace(
     }
 
     Some(monospace)
+}
+
+/// Guess font metadata from a filename using the existing tokenizer.
+///
+/// Uses [`config::tokenize_font_stem`] and [`config::FONT_STYLE_TOKENS`]
+/// to extract the family name and detect style hints from the filename.
+#[cfg(feature = "std")]
+fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    match ext.as_str() {
+        "ttf" | "otf" | "ttc" | "woff" | "woff2" => {}
+        _ => return None,
+    }
+
+    let stem = path.file_stem()?.to_str()?;
+    let all_tokens = crate::config::tokenize_lowercase(stem);
+
+    // Style detection: check if any token matches a known style keyword
+    let has_token = |kw: &str| all_tokens.iter().any(|t| t == kw);
+    let is_bold = has_token("bold") || has_token("heavy");
+    let is_italic = has_token("italic");
+    let is_oblique = has_token("oblique");
+    let is_mono = has_token("mono") || has_token("monospace");
+    let is_condensed = has_token("condensed");
+
+    // Family = non-style tokens joined
+    let family_tokens = crate::config::tokenize_font_stem(stem);
+    if family_tokens.is_empty() { return None; }
+    let family = family_tokens.join(" ");
+
+    Some(FcPattern {
+        name: Some(stem.to_string()),
+        family: Some(family),
+        bold: if is_bold { PatternMatch::True } else { PatternMatch::False },
+        italic: if is_italic { PatternMatch::True } else { PatternMatch::False },
+        oblique: if is_oblique { PatternMatch::True } else { PatternMatch::DontCare },
+        monospace: if is_mono { PatternMatch::True } else { PatternMatch::DontCare },
+        condensed: if is_condensed { PatternMatch::True } else { PatternMatch::DontCare },
+        weight: if is_bold { FcWeight::Bold } else { FcWeight::Normal },
+        stretch: if is_condensed { FcStretch::Condensed } else { FcStretch::Normal },
+        unicode_ranges: Vec::new(),
+        metadata: FcFontMetadata::default(),
+        render_config: FcFontRenderConfig::default(),
+    })
 }

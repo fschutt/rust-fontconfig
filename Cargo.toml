@@ -30,7 +30,7 @@ mmapio = { version = "0.9.1", default-features = false, optional = true }
 rayon = { version = "1.11.0", default-features = false, optional = true }
 
 [features]
-default = ["std", "parsing", "multithreading"]
+default = ["std"]
 std = ["mmapio"]
 multithreading = ["rayon"]
 parsing = ["allsorts", "std"]
