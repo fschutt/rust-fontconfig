@@ -3644,7 +3644,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
     result.into_iter().flat_map(|f| f.into_iter()).collect()
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", target_os = "linux"))]
 /// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
 ///
 /// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
