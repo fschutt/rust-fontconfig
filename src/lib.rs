@@ -692,6 +692,24 @@ pub struct UnicodeRange {
     pub end: u32,
 }
 
+/// The default set of Unicode-block fallback scripts that
+/// [`FcFontCache::resolve_font_chain`] pulls in when no explicit
+/// `scripts_hint` is supplied.
+///
+/// Keeping this exposed lets callers that *do* want the default
+/// behaviour build the set explicitly — typically by union-ing it
+/// with a detected-from-document set before calling
+/// [`FcFontCache::resolve_font_chain_with_scripts`].
+pub const DEFAULT_UNICODE_FALLBACK_SCRIPTS: &[UnicodeRange] = &[
+    UnicodeRange { start: 0x0400, end: 0x04FF }, // Cyrillic
+    UnicodeRange { start: 0x0600, end: 0x06FF }, // Arabic
+    UnicodeRange { start: 0x0900, end: 0x097F }, // Devanagari
+    UnicodeRange { start: 0x3040, end: 0x309F }, // Hiragana
+    UnicodeRange { start: 0x30A0, end: 0x30FF }, // Katakana
+    UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK Unified Ideographs
+    UnicodeRange { start: 0xAC00, end: 0xD7A3 }, // Hangul Syllables
+];
+
 impl UnicodeRange {
     pub fn contains(&self, c: char) -> bool {
         let c = c as u32;
@@ -1159,10 +1177,17 @@ pub struct CssFallbackGroup {
 }
 
 /// Cache key for font fallback chain queries
-/// 
-/// IMPORTANT: This key intentionally does NOT include unicode_ranges.
-/// Font chains should be cached by CSS properties only, not by text content.
-/// Different texts with the same CSS font-stack should share the same chain.
+///
+/// IMPORTANT: This key intentionally does NOT include per-text unicode
+/// ranges — fallback chains are cached by CSS properties only. Different
+/// texts with the same CSS font-stack share the same chain.
+///
+/// `scripts_hint_hash` distinguishes *which set of Unicode-fallback
+/// scripts* the caller asked for. `None` means "the default set of 7
+/// major scripts" (Cyrillic/Arabic/Devanagari/Hiragana/Katakana/CJK/Hangul,
+/// back-compat behaviour of `resolve_font_chain`). `Some(h)` is a
+/// stable hash of a caller-supplied script list so an ASCII-only
+/// query doesn't collide with a CJK-aware one.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FontChainCacheKey {
@@ -1173,15 +1198,46 @@ pub(crate) struct FontChainCacheKey {
     /// Font style flags
     pub(crate) italic: PatternMatch,
     pub(crate) oblique: PatternMatch,
+    /// Hash of the caller-supplied script hint (or `None` for the default set).
+    pub(crate) scripts_hint_hash: Option<u64>,
+}
+
+/// Hash a `scripts_hint` slice into a stable u64 for use as a
+/// [`FontChainCacheKey`] component. Order-insensitive: we sort a
+/// local copy before hashing so `[CJK, Arabic]` and `[Arabic, CJK]`
+/// key into the same cache slot.
+#[cfg(feature = "std")]
+fn hash_scripts_hint(ranges: &[UnicodeRange]) -> u64 {
+    let mut sorted: Vec<UnicodeRange> = ranges.to_vec();
+    sorted.sort();
+    let mut buf = Vec::with_capacity(sorted.len() * 8);
+    for r in &sorted {
+        buf.extend_from_slice(&r.start.to_le_bytes());
+        buf.extend_from_slice(&r.end.to_le_bytes());
+    }
+    crate::utils::content_hash_u64(&buf)
 }
 
 /// Path to a font file
+///
+/// `bytes_hash` is a deterministic 64-bit hash of the file's full
+/// byte contents (see [`crate::utils::content_hash_u64`]). All faces
+/// of a given `.ttc` file share the same `bytes_hash`, and two
+/// different paths pointing at the same file contents also do —
+/// so the cache can share a single `Arc<[u8]>` across them via
+/// [`FcFontCache::get_font_bytes_arc`]. A value of `0` means "hash
+/// not computed" (e.g. built from a filename-only scan, or loaded
+/// from a legacy v1 disk cache); callers must treat `0` as opaque
+/// and fall back to unshared reads.
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct FcFontPath {
     pub path: String,
     pub font_index: usize,
+    /// 64-bit content hash of the file's bytes. 0 = not computed.
+    #[cfg_attr(feature = "cache", serde(default))]
+    pub bytes_hash: u64,
 }
 
 /// In-memory font data
@@ -1242,6 +1298,15 @@ pub struct FcFontCache {
     // Font fallback chain cache (CSS stack + unicode -> resolved chain)
     #[cfg(feature = "std")]
     pub(crate) chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
+    /// Shared file-bytes cache: content-hash → weak Arc<[u8]>.
+    ///
+    /// `get_font_bytes_arc` populates this so that multiple FontIds
+    /// backed by the same file (e.g. every face of a .ttc) return
+    /// the same `Arc<[u8]>` instead of each allocating their own
+    /// `Vec<u8>`. We hold `Weak` references so bytes get freed
+    /// when no `ParsedFont` is keeping them alive.
+    #[cfg(feature = "std")]
+    pub(crate) shared_bytes: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Weak<[u8]>>>,
 }
 
 impl Clone for FcFontCache {
@@ -1255,6 +1320,8 @@ impl Clone for FcFontCache {
             font_tokens: self.font_tokens.clone(),
             #[cfg(feature = "std")]
             chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()), // Empty cache for cloned instance
+            #[cfg(feature = "std")]
+            shared_bytes: std::sync::Mutex::new(std::collections::HashMap::new()), // Weak refs don't survive clones
         }
     }
 }
@@ -1270,6 +1337,8 @@ impl Default for FcFontCache {
             font_tokens: BTreeMap::new(),
             #[cfg(feature = "std")]
             chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(feature = "std")]
+            shared_bytes: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -1347,17 +1416,59 @@ impl FcFontCache {
         self.metadata.get(id)
     }
 
-    /// Get font bytes (either from disk or memory)
+    /// Get font bytes as a shared `Arc<[u8]>`.
+    ///
+    /// When `bytes_hash != 0`, multiple FontIds backed by the same
+    /// file content (e.g. every face of a `.ttc`, or two disk paths
+    /// holding identical bytes) get the *same* `Arc<[u8]>` — so the
+    /// underlying bytes are allocated and read from disk exactly
+    /// once for as long as any consumer keeps an `Arc` alive.
+    ///
+    /// When `bytes_hash == 0` (legacy fallback, filename-only scan,
+    /// v1 disk cache), this degrades to a fresh `Arc::from(Vec<u8>)`
+    /// with no sharing. Correct, just not deduplicated.
+    ///
+    /// Prefer this over [`FcFontCache::get_font_bytes`] in any
+    /// long-lived parser that might otherwise hold many copies of
+    /// the same file in memory.
     #[cfg(feature = "std")]
-    pub fn get_font_bytes(&self, id: &FontId) -> Option<Vec<u8>> {
+    pub fn get_font_bytes_arc(&self, id: &FontId) -> Option<std::sync::Arc<[u8]>> {
+        use std::sync::Arc;
         match self.get_font_by_id(id)? {
-            FontSource::Memory(font) => {
-                Some(font.bytes.clone())
-            }
+            FontSource::Memory(font) => Some(Arc::from(font.bytes.as_slice())),
             FontSource::Disk(path) => {
-                std::fs::read(&path.path).ok()
+                let hash = path.bytes_hash;
+                if hash != 0 {
+                    if let Ok(guard) = self.shared_bytes.lock() {
+                        if let Some(weak) = guard.get(&hash) {
+                            if let Some(arc) = weak.upgrade() {
+                                return Some(arc);
+                            }
+                        }
+                    }
+                }
+                let bytes = std::fs::read(&path.path).ok()?;
+                let arc: Arc<[u8]> = Arc::from(bytes);
+                if hash != 0 {
+                    if let Ok(mut guard) = self.shared_bytes.lock() {
+                        // Overwrite any stale weak ref that failed to upgrade.
+                        guard.insert(hash, Arc::downgrade(&arc));
+                    }
+                }
+                Some(arc)
             }
         }
+    }
+
+    /// Get font bytes (either from disk or memory) as an owned `Vec<u8>`.
+    ///
+    /// Back-compat wrapper around [`FcFontCache::get_font_bytes_arc`];
+    /// clones the shared buffer. New call sites that might hold the
+    /// result for more than a brief parse should prefer the `_arc`
+    /// variant so the bytes get deduplicated across faces.
+    #[cfg(feature = "std")]
+    pub fn get_font_bytes(&self, id: &FontId) -> Option<Vec<u8>> {
+        self.get_font_bytes_arc(id).map(|a| a.to_vec())
     }
 
     /// Returns an empty font cache (no_std / no filesystem).
@@ -1387,6 +1498,9 @@ impl FcFontCache {
                 cache.disk_fonts.insert(id, FcFontPath {
                     path: path.to_string_lossy().to_string(),
                     font_index: 0,
+                    // Filename-only scan — we never read the bytes,
+                    // so there's no dedup key. Leave as 0.
+                    bytes_hash: 0,
                 });
                 cache.index_pattern_tokens(&pattern, id);
                 cache.metadata.insert(id, pattern.clone());
@@ -1962,44 +2076,97 @@ impl FcFontCache {
         trace: &mut Vec<TraceMsg>,
         os: OperatingSystem,
     ) -> FontFallbackChain {
+        self.resolve_font_chain_impl(font_families, weight, italic, oblique, None, trace, os)
+    }
+
+    /// Resolve a font fallback chain, restricting Unicode fallbacks to the
+    /// caller-supplied set of scripts (usually derived from the actual
+    /// text content of the document).
+    ///
+    /// - `scripts_hint: None` → back-compat behaviour, equivalent to
+    ///   [`FcFontCache::resolve_font_chain`]: pulls in fallback fonts for
+    ///   the full [`DEFAULT_UNICODE_FALLBACK_SCRIPTS`] set.
+    /// - `scripts_hint: Some(&[])` → no Unicode fallbacks attached. For
+    ///   an ASCII-only page this avoids pulling Arial Unicode MS,
+    ///   CJK fonts, etc. into memory when they're not needed.
+    /// - `scripts_hint: Some(&[CJK])` → only CJK fallback attached.
+    ///
+    /// The chain cache is keyed so an ASCII-only resolution cannot be
+    /// served from a slot populated by a default/all-scripts resolution.
+    #[cfg(feature = "std")]
+    pub fn resolve_font_chain_with_scripts(
+        &self,
+        font_families: &[String],
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        scripts_hint: Option<&[UnicodeRange]>,
+        trace: &mut Vec<TraceMsg>,
+    ) -> FontFallbackChain {
+        self.resolve_font_chain_impl(
+            font_families, weight, italic, oblique, scripts_hint,
+            trace, OperatingSystem::current(),
+        )
+    }
+
+    /// Shared entry used by [`resolve_font_chain_with_os`] and
+    /// [`resolve_font_chain_with_scripts`]. Handles the cache lookup,
+    /// generic-family expansion, and delegation to the uncached builder.
+    #[cfg(feature = "std")]
+    fn resolve_font_chain_impl(
+        &self,
+        font_families: &[String],
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        scripts_hint: Option<&[UnicodeRange]>,
+        trace: &mut Vec<TraceMsg>,
+        os: OperatingSystem,
+    ) -> FontFallbackChain {
         // Check cache FIRST - key uses original (unexpanded) families
-        // This ensures all text nodes with same CSS properties share one chain
+        // plus a hash over the scripts_hint so ASCII-only callers don't
+        // consume a slot filled by a default-scripts caller.
+        let scripts_hint_hash = scripts_hint.map(hash_scripts_hint);
         let cache_key = FontChainCacheKey {
-            font_families: font_families.to_vec(),  // Use ORIGINAL families, not expanded
+            font_families: font_families.to_vec(),
             weight,
             italic,
             oblique,
+            scripts_hint_hash,
         };
-        
+
         if let Some(cached) = self.chain_cache.lock().ok().and_then(|c| c.get(&cache_key).cloned()) {
             return cached;
         }
 
-        // Expand generic CSS families to OS-specific fonts (no unicode ranges needed anymore)
+        // Expand generic CSS families to OS-specific fonts
         let expanded_families = expand_font_families(font_families, os, &[]);
-        
+
         // Build the chain
         let chain = self.resolve_font_chain_uncached(
             &expanded_families,
             weight,
             italic,
             oblique,
+            scripts_hint,
             trace,
         );
-        
+
         // Cache the result
         if let Ok(mut cache) = self.chain_cache.lock() {
             cache.insert(cache_key, chain.clone());
         }
-        
+
         chain
     }
     
-    /// Internal implementation without caching
-    /// 
-    /// Note: This function no longer takes text/unicode_ranges as input.
-    /// Instead, the returned FontFallbackChain has a query_for_text() method
-    /// that can be called to resolve which fonts to use for specific text.
+    /// Internal implementation without caching.
+    ///
+    /// `scripts_hint`:
+    /// - `None` pulls in the full [`DEFAULT_UNICODE_FALLBACK_SCRIPTS`]
+    ///   set (the original, back-compat behaviour).
+    /// - `Some(&[])` attaches no Unicode fallbacks.
+    /// - `Some(ranges)` attaches fallbacks only for those ranges.
     #[cfg(feature = "std")]
     fn resolve_font_chain_uncached(
         &self,
@@ -2007,6 +2174,7 @@ impl FcFontCache {
         weight: FcWeight,
         italic: PatternMatch,
         oblique: PatternMatch,
+        scripts_hint: Option<&[UnicodeRange]>,
         trace: &mut Vec<TraceMsg>,
     ) -> FontFallbackChain {
         let mut css_fallbacks = Vec::new();
@@ -2066,29 +2234,34 @@ impl FcFontCache {
             });
         }
         
-        // Populate unicode_fallbacks for major script blocks.
-        // CSS fallback fonts may falsely claim CJK coverage via OS/2 bits
-        // without having actual glyphs, so we always search for fallback fonts
-        // and let resolve_char() prefer CSS fallbacks first (they come first in order).
-        let important_ranges = [
-            UnicodeRange { start: 0x0400, end: 0x04FF }, // Cyrillic
-            UnicodeRange { start: 0x0600, end: 0x06FF }, // Arabic
-            UnicodeRange { start: 0x0900, end: 0x097F }, // Devanagari
-            UnicodeRange { start: 0x3040, end: 0x309F }, // Hiragana
-            UnicodeRange { start: 0x30A0, end: 0x30FF }, // Katakana
-            UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK Unified Ideographs
-            UnicodeRange { start: 0xAC00, end: 0xD7A3 }, // Hangul Syllables
-        ];
-        let all_uncovered = vec![false; important_ranges.len()];
-        let unicode_fallbacks = self.find_unicode_fallbacks(
-            &important_ranges,
-            &all_uncovered,
-            &css_fallbacks,
-            weight,
-            italic,
-            oblique,
-            trace,
-        );
+        // Populate unicode_fallbacks. CSS fallback fonts may falsely claim
+        // coverage of a script via the OS/2 unicode-range bits without
+        // actually having glyphs, so we supplement the CSS chain with an
+        // explicit lookup for each requested script block. resolve_char()
+        // prefers CSS fallbacks first (earlier in the chain wins).
+        //
+        // The set of script blocks to cover is caller-controlled via
+        // `scripts_hint`: `None` keeps the back-compat DEFAULT_UNICODE_FALLBACK_SCRIPTS
+        // behaviour (7 scripts) so existing `resolve_font_chain` consumers
+        // stay unchanged; `Some(&[])` opts into "no unicode fallbacks at all"
+        // for ASCII-only documents, eliminating the big CJK / Arabic fonts
+        // from the resolved chain (and therefore from eager downstream parses).
+        let important_ranges: &[UnicodeRange] =
+            scripts_hint.unwrap_or(DEFAULT_UNICODE_FALLBACK_SCRIPTS);
+        let unicode_fallbacks = if important_ranges.is_empty() {
+            Vec::new()
+        } else {
+            let all_uncovered = vec![false; important_ranges.len()];
+            self.find_unicode_fallbacks(
+                important_ranges,
+                &all_uncovered,
+                &css_fallbacks,
+                weight,
+                italic,
+                oblique,
+                trace,
+            )
+        };
 
         FontFallbackChain {
             css_fallbacks,
@@ -3483,6 +3656,11 @@ pub(crate) fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPa
 
     let faces = parse_font_faces(&font_bytes[..])?;
     let path_str = filepath.to_string_lossy().to_string();
+    // Hash once per file — every face of a .ttc shares this value,
+    // so the shared-bytes cache can return the same Arc<[u8]> for
+    // all of them. Use the cheap sampled variant so the scout doesn't
+    // page-fault the full file into RSS just to produce a dedup key.
+    let bytes_hash = crate::utils::content_dedup_hash_u64(&font_bytes[..]);
 
     Some(
         faces
@@ -3493,6 +3671,7 @@ pub(crate) fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPa
                     FcFontPath {
                         path: path_str.clone(),
                         font_index: face.font_index,
+                        bytes_hash,
                     },
                 )
             })

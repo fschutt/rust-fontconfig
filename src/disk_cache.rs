@@ -22,7 +22,9 @@ pub struct FontManifest {
 }
 
 impl FontManifest {
-    pub const CURRENT_VERSION: u32 = 1;
+    /// Bump on breaking changes. v2 adds `bytes_hash` per file entry
+    /// for the Arc-shared-bytes deduplication added in rust-fontconfig 3.3.
+    pub const CURRENT_VERSION: u32 = 2;
 }
 
 /// A single cached font file entry.
@@ -32,6 +34,10 @@ pub struct FontCacheEntry {
     pub mtime_secs: u64,
     /// File size in bytes
     pub file_size: u64,
+    /// 64-bit content hash of the whole file (see
+    /// `crate::utils::content_hash_u64`). 0 = not computed.
+    #[serde(default)]
+    pub bytes_hash: u64,
     /// Parsed font data for each font index in the file
     pub font_indices: Vec<FontIndexEntry>,
 }
@@ -79,15 +85,17 @@ impl FcFontRegistry {
                 let pb = PathBuf::from(path_str);
                 processed.insert(pb.clone());
                 completed.insert(pb);
-                entry.font_indices.iter().map(move |idx_entry| (path_str, idx_entry))
+                let hash = entry.bytes_hash;
+                entry.font_indices.iter().map(move |idx_entry| (path_str, hash, idx_entry))
             })
-            .for_each(|(path_str, idx_entry)| {
+            .for_each(|(path_str, bytes_hash, idx_entry)| {
                 let id = FontId::new();
                 cache.index_pattern_tokens(&idx_entry.pattern, id);
                 cache.patterns.insert(idx_entry.pattern.clone(), id);
                 cache.disk_fonts.insert(id, FcFontPath {
                     path: path_str.clone(),
                     font_index: idx_entry.font_index,
+                    bytes_hash,
                 });
                 cache.metadata.insert(id, idx_entry.pattern.clone());
             });
@@ -134,6 +142,7 @@ impl FcFontRegistry {
                         FontCacheEntry {
                             mtime_secs,
                             file_size,
+                            bytes_hash: font_path.bytes_hash,
                             font_indices: Vec::new(),
                         }
                     })
