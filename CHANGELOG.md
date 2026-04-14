@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.0] - 2026-04-14
+
+### Added
+
+- **`FcFontCache::get_font_bytes_arc`**: Returns font bytes as a
+  shared `Arc<[u8]>`. Multiple `FontId`s backed by the same file
+  content (every face of a `.ttc`, or two paths holding identical
+  bytes) now return the *same* `Arc`, so downstream parsers that
+  hold the bytes no longer duplicate them per face. The existing
+  `get_font_bytes -> Vec<u8>` is kept as a thin wrapper.
+
+- **`FcFontPath::bytes_hash: u64`**: Deterministic 64-bit content
+  hash of the file's byte contents, computed once per file at
+  parse time. Used as the key for the Arc-sharing cache. A value
+  of `0` means "not computed" (e.g. built from a filename-only
+  scan, or loaded from a legacy v1 disk cache) and callers should
+  treat it as opaque.
+
+- **`DEFAULT_UNICODE_FALLBACK_SCRIPTS`** (pub const): The 7 script
+  blocks `resolve_font_chain` pulls in by default (Cyrillic, Arabic,
+  Devanagari, Hiragana, Katakana, CJK Unified, Hangul).
+
+- **`FcFontCache::resolve_font_chain_with_scripts`**: New primary
+  entry point for fallback-chain resolution. Accepts
+  `scripts_hint: Option<&[UnicodeRange]>`:
+  - `None` → current behaviour (all 7 default scripts).
+  - `Some(&[])` → no Unicode fallbacks attached (for ASCII-only
+    documents this avoids dragging Arial Unicode MS and CJK
+    fonts into the resolved chain).
+  - `Some(&[CJK])` → only CJK fallback attached.
+
+  The chain cache is keyed so a no-scripts-hint resolution can't
+  be served from a slot filled by an all-scripts resolution.
+
+- `utils::content_hash_u64` — stable-across-runs 64-bit byte hash.
+
+### Changed
+
+- Disk-cache `FontManifest::CURRENT_VERSION` bumped from `1` → `2`
+  to persist `bytes_hash` per file. Existing v1 caches are
+  invalidated on load (triggers a clean re-scan).
+
+- `FontCacheEntry` now has a `bytes_hash: u64` field
+  (`#[serde(default)]` for forward-compat).
+
+### Unchanged / Back-compat
+
+- `resolve_font_chain` / `resolve_font_chain_with_os` keep their
+  signatures and their "default 7 scripts" behaviour.
+- `get_font_bytes` keeps its `Option<Vec<u8>>` signature; it now
+  just clones from `get_font_bytes_arc` internally.
+
 ## [2.0.0] - 2026-02-14
 
 ### Breaking Changes
