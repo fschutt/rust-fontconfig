@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "3.3.0"
+version = "4.0.0"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -15,7 +15,7 @@ name = "rust_fontconfig"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-allsorts = { version = "0.16.1", default-features = false, features = ["flate2_rust"], optional = true }
+allsorts = { package = "allsorts-azul", version = "0.16.2", default-features = false, features = ["flate2_rust"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }
 dirs = { version = "6", optional = true }

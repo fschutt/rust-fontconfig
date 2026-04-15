@@ -322,8 +322,10 @@ impl FcFontRegistry {
         self.cache.read().ok()?.metadata.get(id).cloned()
     }
 
-    /// Get font bytes for a given font ID (either from memory or disk).
-    pub fn get_font_bytes(&self, id: &FontId) -> Option<Vec<u8>> {
+    /// Get font bytes for a given font ID — disk-backed fonts come
+    /// back as a shared mmap; in-memory fonts as `Owned`. See
+    /// [`FcFontCache::get_font_bytes`] for the lifetime semantics.
+    pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<crate::FontBytes>> {
         self.cache.read().ok()?.get_font_bytes(id)
     }
 
@@ -379,6 +381,50 @@ impl FcFontRegistry {
         self.cache.read()
             .map(|c| c.clone())
             .unwrap_or_default()
+    }
+
+    /// Block until the background scout + builder threads have
+    /// populated the in-memory pattern map with every font's NAME +
+    /// OS/2 metadata (most importantly `unicode_ranges`). Returns
+    /// immediately if a disk cache was loaded, both scan + build
+    /// already completed, or the 5 s deadline elapses.
+    ///
+    /// Callers that skip [`request_fonts`] but still need a fully
+    /// populated [`FcFontCache`] snapshot (e.g. headless renderers
+    /// that do their own font-chain resolution) must invoke this
+    /// first — otherwise `into_fc_font_cache` may capture the cache
+    /// mid-build and every `resolve_char` call will return `None`
+    /// because `unicode_ranges` is empty for not-yet-parsed fonts.
+    ///
+    /// This waits for `build_complete` (not just `scan_complete`) —
+    /// the scout finishes `readdir` quickly but the builder threads
+    /// do the actual header parsing, and it is the builder output
+    /// that populates `unicode_ranges`.
+    pub fn wait_for_scout(&self) {
+        use std::time::{Duration, Instant};
+        if self.cache_loaded.load(Ordering::Acquire) {
+            return;
+        }
+        if self.build_complete.load(Ordering::Acquire) {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let Ok(mut completed) = self.completed_paths.lock() else {
+            return;
+        };
+        while !self.build_complete.load(Ordering::Acquire) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                eprintln!(
+                    "[rfc-font-registry] WARNING: wait_for_scout timed out (5s)."
+                );
+                return;
+            }
+            completed = match self.progress.wait_timeout(completed, remaining) {
+                Ok((c, _)) => c,
+                Err(_) => return,
+            };
+        }
     }
 
     /// Signal all background threads to shut down.

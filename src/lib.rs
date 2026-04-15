@@ -1225,7 +1225,7 @@ fn hash_scripts_hint(ranges: &[UnicodeRange]) -> u64 {
 /// of a given `.ttc` file share the same `bytes_hash`, and two
 /// different paths pointing at the same file contents also do —
 /// so the cache can share a single `Arc<[u8]>` across them via
-/// [`FcFontCache::get_font_bytes_arc`]. A value of `0` means "hash
+/// [`FcFontCache::get_font_bytes`]. A value of `0` means "hash
 /// not computed" (e.g. built from a filename-only scan, or loaded
 /// from a legacy v1 disk cache); callers must treat `0` as opaque
 /// and fall back to unshared reads.
@@ -1256,6 +1256,92 @@ pub enum FontSource<'a> {
     Memory(&'a FcFont),
     /// Font loaded from disk
     Disk(&'a FcFontPath),
+}
+
+/// A handle to font bytes returned by [`FcFontCache::get_font_bytes`].
+///
+/// On disk, an `Mmap` is used so untouched pages don't count toward
+/// process RSS. In-memory fonts (`FcFont`) come back as `Owned` since
+/// they're already on the heap.
+///
+/// `FontBytes` derefs to `[u8]` and implements `AsRef<[u8]>`, so any
+/// existing API that wants `&[u8]` (allsorts, ttf-parser, …) can
+/// accept it without code changes.
+///
+/// Both variants are `Send + Sync` (mmaps and `Arc<[u8]>` are both
+/// safe to share across threads).
+#[cfg(feature = "std")]
+pub enum FontBytes {
+    /// Heap-owned bytes. Used for `FontSource::Memory` and as a
+    /// fallback when mmap is unavailable.
+    Owned(std::sync::Arc<[u8]>),
+    /// File-backed mmap. Read-only; pages are demand-loaded by the
+    /// kernel.
+    Mmapped(mmapio::Mmap),
+}
+
+#[cfg(feature = "std")]
+impl FontBytes {
+    /// Borrow the underlying byte slice.
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            FontBytes::Owned(arc) => arc,
+            FontBytes::Mmapped(m) => &m[..],
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl core::ops::Deref for FontBytes {
+    type Target = [u8];
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+#[cfg(feature = "std")]
+impl AsRef<[u8]> for FontBytes {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Debug for FontBytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kind = match self {
+            FontBytes::Owned(_) => "Owned",
+            FontBytes::Mmapped(_) => "Mmapped",
+        };
+        write!(f, "FontBytes::{}({} bytes)", kind, self.as_slice().len())
+    }
+}
+
+/// Open a font file as an mmap-backed [`FontBytes`]. Falls back to a
+/// heap read if mmap fails (e.g. the file is on a network share that
+/// doesn't support mmap, or we're on a target without `std`-mmap).
+#[cfg(feature = "std")]
+fn open_font_bytes_mmap(path: &str) -> Option<std::sync::Arc<FontBytes>> {
+    use std::fs::File;
+    use std::sync::Arc;
+
+    #[cfg(not(target_family = "wasm"))]
+    {
+        if let Ok(file) = File::open(path) {
+            // Safety: `Mmap::map` requires that the file is not
+            // mutated while mapped. For system fonts that's the
+            // overwhelming common case; if a user replaces the file
+            // we accept reading the snapshot we mapped earlier.
+            if let Ok(mmap) = unsafe { mmapio::MmapOptions::new().map(&file) } {
+                return Some(Arc::new(FontBytes::Mmapped(mmap)));
+            }
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(Arc::new(FontBytes::Owned(Arc::from(bytes))))
 }
 
 /// A named font to be added to the font cache from memory.
@@ -1298,15 +1384,16 @@ pub struct FcFontCache {
     // Font fallback chain cache (CSS stack + unicode -> resolved chain)
     #[cfg(feature = "std")]
     pub(crate) chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
-    /// Shared file-bytes cache: content-hash → weak Arc<[u8]>.
+    /// Shared file-bytes cache: content-hash → weak [`FontBytes`].
     ///
-    /// `get_font_bytes_arc` populates this so that multiple FontIds
-    /// backed by the same file (e.g. every face of a .ttc) return
-    /// the same `Arc<[u8]>` instead of each allocating their own
-    /// `Vec<u8>`. We hold `Weak` references so bytes get freed
-    /// when no `ParsedFont` is keeping them alive.
+    /// [`FcFontCache::get_font_bytes`] populates this so that multiple
+    /// FontIds backed by the same file (e.g. every face of a `.ttc`)
+    /// return the same `Arc<FontBytes>` — and therefore the same mmap
+    /// — instead of each allocating their own buffer. We hold `Weak`
+    /// references so the mmap unmap as soon as no parsed font holds
+    /// it alive.
     #[cfg(feature = "std")]
-    pub(crate) shared_bytes: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Weak<[u8]>>>,
+    pub(crate) shared_bytes: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
 }
 
 impl Clone for FcFontCache {
@@ -1416,49 +1503,40 @@ impl FcFontCache {
         self.metadata.get(id)
     }
 
-    /// Get font bytes as a shared `Arc<[u8]>`.
+    /// Get the font bytes for `id` as a shared [`FontBytes`].
     ///
-    /// When `bytes_hash != 0`, multiple FontIds backed by the same
-    /// file content (e.g. every face of a `.ttc`, or two disk paths
-    /// holding identical bytes) get the *same* `Arc<[u8]>` — so the
-    /// underlying bytes are allocated and read from disk exactly
-    /// once for as long as any consumer keeps an `Arc` alive.
+    /// On disk the returned `Arc<FontBytes>` wraps an mmap of the file
+    /// (`FontBytes::Mmapped`). Untouched pages of the file never count
+    /// toward the process's RSS — for a font where layout shapes only
+    /// a handful of glyphs, this is the difference between paying for
+    /// the whole 4 MiB `.ttc` and paying for the cmap + a few glyf
+    /// pages.
     ///
-    /// When `bytes_hash == 0` (legacy fallback, filename-only scan,
-    /// v1 disk cache), this degrades to a fresh `Arc::from(Vec<u8>)`
-    /// with no sharing. Correct, just not deduplicated.
+    /// In-memory fonts (`FontSource::Memory`) come back as
+    /// `FontBytes::Owned`, since the bytes are already on the heap.
     ///
-    /// Prefer this over [`FcFontCache::get_font_bytes`] in any
-    /// long-lived parser that might otherwise hold many copies of
-    /// the same file in memory.
+    /// Multiple `FontId`s backed by the same file content (every face
+    /// of a `.ttc`, or two paths with identical bytes) return the
+    /// *same* `Arc<FontBytes>` thanks to a content-hash → `Weak`
+    /// cache. Bytes get unmapped automatically when the last consumer
+    /// drops the Arc.
     ///
-    /// Implementation note (mmap follow-up):
-    /// We deliberately stay on the heap-backed `fs::read` path
-    /// instead of returning `mmapio::Mmap`-backed bytes. The two
-    /// reasons:
-    /// 1. The public return type is `Arc<[u8]>` — a fat-pointer to
-    ///    an inline allocation. Constructing one from a `Mmap`
-    ///    without a copy requires either (a) an unsafe fat-pointer
-    ///    cast that leaks the `Mmap`, or (b) a wrapping trait object
-    ///    like `Arc<dyn AsRef<[u8]> + Send + Sync>` which is a
-    ///    breaking API change.
-    /// 2. On macOS / Linux the kernel page cache already
-    ///    deduplicates the underlying file pages across processes,
-    ///    so `fs::read` only pays for the heap copy — and downstream
-    ///    `LocaGlyf::load` walks the whole `glyf` table anyway, so
-    ///    every page would be faulted in regardless of mmap-vs-heap.
-    /// The current Arc-shared dedup (one `Arc<[u8]>` per unique
-    /// `bytes_hash`, weak-ref tracked) already eliminates the
-    /// "5 faces of HelveticaNeue.ttc each allocate 4.27 MiB"
-    /// duplication. Switching to mmap is a follow-up worth
-    /// revisiting if a use case shows up where touched-pages-only
-    /// is meaningfully smaller than full-file (e.g. shaping with
-    /// only ~hundreds of glyphs out of ~thousands).
+    /// `FontBytes` derefs to `[u8]`, so callers that only need
+    /// `&[u8]` (allsorts, ttf-parser, …) can pass it through without
+    /// thinking about the backing.
+    ///
+    /// Failure modes: returns `None` if the path is unknown, or the
+    /// file no longer exists / cannot be opened, or the mmap call
+    /// fails. Callers may retry with a fresh `get_font_bytes` if they
+    /// suspect the file was replaced underneath them; the next call
+    /// re-opens cleanly.
     #[cfg(feature = "std")]
-    pub fn get_font_bytes_arc(&self, id: &FontId) -> Option<std::sync::Arc<[u8]>> {
+    pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<FontBytes>> {
         use std::sync::Arc;
         match self.get_font_by_id(id)? {
-            FontSource::Memory(font) => Some(Arc::from(font.bytes.as_slice())),
+            FontSource::Memory(font) => Some(Arc::new(FontBytes::Owned(
+                Arc::from(font.bytes.as_slice()),
+            ))),
             FontSource::Disk(path) => {
                 let hash = path.bytes_hash;
                 if hash != 0 {
@@ -1470,8 +1548,8 @@ impl FcFontCache {
                         }
                     }
                 }
-                let bytes = std::fs::read(&path.path).ok()?;
-                let arc: Arc<[u8]> = Arc::from(bytes);
+
+                let arc = open_font_bytes_mmap(&path.path)?;
                 if hash != 0 {
                     if let Ok(mut guard) = self.shared_bytes.lock() {
                         // Overwrite any stale weak ref that failed to upgrade.
@@ -1481,17 +1559,6 @@ impl FcFontCache {
                 Some(arc)
             }
         }
-    }
-
-    /// Get font bytes (either from disk or memory) as an owned `Vec<u8>`.
-    ///
-    /// Back-compat wrapper around [`FcFontCache::get_font_bytes_arc`];
-    /// clones the shared buffer. New call sites that might hold the
-    /// result for more than a brief parse should prefer the `_arc`
-    /// variant so the bytes get deduplicated across faces.
-    #[cfg(feature = "std")]
-    pub fn get_font_bytes(&self, id: &FontId) -> Option<Vec<u8>> {
-        self.get_font_bytes_arc(id).map(|a| a.to_vec())
     }
 
     /// Returns an empty font cache (no_std / no filesystem).
