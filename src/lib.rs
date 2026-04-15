@@ -1431,6 +1431,29 @@ impl FcFontCache {
     /// Prefer this over [`FcFontCache::get_font_bytes`] in any
     /// long-lived parser that might otherwise hold many copies of
     /// the same file in memory.
+    ///
+    /// Implementation note (mmap follow-up):
+    /// We deliberately stay on the heap-backed `fs::read` path
+    /// instead of returning `mmapio::Mmap`-backed bytes. The two
+    /// reasons:
+    /// 1. The public return type is `Arc<[u8]>` — a fat-pointer to
+    ///    an inline allocation. Constructing one from a `Mmap`
+    ///    without a copy requires either (a) an unsafe fat-pointer
+    ///    cast that leaks the `Mmap`, or (b) a wrapping trait object
+    ///    like `Arc<dyn AsRef<[u8]> + Send + Sync>` which is a
+    ///    breaking API change.
+    /// 2. On macOS / Linux the kernel page cache already
+    ///    deduplicates the underlying file pages across processes,
+    ///    so `fs::read` only pays for the heap copy — and downstream
+    ///    `LocaGlyf::load` walks the whole `glyf` table anyway, so
+    ///    every page would be faulted in regardless of mmap-vs-heap.
+    /// The current Arc-shared dedup (one `Arc<[u8]>` per unique
+    /// `bytes_hash`, weak-ref tracked) already eliminates the
+    /// "5 faces of HelveticaNeue.ttc each allocate 4.27 MiB"
+    /// duplication. Switching to mmap is a follow-up worth
+    /// revisiting if a use case shows up where touched-pages-only
+    /// is meaningfully smaller than full-file (e.g. shaping with
+    /// only ~hundreds of glyphs out of ~thousands).
     #[cfg(feature = "std")]
     pub fn get_font_bytes_arc(&self, id: &FontId) -> Option<std::sync::Arc<[u8]>> {
         use std::sync::Arc;
