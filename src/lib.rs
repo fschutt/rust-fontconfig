@@ -65,16 +65,19 @@
 //! ```
 
 #![allow(non_snake_case)]
-#![cfg_attr(not(feature = "std"), no_std)]
 
+// As of v4.1 this crate is std-only. The v4.0 `no_std` path is gone —
+// it never supported the registry / multi-thread parsing anyway, and
+// the shared-state `FcFontCache` refactor depends on `std::sync::RwLock`
+// which is unavailable without std. Keeping the `alloc::` import paths
+// means the existing call sites in this file and submodules keep
+// compiling — in std builds `alloc` is just `core::alloc`'s companion
+// crate already linked by the standard library.
 extern crate alloc;
 
-#[cfg(all(feature = "std", feature = "parsing"))]
-use alloc::borrow::ToOwned;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::{format, vec};
 #[cfg(all(feature = "std", feature = "parsing"))]
 use allsorts::binary::read::ReadScope;
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -1249,13 +1252,23 @@ pub struct FcFont {
     pub id: String, // For identification in tests
 }
 
-/// Font source enum to represent either disk or memory fonts
+/// Owned font-source descriptor, returned by
+/// [`FcFontCache::get_font_by_id`].
+///
+/// In v4.0 this was a borrowed enum (`FontSource<'a>` with refs into
+/// the pattern map). With v4.1's shared-state cache, the map lives
+/// behind an `RwLock`, so returning a reference would require the
+/// caller to hold a read guard for the full lifetime of the result —
+/// which bleeds the locking strategy into every call site. The owned
+/// variant clones the small `FcFont` / `FcFontPath` struct and
+/// releases the lock immediately. Bytes/mmap are not cloned — those
+/// go through `get_font_bytes` which hands out `Arc<FontBytes>`.
 #[derive(Debug, Clone)]
-pub enum FontSource<'a> {
-    /// Font loaded from memory
-    Memory(&'a FcFont),
-    /// Font loaded from disk
-    Disk(&'a FcFontPath),
+pub enum OwnedFontSource {
+    /// Font loaded from memory (small metadata + owned `Vec<u8>`).
+    Memory(FcFont),
+    /// Font loaded from disk.
+    Disk(FcFontPath),
 }
 
 /// A handle to font bytes returned by [`FcFontCache::get_font_bytes`].
@@ -1364,25 +1377,37 @@ impl NamedFont {
     }
 }
 
-/// Font cache, initialized at startup
-#[derive(Debug)]
+/// Font cache, initialized at startup.
+///
+/// Thread-safe, shared font cache.
+///
+/// As of v4.1 the cache internally owns its state via
+/// `Arc<RwLock<FcFontCacheInner>>`: cloning an `FcFontCache` returns
+/// a handle that shares the same underlying data. Writes by one holder
+/// (typically the background builder inside `FcFontRegistry`) become
+/// immediately visible to every other holder (layout engines,
+/// shape-time resolvers, etc.).
+///
+/// Before 4.1 the clone deep-copied every map, so external holders
+/// were frozen at the moment they took the snapshot — the mismatch
+/// between "live registry cache" and "frozen font manager cache"
+/// was the root of the silent-text regression when lazy scout mode
+/// was enabled. The shared-state design eliminates that entire class
+/// of staleness bugs by construction.
 pub struct FcFontCache {
-    // Pattern to FontId mapping (query index)
-    pub(crate) patterns: BTreeMap<FcPattern, FontId>,
-    // On-disk font paths
-    pub(crate) disk_fonts: BTreeMap<FontId, FcFontPath>,
-    // In-memory fonts
-    pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
-    // Metadata cache (patterns stored by ID for quick lookup)
-    pub(crate) metadata: BTreeMap<FontId, FcPattern>,
-    // Token index: maps lowercase tokens ("noto", "sans", "jp") to sets of FontIds
-    // This enables fast fuzzy search by intersecting token sets
-    pub(crate) token_index: BTreeMap<String, alloc::collections::BTreeSet<FontId>>,
-    // Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>
-    // Avoids re-tokenization during fuzzy search
-    pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
-    // Font fallback chain cache (CSS stack + unicode -> resolved chain)
-    #[cfg(feature = "std")]
+    pub(crate) shared: std::sync::Arc<FcFontCacheShared>,
+}
+
+/// Shared interior of `FcFontCache`. Always accessed through an
+/// `Arc` — never referenced directly by external callers.
+pub(crate) struct FcFontCacheShared {
+    /// Main pattern/metadata state, guarded by a reader-writer lock.
+    /// Builder threads take the write lock to insert a parsed font;
+    /// all query paths take the read lock.
+    pub(crate) state: std::sync::RwLock<FcFontCacheInner>,
+    /// Font fallback chain cache. Not part of the RwLock-guarded
+    /// state because cache insertions happen under `&self` on read
+    /// paths (they're a memoisation, not observable state).
     pub(crate) chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
     /// Shared file-bytes cache: content-hash → weak [`FontBytes`].
     ///
@@ -1392,61 +1417,49 @@ pub struct FcFontCache {
     /// — instead of each allocating their own buffer. We hold `Weak`
     /// references so the mmap unmap as soon as no parsed font holds
     /// it alive.
-    #[cfg(feature = "std")]
     pub(crate) shared_bytes: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
 }
 
-impl Clone for FcFontCache {
-    fn clone(&self) -> Self {
-        Self {
-            patterns: self.patterns.clone(),
-            disk_fonts: self.disk_fonts.clone(),
-            memory_fonts: self.memory_fonts.clone(),
-            metadata: self.metadata.clone(),
-            token_index: self.token_index.clone(),
-            font_tokens: self.font_tokens.clone(),
-            #[cfg(feature = "std")]
-            chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()), // Empty cache for cloned instance
-            #[cfg(feature = "std")]
-            shared_bytes: std::sync::Mutex::new(std::collections::HashMap::new()), // Weak refs don't survive clones
-        }
-    }
+/// The actual font-pattern state, held behind the RwLock in
+/// `FcFontCacheShared`. Private — all access goes through
+/// `FcFontCache` methods which lock transparently.
+#[derive(Default, Debug)]
+pub(crate) struct FcFontCacheInner {
+    /// Pattern to FontId mapping (query index)
+    pub(crate) patterns: BTreeMap<FcPattern, FontId>,
+    /// On-disk font paths
+    pub(crate) disk_fonts: BTreeMap<FontId, FcFontPath>,
+    /// In-memory fonts
+    pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
+    /// Metadata cache (patterns stored by ID for quick lookup)
+    pub(crate) metadata: BTreeMap<FontId, FcPattern>,
+    /// Token index: maps lowercase tokens ("noto", "sans", "jp") to sets of FontIds.
+    /// Enables fast fuzzy search by intersecting token sets.
+    pub(crate) token_index: BTreeMap<String, alloc::collections::BTreeSet<FontId>>,
+    /// Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>.
+    /// Avoids re-tokenization during fuzzy search.
+    pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
 }
 
-impl Default for FcFontCache {
-    fn default() -> Self {
-        Self {
-            patterns: BTreeMap::new(),
-            disk_fonts: BTreeMap::new(),
-            memory_fonts: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-            token_index: BTreeMap::new(),
-            font_tokens: BTreeMap::new(),
-            #[cfg(feature = "std")]
-            chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-            #[cfg(feature = "std")]
-            shared_bytes: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-}
-
-impl FcFontCache {
-    /// Helper method to add a font pattern to the token index
+impl FcFontCacheInner {
+    /// Add a font pattern to the token index. Called under the
+    /// write lock by insertion paths.
     pub(crate) fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
         // Extract tokens from both name and family
         let mut all_tokens = Vec::new();
-        
+
         if let Some(name) = &pattern.name {
-            all_tokens.extend(Self::extract_font_name_tokens(name));
+            all_tokens.extend(FcFontCache::extract_font_name_tokens(name));
         }
-        
+
         if let Some(family) = &pattern.family {
-            all_tokens.extend(Self::extract_font_name_tokens(family));
+            all_tokens.extend(FcFontCache::extract_font_name_tokens(family));
         }
-        
+
         // Convert tokens to lowercase and store them
-        let tokens_lower: Vec<String> = all_tokens.iter().map(|t| t.to_lowercase()).collect();
-        
+        let tokens_lower: Vec<String> =
+            all_tokens.iter().map(|t| t.to_lowercase()).collect();
+
         // Add each token (lowercase) to the index
         for token_lower in &tokens_lower {
             self.token_index
@@ -1454,53 +1467,151 @@ impl FcFontCache {
                 .or_insert_with(alloc::collections::BTreeSet::new)
                 .insert(id);
         }
-        
+
         // Store pre-tokenized font name for fast lookup (no re-tokenization needed)
         self.font_tokens.insert(id, tokens_lower);
     }
+}
 
-    /// Adds in-memory font files
-    pub fn with_memory_fonts(&mut self, fonts: Vec<(FcPattern, FcFont)>) -> &mut Self {
+impl Clone for FcFontCache {
+    /// Shallow clone — the returned handle shares the same underlying
+    /// state as `self`. Writes through either are visible to both.
+    /// This is the whole point of the v4.1 redesign; callers that need
+    /// an isolated frozen copy must explicitly request one (e.g. via
+    /// `snapshot_state`, which is intentionally not provided because
+    /// we no longer have a use case for it).
+    fn clone(&self) -> Self {
+        Self {
+            shared: std::sync::Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl core::fmt::Debug for FcFontCache {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let state = self.state_read();
+        f.debug_struct("FcFontCache")
+            .field("patterns_len", &state.patterns.len())
+            .field("metadata_len", &state.metadata.len())
+            .field("disk_fonts_len", &state.disk_fonts.len())
+            .field("memory_fonts_len", &state.memory_fonts.len())
+            .finish()
+    }
+}
+
+impl Default for FcFontCache {
+    fn default() -> Self {
+        Self {
+            shared: std::sync::Arc::new(FcFontCacheShared {
+                state: std::sync::RwLock::new(FcFontCacheInner::default()),
+                chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+                shared_bytes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }),
+        }
+    }
+}
+
+impl FcFontCache {
+    /// Acquire a read guard on the cache's state. Panics if the lock
+    /// was poisoned by a panic inside the write guard — same
+    /// contract as `RwLock::read().expect(..)`.
+    #[inline]
+    pub(crate) fn state_read(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, FcFontCacheInner> {
+        self.shared
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Acquire a write guard on the cache's state. Panics on
+    /// poisoning, same as `state_read`.
+    #[inline]
+    pub(crate) fn state_write(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, FcFontCacheInner> {
+        self.shared
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Adds in-memory font files.
+    ///
+    /// Note: takes `&self` — the shared cache handles interior
+    /// mutability via the RwLock.
+    pub fn with_memory_fonts(&self, fonts: Vec<(FcPattern, FcFont)>) -> &Self {
+        let mut state = self.state_write();
         for (pattern, font) in fonts {
             let id = FontId::new();
-            self.patterns.insert(pattern.clone(), id);
-            self.metadata.insert(id, pattern.clone());
-            self.memory_fonts.insert(id, font);
-            self.index_pattern_tokens(&pattern, id);
+            state.patterns.insert(pattern.clone(), id);
+            state.metadata.insert(id, pattern.clone());
+            state.memory_fonts.insert(id, font);
+            state.index_pattern_tokens(&pattern, id);
         }
         self
     }
 
-    /// Adds a memory font with a specific ID (for testing)
+    /// Adds a memory font with a specific ID (for testing).
     pub fn with_memory_font_with_id(
-        &mut self,
+        &self,
         id: FontId,
         pattern: FcPattern,
         font: FcFont,
-    ) -> &mut Self {
-        self.patterns.insert(pattern.clone(), id);
-        self.metadata.insert(id, pattern.clone());
-        self.memory_fonts.insert(id, font);
-        self.index_pattern_tokens(&pattern, id);
+    ) -> &Self {
+        let mut state = self.state_write();
+        state.patterns.insert(pattern.clone(), id);
+        state.metadata.insert(id, pattern.clone());
+        state.memory_fonts.insert(id, font);
+        state.index_pattern_tokens(&pattern, id);
         self
     }
 
-    /// Get font data for a given font ID
-    pub fn get_font_by_id<'a>(&'a self, id: &FontId) -> Option<FontSource<'a>> {
-        // Check memory fonts first
-        if let Some(font) = self.memory_fonts.get(id) {
-            return Some(FontSource::Memory(font));
+    /// Register a newly-parsed on-disk font. Called by the builder
+    /// thread inside `FcFontRegistry`. Allocates a fresh `FontId`,
+    /// inserts the pattern + path + metadata in one write lock, and
+    /// invalidates the chain cache so subsequent resolutions pick
+    /// up the new font.
+    pub fn insert_builder_font(&self, pattern: FcPattern, path: FcFontPath) {
+        let id = FontId::new();
+        {
+            let mut state = self.state_write();
+            state.index_pattern_tokens(&pattern, id);
+            state.patterns.insert(pattern.clone(), id);
+            state.disk_fonts.insert(id, path);
+            state.metadata.insert(id, pattern);
         }
-        // Then check disk fonts
-        if let Some(path) = self.disk_fonts.get(id) {
-            return Some(FontSource::Disk(path));
+        // Invalidate chain cache so callers see the new font on the
+        // next resolve. Scoped after the state write to keep lock
+        // nesting shallow.
+        if let Ok(mut cc) = self.shared.chain_cache.lock() {
+            cc.clear();
+        }
+    }
+
+    /// Get font data for a given font ID.
+    ///
+    /// Returns owned values (not references) because the underlying
+    /// maps live behind an RwLock — a reference could not outlive
+    /// the read guard. In-memory fonts come back as cloned `FcFont`
+    /// instances; disk fonts return their `FcFontPath`.
+    pub fn get_font_by_id(&self, id: &FontId) -> Option<OwnedFontSource> {
+        let state = self.state_read();
+        if let Some(font) = state.memory_fonts.get(id) {
+            return Some(OwnedFontSource::Memory(font.clone()));
+        }
+        if let Some(path) = state.disk_fonts.get(id) {
+            return Some(OwnedFontSource::Disk(path.clone()));
         }
         None
     }
 
-    /// Get metadata directly from an ID
-    pub fn get_metadata_by_id(&self, id: &FontId) -> Option<&FcPattern> {
-        self.metadata.get(id)
+    /// Get metadata for a font ID. Returns an owned `FcPattern`
+    /// (cloned out of the shared map) because we can't return a
+    /// reference across the RwLock boundary.
+    pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
+        self.state_read().metadata.get(id).cloned()
     }
 
     /// Get the font bytes for `id` as a shared [`FontBytes`].
@@ -1534,13 +1645,13 @@ impl FcFontCache {
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<FontBytes>> {
         use std::sync::Arc;
         match self.get_font_by_id(id)? {
-            FontSource::Memory(font) => Some(Arc::new(FontBytes::Owned(
+            OwnedFontSource::Memory(font) => Some(Arc::new(FontBytes::Owned(
                 Arc::from(font.bytes.as_slice()),
             ))),
-            FontSource::Disk(path) => {
+            OwnedFontSource::Disk(path) => {
                 let hash = path.bytes_hash;
                 if hash != 0 {
-                    if let Ok(guard) = self.shared_bytes.lock() {
+                    if let Ok(guard) = self.shared.shared_bytes.lock() {
                         if let Some(weak) = guard.get(&hash) {
                             if let Some(arc) = weak.upgrade() {
                                 return Some(arc);
@@ -1551,7 +1662,7 @@ impl FcFontCache {
 
                 let arc = open_font_bytes_mmap(&path.path)?;
                 if hash != 0 {
-                    if let Ok(mut guard) = self.shared_bytes.lock() {
+                    if let Ok(mut guard) = self.shared.shared_bytes.lock() {
                         // Overwrite any stale weak ref that failed to upgrade.
                         guard.insert(hash, Arc::downgrade(&arc));
                     }
@@ -1577,24 +1688,27 @@ impl FcFontCache {
     /// the filename using [`config::tokenize_font_stem`].
     #[cfg(all(feature = "std", not(feature = "parsing")))]
     fn build_from_filenames() -> Self {
-        let mut cache = Self::default();
-        for dir in crate::config::font_directories(OperatingSystem::current()) {
-            for path in FcCollectFontFilesRecursive(dir) {
-                let pattern = match pattern_from_filename(&path) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let id = FontId::new();
-                cache.disk_fonts.insert(id, FcFontPath {
-                    path: path.to_string_lossy().to_string(),
-                    font_index: 0,
-                    // Filename-only scan — we never read the bytes,
-                    // so there's no dedup key. Leave as 0.
-                    bytes_hash: 0,
-                });
-                cache.index_pattern_tokens(&pattern, id);
-                cache.metadata.insert(id, pattern.clone());
-                cache.patterns.insert(pattern, id);
+        let cache = Self::default();
+        {
+            let mut state = cache.state_write();
+            for dir in crate::config::font_directories(OperatingSystem::current()) {
+                for path in FcCollectFontFilesRecursive(dir) {
+                    let pattern = match pattern_from_filename(&path) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let id = FontId::new();
+                    state.disk_fonts.insert(id, FcFontPath {
+                        path: path.to_string_lossy().to_string(),
+                        font_index: 0,
+                        // Filename-only scan — we never read the bytes,
+                        // so there's no dedup key. Leave as 0.
+                        bytes_hash: 0,
+                    });
+                    state.index_pattern_tokens(&pattern, id);
+                    state.metadata.insert(id, pattern.clone());
+                    state.patterns.insert(pattern, id);
+                }
             }
         }
         cache
@@ -1650,8 +1764,8 @@ impl FcFontCache {
     ///                     If None, load all fonts.
     #[cfg(all(feature = "std", feature = "parsing"))]
     fn build_inner(family_filter: Option<&[String]>) -> Self {
-        let mut cache = FcFontCache::default();
-        
+        let cache = FcFontCache::default();
+
         // Normalize filter families for matching
         let filter_normalized: Option<Vec<String>> = family_filter.map(|families| {
             families
@@ -1676,6 +1790,8 @@ impl FcFontCache {
             }
         };
 
+        let mut state = cache.state_write();
+
         #[cfg(target_os = "linux")]
         {
             if let Some((font_entries, render_configs)) = FcScanDirectories() {
@@ -1688,10 +1804,10 @@ impl FcFontCache {
                             }
                         }
                         let id = FontId::new();
-                        cache.patterns.insert(pattern.clone(), id);
-                        cache.metadata.insert(id, pattern.clone());
-                        cache.disk_fonts.insert(id, path);
-                        cache.index_pattern_tokens(&pattern, id);
+                        state.patterns.insert(pattern.clone(), id);
+                        state.metadata.insert(id, pattern.clone());
+                        state.disk_fonts.insert(id, path);
+                        state.index_pattern_tokens(&pattern, id);
                     }
                 }
             }
@@ -1702,10 +1818,10 @@ impl FcFontCache {
             let system_root = std::env::var("SystemRoot")
                 .or_else(|_| std::env::var("WINDIR"))
                 .unwrap_or_else(|_| "C:\\Windows".to_string());
-            
+
             let user_profile = std::env::var("USERPROFILE")
                 .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
-            
+
             let font_dirs = vec![
                 (None, format!("{}\\Fonts\\", system_root)),
                 (None, format!("{}\\AppData\\Local\\Microsoft\\Windows\\Fonts\\", user_profile)),
@@ -1715,10 +1831,10 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 if matches_filter(&pattern) {
                     let id = FontId::new();
-                    cache.patterns.insert(pattern.clone(), id);
-                    cache.metadata.insert(id, pattern.clone());
-                    cache.disk_fonts.insert(id, path);
-                    cache.index_pattern_tokens(&pattern, id);
+                    state.patterns.insert(pattern.clone(), id);
+                    state.metadata.insert(id, pattern.clone());
+                    state.disk_fonts.insert(id, path);
+                    state.index_pattern_tokens(&pattern, id);
                 }
             }
         }
@@ -1736,49 +1852,67 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 if matches_filter(&pattern) {
                     let id = FontId::new();
-                    cache.patterns.insert(pattern.clone(), id);
-                    cache.metadata.insert(id, pattern.clone());
-                    cache.disk_fonts.insert(id, path);
-                    cache.index_pattern_tokens(&pattern, id);
+                    state.patterns.insert(pattern.clone(), id);
+                    state.metadata.insert(id, pattern.clone());
+                    state.disk_fonts.insert(id, path);
+                    state.index_pattern_tokens(&pattern, id);
                 }
             }
         }
 
+        drop(state);
         cache
     }
     
     /// Check if a font ID is a memory font (preferred over disk fonts)
     pub fn is_memory_font(&self, id: &FontId) -> bool {
-        self.memory_fonts.contains_key(id)
+        self.state_read().memory_fonts.contains_key(id)
     }
 
-    /// Returns the list of fonts and font patterns
-    pub fn list(&self) -> Vec<(&FcPattern, FontId)> {
-        self.patterns
+    /// Returns the list of fonts and font patterns.
+    ///
+    /// Returns owned `FcPattern` values (cloned out of the shared
+    /// state) — this is the v4.1 API change described on
+    /// [`FcFontCache`]. Callers that need to iterate without
+    /// cloning should use [`FcFontCache::for_each_pattern`].
+    pub fn list(&self) -> Vec<(FcPattern, FontId)> {
+        self.state_read()
+            .patterns
             .iter()
-            .map(|(pattern, id)| (pattern, *id))
+            .map(|(pattern, id)| (pattern.clone(), *id))
             .collect()
+    }
+
+    /// Iterate over every `(pattern, id)` pair under a single read
+    /// guard. `f` is called once per entry — avoids the per-entry
+    /// clone that [`list`] incurs.
+    pub fn for_each_pattern<F: FnMut(&FcPattern, &FontId)>(&self, mut f: F) {
+        let state = self.state_read();
+        for (pattern, id) in &state.patterns {
+            f(pattern, id);
+        }
     }
 
     /// Returns true if the cache contains no font patterns
     pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
+        self.state_read().patterns.is_empty()
     }
 
     /// Returns the number of font patterns in the cache
     pub fn len(&self) -> usize {
-        self.patterns.len()
+        self.state_read().patterns.len()
     }
 
     /// Queries a font from the in-memory cache, returns the first found font (early return)
     /// Memory fonts are always preferred over disk fonts with the same match quality.
     pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
+        let state = self.state_read();
         let mut matches = Vec::new();
 
-        for (stored_pattern, id) in &self.patterns {
+        for (stored_pattern, id) in &state.patterns {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
-                let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
-                
+                let metadata = state.metadata.get(id).unwrap_or(stored_pattern);
+
                 // Calculate Unicode compatibility score
                 let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
                     // No specific Unicode requirements, use general coverage
@@ -1787,12 +1921,12 @@ impl FcFontCache {
                     // Calculate how well this font covers the requested Unicode ranges
                     Self::calculate_unicode_compatibility(&pattern.unicode_ranges, &metadata.unicode_ranges)
                 };
-                
+
                 let style_score = Self::calculate_style_score(pattern, metadata);
-                
+
                 // Memory fonts get a bonus to prefer them over disk fonts
-                let is_memory = self.memory_fonts.contains_key(id);
-                
+                let is_memory = state.memory_fonts.contains_key(id);
+
                 matches.push((*id, unicode_compatibility, style_score, metadata.clone(), is_memory));
             }
         }
@@ -1814,24 +1948,36 @@ impl FcFontCache {
         })
     }
 
-    /// Queries all fonts matching a pattern (internal use only)
-    /// 
+    /// Queries all fonts matching a pattern (internal use only).
+    ///
     /// Note: This function is now private. Use resolve_font_chain() to build a font fallback chain,
     /// then call FontFallbackChain::query_for_text() to resolve fonts for specific text.
     fn query_internal(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Vec<FontMatch> {
+        let state = self.state_read();
+        self.query_internal_locked(&state, pattern, trace)
+    }
+
+    /// Internal variant used when the caller already holds a read
+    /// guard on the state. Avoids re-locking.
+    fn query_internal_locked(
+        &self,
+        state: &FcFontCacheInner,
+        pattern: &FcPattern,
+        trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatch> {
         let mut matches = Vec::new();
 
-        for (stored_pattern, id) in &self.patterns {
+        for (stored_pattern, id) in &state.patterns {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
-                let metadata = self.metadata.get(id).unwrap_or(stored_pattern);
-                
+                let metadata = state.metadata.get(id).unwrap_or(stored_pattern);
+
                 // Calculate Unicode compatibility score
                 let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
                     Self::calculate_unicode_coverage(&metadata.unicode_ranges) as i32
                 } else {
                     Self::calculate_unicode_compatibility(&pattern.unicode_ranges, &metadata.unicode_ranges)
                 };
-                
+
                 let style_score = Self::calculate_style_score(pattern, metadata);
                 matches.push((*id, unicode_compatibility, style_score, metadata.clone()));
             }
@@ -1867,25 +2013,27 @@ impl FcFontCache {
         font_id: &FontId,
         trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatchNoFallback> {
-        // Get the pattern for this font
-        let pattern = match self.metadata.get(font_id) {
-            Some(p) => p,
+        let state = self.state_read();
+        let pattern = match state.metadata.get(font_id) {
+            Some(p) => p.clone(),
             None => return Vec::new(),
         };
-        
-        self.compute_fallbacks_for_pattern(pattern, Some(font_id), trace)
+        drop(state);
+
+        self.compute_fallbacks_for_pattern(&pattern, Some(font_id), trace)
     }
-    
+
     fn compute_fallbacks_for_pattern(
         &self,
         pattern: &FcPattern,
         exclude_id: Option<&FontId>,
         _trace: &mut Vec<TraceMsg>,
     ) -> Vec<FontMatchNoFallback> {
+        let state = self.state_read();
         let mut candidates = Vec::new();
 
         // Collect all potential fallbacks (excluding original pattern)
-        for (stored_pattern, id) in &self.patterns {
+        for (stored_pattern, id) in &state.patterns {
             // Skip if this is the original font
             if exclude_id.is_some() && exclude_id.unwrap() == id {
                 continue;
@@ -1898,7 +2046,7 @@ impl FcFontCache {
                     &pattern.unicode_ranges,
                     &stored_pattern.unicode_ranges
                 );
-                
+
                 // Only include if there's actual overlap
                 if unicode_compatibility > 0 {
                     let style_score = Self::calculate_style_score(pattern, stored_pattern);
@@ -1928,6 +2076,8 @@ impl FcFontCache {
             }
         }
 
+        drop(state);
+
         // Sort by Unicode compatibility (highest first), THEN by style score (lowest first)
         candidates.sort_by(|a, b| {
             b.1.cmp(&a.1)
@@ -1956,9 +2106,9 @@ impl FcFontCache {
         deduplicated
     }
 
-    /// Get in-memory font data
-    pub fn get_memory_font(&self, id: &FontId) -> Option<&FcFont> {
-        self.memory_fonts.get(id)
+    /// Get in-memory font data (cloned out of the shared state).
+    pub fn get_memory_font(&self, id: &FontId) -> Option<FcFont> {
+        self.state_read().memory_fonts.get(id).cloned()
     }
 
     /// Check if a pattern matches the query, with detailed tracing
@@ -2225,7 +2375,13 @@ impl FcFontCache {
             scripts_hint_hash,
         };
 
-        if let Some(cached) = self.chain_cache.lock().ok().and_then(|c| c.get(&cache_key).cloned()) {
+        if let Some(cached) = self
+            .shared
+            .chain_cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&cache_key).cloned())
+        {
             return cached;
         }
 
@@ -2243,7 +2399,7 @@ impl FcFontCache {
         );
 
         // Cache the result
-        if let Ok(mut cache) = self.chain_cache.lock() {
+        if let Ok(mut cache) = self.shared.chain_cache.lock() {
             cache.insert(cache_key, chain.clone());
         }
 
@@ -2421,23 +2577,25 @@ impl FcFontCache {
         // If adding a token results in 0 matches, use the previous (broader) set
         // Example: ["Noto"] -> 10 fonts, ["Noto","Sans"] -> 2 fonts, ["Noto","Sans","JP"] -> 0 fonts => use 2 fonts
         
+        let state = self.state_read();
+
         // Start with the first token
         let first_token = &tokens_lower[0];
-        let mut candidate_ids = match self.token_index.get(first_token) {
+        let mut candidate_ids = match state.token_index.get(first_token) {
             Some(ids) if !ids.is_empty() => ids.clone(),
             _ => {
                 // First token not found - no fonts match, quit immediately
                 return Vec::new();
             }
         };
-        
+
         // Progressively narrow down with each additional token
         for token in &tokens_lower[1..] {
-            if let Some(token_ids) = self.token_index.get(token) {
+            if let Some(token_ids) = state.token_index.get(token) {
                 // Calculate intersection
-                let intersection: alloc::collections::BTreeSet<FontId> = 
+                let intersection: alloc::collections::BTreeSet<FontId> =
                     candidate_ids.intersection(token_ids).copied().collect();
-                
+
                 if intersection.is_empty() {
                     // Adding this token results in 0 matches - keep previous set and stop
                     break;
@@ -2450,18 +2608,18 @@ impl FcFontCache {
                 break;
             }
         }
-        
+
         // Now score only the candidate fonts (HUGE speedup!)
         let mut candidates = Vec::new();
-        
+
         for id in candidate_ids {
-            let pattern = match self.metadata.get(&id) {
+            let pattern = match state.metadata.get(&id) {
                 Some(p) => p,
                 None => continue,
             };
             
             // Get pre-tokenized font name (already lowercase)
-            let font_tokens_lower = match self.font_tokens.get(&id) {
+            let font_tokens_lower = match state.font_tokens.get(&id) {
                 Some(tokens) => tokens,
                 None => continue,
             };
@@ -2657,9 +2815,9 @@ impl FcFontCache {
         candidates.sort_by(|a, b| {
             let a_meta = self.get_metadata_by_id(&a.id);
             let b_meta = self.get_metadata_by_id(&b.id);
-            
-            let a_score = Self::calculate_font_similarity_score(a_meta, &existing_prefixes);
-            let b_score = Self::calculate_font_similarity_score(b_meta, &existing_prefixes);
+
+            let a_score = Self::calculate_font_similarity_score(a_meta.as_ref(), &existing_prefixes);
+            let b_score = Self::calculate_font_similarity_score(b_meta.as_ref(), &existing_prefixes);
             
             b_score.cmp(&a_score) // Higher score = better match
                 .then_with(|| {

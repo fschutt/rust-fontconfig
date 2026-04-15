@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 use crate::{
     expand_font_families, FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
     FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
+    UnicodeRange,
 };
 use crate::scoring::{
     family_exists_in_patterns, find_family_paths, find_incomplete_paths,
@@ -61,7 +62,12 @@ use crate::utils::normalize_family_name;
 /// populate it concurrently while the main thread reads from it.
 pub struct FcFontRegistry {
     /// The underlying font cache, populated incrementally by Builder threads.
-    pub cache: RwLock<FcFontCache>,
+    ///
+    /// As of v4.1, `FcFontCache` carries its own internal `RwLock` and
+    /// `Arc`, so the registry can hand out handles (via `shared_cache`)
+    /// that live-update with builder writes — no outer lock needed,
+    /// no staleness for snapshot-holders downstream.
+    pub cache: FcFontCache,
 
     // ── Populated by Scout (fast, Phase 1) ──
     /// Maps guessed lowercase family name → file paths
@@ -90,6 +96,24 @@ pub struct FcFontRegistry {
     pub shutdown: AtomicBool,
     /// Whether a disk cache was successfully loaded (skip blocking in request_fonts)
     pub cache_loaded: AtomicBool,
+    /// When true, the scout populates `known_paths` + sets
+    /// `scan_complete` but does NOT push every path onto
+    /// `build_queue`. Builders therefore idle until a caller runs
+    /// [`FcFontRegistry::request_fonts`] or
+    /// [`FcFontRegistry::request_and_resolve_with_scripts`], which
+    /// priority-bumps *only* the requested families into the queue.
+    /// Cuts steady-state memory: the ~300 system fonts on macOS
+    /// each cost ~50 KiB of parsed NAME + OS/2 metadata in the
+    /// cache's pattern map — skipping those that the current
+    /// workload never touches saves ~15 MiB on a short-lived
+    /// headless render.
+    ///
+    /// Set via [`FcFontRegistry::set_scout_lazy`] before
+    /// [`FcFontRegistry::spawn_scout_and_builders`]. Defaults to
+    /// `false` to preserve the existing eager-scout behaviour for
+    /// long-running embedders who want the disk cache to populate
+    /// in the background.
+    pub lazy_scout: AtomicBool,
 
     // ── Operating system (for font family expansion) ──
     pub os: OperatingSystem,
@@ -109,7 +133,7 @@ impl FcFontRegistry {
     /// Create a new empty registry.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            cache: RwLock::new(FcFontCache::default()),
+            cache: FcFontCache::default(),
             known_paths: RwLock::new(BTreeMap::new()),
             build_queue: Mutex::new(Vec::new()),
             queue_condvar: Condvar::new(),
@@ -120,8 +144,17 @@ impl FcFontRegistry {
             build_complete: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             cache_loaded: AtomicBool::new(false),
+            lazy_scout: AtomicBool::new(false),
             os: OperatingSystem::current(),
         })
+    }
+
+    /// Enable/disable lazy scout mode. See [`FcFontRegistry::lazy_scout`]
+    /// for what this changes. Must be called before
+    /// [`FcFontRegistry::spawn_scout_and_builders`] — the scout thread
+    /// reads the flag once when it starts iterating the build queue.
+    pub fn set_scout_lazy(&self, lazy: bool) {
+        self.lazy_scout.store(lazy, Ordering::Release);
     }
 
     /// Register in-memory (bundled) fonts. These are available immediately.
@@ -130,8 +163,7 @@ impl FcFontRegistry {
             let Some(parsed) = FcParseFontBytes(&named_font.bytes, &named_font.name) else {
                 continue;
             };
-            let Ok(mut cache) = self.cache.write() else { continue };
-            cache.with_memory_fonts(parsed);
+            self.cache.with_memory_fonts(parsed);
         }
     }
 
@@ -222,15 +254,14 @@ impl FcFontRegistry {
         }
 
         // 3. Check which families are completely missing from the cache
-        let missing: Vec<String> = self.cache.read()
-            .map(|cache| {
-                needed_families
-                    .iter()
-                    .filter(|fam| !family_exists_in_patterns(fam, cache.patterns.keys()))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_else(|_| needed_families.clone());
+        let missing: Vec<String> = {
+            let state = self.cache.state_read();
+            needed_families
+                .iter()
+                .filter(|fam| !family_exists_in_patterns(fam, state.patterns.keys()))
+                .cloned()
+                .collect()
+        };
 
         // 4. Find font files that match needed families but haven't been
         //    fully parsed yet. Uses completed_paths (not processed_paths!)
@@ -319,40 +350,35 @@ impl FcFontRegistry {
 
     /// Get font metadata by ID.
     pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
-        self.cache.read().ok()?.metadata.get(id).cloned()
+        self.cache.get_metadata_by_id(id)
     }
 
     /// Get font bytes for a given font ID — disk-backed fonts come
     /// back as a shared mmap; in-memory fonts as `Owned`. See
     /// [`FcFontCache::get_font_bytes`] for the lifetime semantics.
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<crate::FontBytes>> {
-        self.cache.read().ok()?.get_font_bytes(id)
+        self.cache.get_font_bytes(id)
     }
 
     /// Get the disk font path for a font ID.
     pub fn get_disk_font_path(&self, id: &FontId) -> Option<FcFontPath> {
-        self.cache.read().ok()?.disk_fonts.get(id).cloned()
+        self.cache.state_read().disk_fonts.get(id).cloned()
     }
 
     /// Check if a font ID is a memory font.
     pub fn is_memory_font(&self, id: &FontId) -> bool {
-        self.cache.read().ok()
-            .map(|c| c.is_memory_font(id))
-            .unwrap_or(false)
+        self.cache.is_memory_font(id)
     }
 
     /// List all known fonts (pattern + ID pairs).
     pub fn list(&self) -> Vec<(FcPattern, FontId)> {
-        self.cache.read().ok()
-            .map(|c| c.list().into_iter().map(|(p, id)| (p.clone(), id)).collect())
-            .unwrap_or_default()
+        self.cache.list()
     }
 
     /// Query the registry for a font matching the given pattern.
     pub fn query(&self, pattern: &FcPattern) -> Option<FontMatch> {
-        let cache = self.cache.read().ok()?;
         let mut trace = Vec::new();
-        cache.query(pattern, &mut trace)
+        self.cache.query(pattern, &mut trace)
     }
 
     /// Resolve a complete font fallback chain for a CSS font-family stack.
@@ -363,24 +389,64 @@ impl FcFontRegistry {
         italic: PatternMatch,
         oblique: PatternMatch,
     ) -> FontFallbackChain {
-        let Ok(cache) = self.cache.read() else {
-            return FontFallbackChain {
-                css_fallbacks: Vec::new(),
-                unicode_fallbacks: Vec::new(),
-                original_stack: font_families.to_vec(),
-            };
-        };
         let mut trace = Vec::new();
-        cache.resolve_font_chain_with_os(
+        self.cache.resolve_font_chain_with_os(
             font_families, weight, italic, oblique, &mut trace, self.os,
         )
     }
 
-    /// Take a snapshot of the current cache state as an immutable `FcFontCache`.
-    pub fn into_fc_font_cache(&self) -> FcFontCache {
-        self.cache.read()
-            .map(|c| c.clone())
-            .unwrap_or_default()
+    /// On-demand font-chain resolution: triggers the scout + builder
+    /// to parse the requested families (if not already parsed), waits
+    /// for them via condvar, then resolves a full fallback chain with
+    /// the caller-supplied weight / italic / oblique / scripts_hint.
+    ///
+    /// This is the "scout-on-demand" entry point: callers can skip
+    /// the eager `request_fonts(common_stacks)` at init and pay the
+    /// per-family parse only when a DOM actually needs that family.
+    /// On excel.html that cuts the init cost from ~150 ms to ~10 ms
+    /// and peak RSS from ~71 MiB to ~55 MiB because only the
+    /// ~2 families excel uses get parsed, not the full common-stack
+    /// set (~35 fonts across Helvetica/Lucida/Menlo/Times/NewYork/
+    /// Courier/SFNS).
+    ///
+    /// Re-entrant from layout: holds no locks for the duration of the
+    /// call, and `request_fonts` internally handles the scan_complete
+    /// wait + priority-bump + completed_paths wait.
+    #[cfg(feature = "std")]
+    pub fn request_and_resolve_with_scripts(
+        &self,
+        font_families: &[String],
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+        scripts_hint: Option<&[UnicodeRange]>,
+    ) -> FontFallbackChain {
+        // Trigger parse + wait for these families. The returned
+        // `FontFallbackChain` uses Normal/DontCare, which isn't what
+        // we want — discard it and do a full re-resolve below.
+        let _ = self.request_fonts(std::slice::from_ref(&font_families.to_vec()));
+        // With the v4.1 shared cache, the registry's `cache` handle
+        // and any previously-handed-out clone of it point at the
+        // same `Arc<RwLock<FcFontCacheInner>>`, so this read sees
+        // exactly the families the builder just parsed.
+        let mut trace = Vec::new();
+        self.cache.resolve_font_chain_with_scripts(
+            font_families, weight, italic, oblique, scripts_hint, &mut trace,
+        )
+    }
+
+    /// Get a shared handle on the cache. The returned `FcFontCache`
+    /// shares state with this registry (and with every other holder
+    /// of the handle): writes by builder threads via [`insert_font`]
+    /// are immediately visible to all readers.
+    ///
+    /// Replaces v4.0's `into_fc_font_cache` (which took a deep
+    /// snapshot) — the deep copy was the source of the stale-state
+    /// bug in lazy-scout mode, since builders kept writing to the
+    /// registry's cache while downstream holders were stuck on a
+    /// frozen copy.
+    pub fn shared_cache(&self) -> FcFontCache {
+        self.cache.clone()
     }
 
     /// Block until the background scout + builder threads have
@@ -453,14 +519,7 @@ impl FcFontRegistry {
 
     /// Insert a parsed font into the cache (called by Builder threads).
     pub fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
-        let Ok(mut cache) = self.cache.write() else { return };
-        let id = FontId::new();
-        cache.index_pattern_tokens(&pattern, id);
-        cache.patterns.insert(pattern.clone(), id);
-        cache.disk_fonts.insert(id, path);
-        cache.metadata.insert(id, pattern);
-        // Invalidate chain cache — scope the inner lock so it drops before cache
-        let _ = cache.chain_cache.lock().map(|mut cc| cc.clear());
+        self.cache.insert_builder_font(pattern, path);
     }
 
     /// Resolve font chains from the current state of the registry.

@@ -41,12 +41,13 @@ impl FcFontRegistry {
         // Pre-tokenize common families once (not per-file)
         let common_token_sets = config::tokenize_common_families(self.os);
 
+        let lazy = self.lazy_scout.load(Ordering::Acquire);
+
         let Ok(mut known_paths) = self.known_paths.write() else { return };
-        let Ok(mut queue) = self.build_queue.lock() else { return };
+        let mut queue_opt = (!lazy).then(|| self.build_queue.lock().ok()).flatten();
 
         for path in &all_font_paths {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let all_tokens = config::tokenize_lowercase(stem);
             let guessed_family = config::guess_family_from_filename(path);
 
             known_paths
@@ -54,17 +55,29 @@ impl FcFontRegistry {
                 .or_insert_with(Vec::new)
                 .push(path.clone());
 
-            let priority = assign_scout_priority(&all_tokens, &common_token_sets);
-            queue.push(FcBuildJob {
-                priority,
-                path: path.clone(),
-                font_index: None,
-                guessed_family,
-            });
+            // Lazy-scout mode (scout-on-demand): skip the eager
+            // `queue.push` so builders only parse fonts the caller
+            // explicitly requests via `request_fonts` /
+            // `request_and_resolve_with_scripts`. In eager mode the
+            // old behaviour is preserved — push everything at
+            // Scout/Common priority so background threads keep
+            // running and the on-disk cache auto-populates.
+            if let Some(queue) = queue_opt.as_mut() {
+                let all_tokens = config::tokenize_lowercase(stem);
+                let priority = assign_scout_priority(&all_tokens, &common_token_sets);
+                queue.push(FcBuildJob {
+                    priority,
+                    path: path.clone(),
+                    font_index: None,
+                    guessed_family,
+                });
+            }
         }
 
-        queue.sort();
-        drop(queue);
+        if let Some(mut queue) = queue_opt {
+            queue.sort();
+            drop(queue);
+        }
         drop(known_paths);
 
         self.scan_complete.store(true, Ordering::Release);
@@ -74,11 +87,28 @@ impl FcFontRegistry {
 
     /// Builder thread loop: pops jobs from the priority queue, parses fonts,
     /// and inserts results into the registry.
+    ///
+    /// Exit conditions:
+    ///
+    /// - `shutdown` is set (registry is dropping).
+    /// - In **eager** mode: once the scout finishes the initial
+    ///   directory walk, queue empties, and every queued path is
+    ///   processed. At that point `build_complete` flips and the
+    ///   thread returns.
+    /// - In **lazy-scout** mode: the thread keeps waiting on
+    ///   `queue_condvar` indefinitely, because the scout does not
+    ///   pre-queue anything — all jobs come in later from
+    ///   [`FcFontRegistry::request_fonts`]. Exiting on the
+    ///   "queue empty + scan complete" condition (as the eager
+    ///   path does) would race the Critical job push and cause the
+    ///   request to hang forever.
     pub fn builder_thread(&self) {
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 return;
             }
+
+            let lazy = self.lazy_scout.load(Ordering::Acquire);
 
             // Pop the highest-priority job
             let job = {
@@ -96,8 +126,16 @@ impl FcFontRegistry {
                         break job;
                     }
 
-                    // If scan is complete and queue is empty, we're done
-                    if self.scan_complete.load(Ordering::Acquire) && queue.is_empty() {
+                    // Eager mode: exit once the scout is done and
+                    // everything it queued has drained.
+                    //
+                    // Lazy mode: keep waiting — `request_fonts` is
+                    // the sole source of jobs and can fire at any
+                    // time during the layout pass.
+                    if !lazy
+                        && self.scan_complete.load(Ordering::Acquire)
+                        && queue.is_empty()
+                    {
                         self.build_complete.store(true, Ordering::Release);
                         self.progress.notify_all();
                         return;

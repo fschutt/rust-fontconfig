@@ -76,7 +76,7 @@ impl FcFontRegistry {
             return None;
         }
 
-        let mut cache = self.cache.write().ok()?;
+        let mut state = self.cache.state_write();
         let mut processed = self.processed_paths.lock().ok()?;
         let mut completed = self.completed_paths.lock().ok()?;
 
@@ -90,16 +90,17 @@ impl FcFontRegistry {
             })
             .for_each(|(path_str, bytes_hash, idx_entry)| {
                 let id = FontId::new();
-                cache.index_pattern_tokens(&idx_entry.pattern, id);
-                cache.patterns.insert(idx_entry.pattern.clone(), id);
-                cache.disk_fonts.insert(id, FcFontPath {
+                state.index_pattern_tokens(&idx_entry.pattern, id);
+                state.patterns.insert(idx_entry.pattern.clone(), id);
+                state.disk_fonts.insert(id, FcFontPath {
                     path: path_str.clone(),
                     font_index: idx_entry.font_index,
                     bytes_hash,
                 });
-                cache.metadata.insert(id, idx_entry.pattern.clone());
+                state.metadata.insert(id, idx_entry.pattern.clone());
             });
 
+        drop(state);
         self.cache_loaded.store(true, Ordering::Release);
 
         Some(())
@@ -125,13 +126,13 @@ impl FcFontRegistry {
         let cache_path = get_font_cache_path()?;
         std::fs::create_dir_all(cache_path.parent()?).ok()?;
 
-        let cache = self.cache.read().ok()?;
+        let state = self.cache.state_read();
 
         let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
 
-        cache.disk_fonts.iter()
+        state.disk_fonts.iter()
             .filter_map(|(id, font_path)| {
-                cache.metadata.get(id).map(|pattern| (font_path, pattern))
+                state.metadata.get(id).map(|pattern| (font_path, pattern))
             })
             .for_each(|(font_path, pattern)| {
                 entries

@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "4.0.0"
+version = "4.1.0"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -29,6 +29,12 @@ xmlparser = { version = "0.13.6", default-features = false }
 mmapio = { version = "0.9.1", default-features = false, optional = true }
 rayon = { version = "1.11.0", default-features = false, optional = true }
 
+# Feature layout as of v4.1:
+# - `std` is now *always* enabled; keeping the feature gate around is
+#   a no-op so existing `features = ["std"]` declarations keep working.
+#   The `no_std` build path was dropped when `FcFontCache` moved to an
+#   `Arc<RwLock<_>>` shared-state design that requires `std::sync`.
+# - All other features compose on top of std.
 [features]
 default = ["std"]
 std = ["mmapio"]
