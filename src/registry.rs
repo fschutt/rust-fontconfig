@@ -515,6 +515,278 @@ impl FcFontRegistry {
         self.cache_loaded.load(Ordering::Acquire)
     }
 
+    /// Fast-path font resolution: for each stack + codepoints pair,
+    /// return a `FontFallbackChain` built by cmap-probing candidate
+    /// files until coverage is satisfied.
+    ///
+    /// Semantics (one face per family — CSS-correct):
+    ///
+    /// - Iterate the expanded family stack in CSS order.
+    /// - For each family, walk candidate file paths from
+    ///   `known_paths`, and within each file walk faces sorted by
+    ///   style match (best (bold, italic) match to the request
+    ///   first). The first face that covers any currently-uncovered
+    ///   codepoint is added to the chain; we then move to the next
+    ///   family.
+    /// - Stop the whole stack as soon as every requested codepoint
+    ///   is covered.
+    /// - Any codepoints still uncovered after the last family is a
+    ///   miss (e.g. emoji against a sans-serif-only stack); the
+    ///   shaper will display `.notdef` for them. This matches CSS's
+    ///   behaviour for fonts that don't cover the requested chars.
+    ///
+    /// Bypasses the builder-thread dance entirely — no jobs queued,
+    /// no 5 s deadline, no full allsorts parse. ~100 µs per face
+    /// touched on warm FS.
+    #[cfg(all(feature = "std", feature = "parsing"))]
+    pub fn request_fonts_fast(
+        &self,
+        requests: &[(Vec<String>, alloc::collections::BTreeSet<char>)],
+        weight: FcWeight,
+        italic: PatternMatch,
+    ) -> Vec<FontFallbackChain> {
+        use crate::{
+            expand_font_families, CssFallbackGroup, FcCountFontFaces, FcFontPath,
+            FcParseFontFaceFast, FontMatch,
+        };
+        use std::sync::atomic::Ordering;
+
+        // With incremental scout (per-directory publish), we do NOT
+        // wait for `scan_complete` before proceeding. Instead we try
+        // to resolve against whatever `known_paths` contains right
+        // now, and only fall back to waiting on `progress` if no
+        // family in the request maps to a known path at all. That
+        // catches the pathological case where the scout hasn't
+        // touched any font dir yet (on very cold boot); typically
+        // `/System/Library/Fonts` is first, lands in <10 ms, and
+        // the main thread never waits.
+        let wait_start = Instant::now();
+        let mut waited = false;
+        let current_known_paths;
+        loop {
+            let Ok(paths) = self.known_paths.read() else {
+                return requests.iter().map(|(stack, _)| FontFallbackChain {
+                    css_fallbacks: Vec::new(),
+                    unicode_fallbacks: Vec::new(),
+                    original_stack: stack.clone(),
+                }).collect();
+            };
+            // Heuristic: if any request has a family that resolves
+            // to a non-empty path list, we have enough to make
+            // progress. In the typical case the first directory
+            // publish covers all system fonts.
+            let any_matches = requests.iter().any(|(stack, _)| {
+                let expanded = expand_font_families(stack, self.os, &[]);
+                expanded.iter().any(|fam| {
+                    let fam_norm = crate::utils::normalize_family_name(fam);
+                    !crate::scoring::find_family_paths(&fam_norm, &*paths).is_empty()
+                })
+            });
+            if any_matches
+                || self.scan_complete.load(Ordering::Acquire)
+                || wait_start.elapsed() >= Duration::from_millis(500)
+            {
+                drop(paths);
+                if let Ok(p) = self.known_paths.read() {
+                    current_known_paths = p;
+                    break;
+                } else {
+                    return requests.iter().map(|(stack, _)| FontFallbackChain {
+                        css_fallbacks: Vec::new(),
+                        unicode_fallbacks: Vec::new(),
+                        original_stack: stack.clone(),
+                    }).collect();
+                }
+            }
+            drop(paths);
+            waited = true;
+            let Ok(completed) = self.completed_paths.lock() else {
+                if let Ok(p) = self.known_paths.read() {
+                    current_known_paths = p;
+                    break;
+                } else {
+                    return Vec::new();
+                }
+            };
+            let remaining = Duration::from_millis(500)
+                .saturating_sub(wait_start.elapsed());
+            if remaining.is_zero() {
+                drop(completed);
+                if let Ok(p) = self.known_paths.read() {
+                    current_known_paths = p;
+                    break;
+                } else {
+                    return Vec::new();
+                }
+            }
+            let _ = self.progress.wait_timeout(completed, remaining);
+        }
+        let known_paths = current_known_paths;
+        let scan_wait_us = wait_start.elapsed().as_micros();
+        static RFC_DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *RFC_DBG.get_or_init(|| std::env::var_os("RFC_REGISTRY_DEBUG").is_some()) {
+            eprintln!(
+                "[RFC] request_fonts_fast: scan_wait = {} µs (waited={})",
+                scan_wait_us, waited,
+            );
+        }
+
+        let want_bold = weight >= FcWeight::Bold;
+        let want_italic = italic == PatternMatch::True;
+
+        let mut chains = Vec::with_capacity(requests.len());
+
+        for (stack, codepoints) in requests {
+            let expanded = expand_font_families(stack, self.os, &[]);
+            let mut css_fallbacks: Vec<CssFallbackGroup> = Vec::new();
+            let mut uncovered: alloc::collections::BTreeSet<char> = codepoints.clone();
+
+            'families: for family in &expanded {
+                if uncovered.is_empty() {
+                    break;
+                }
+                let family_norm = crate::utils::normalize_family_name(family);
+                let paths = crate::scoring::find_family_paths(&family_norm, &known_paths);
+                let mut group = CssFallbackGroup {
+                    css_name: family.clone(),
+                    fonts: Vec::new(),
+                };
+
+                for path in paths {
+                    let path_str = path.to_string_lossy().to_string();
+
+                    // Reuse existing cached FontId if we've probed
+                    // this exact path before with a codepoint set
+                    // that covers the current uncovered set.
+                    if let Some(cached_ids) = self.cache.lookup_paths_cached(&path_str) {
+                        let mut picked: Option<(crate::FontId, crate::FcPattern, alloc::collections::BTreeSet<char>)> = None;
+                        for id in cached_ids {
+                            let Some(pattern) = self.cache.get_metadata_by_id(&id) else { continue };
+                            let covers: alloc::collections::BTreeSet<char> = uncovered
+                                .iter()
+                                .copied()
+                                .filter(|ch| {
+                                    let cp = *ch as u32;
+                                    pattern.unicode_ranges.iter().any(|r| cp >= r.start && cp <= r.end)
+                                })
+                                .collect();
+                            if covers.is_empty() {
+                                continue;
+                            }
+                            let is_bold = pattern.weight >= FcWeight::Bold;
+                            let is_italic = pattern.italic == PatternMatch::True;
+                            let style_dist = (is_bold != want_bold) as u8
+                                + (is_italic != want_italic) as u8;
+                            let replace = match &picked {
+                                None => true,
+                                Some((_, pat, _)) => {
+                                    let pb = pat.weight >= FcWeight::Bold;
+                                    let pi = pat.italic == PatternMatch::True;
+                                    let pd = (pb != want_bold) as u8 + (pi != want_italic) as u8;
+                                    style_dist < pd
+                                }
+                            };
+                            if replace {
+                                picked = Some((id, pattern, covers));
+                            }
+                        }
+
+                        if let Some((id, pattern, covers)) = picked {
+                            for ch in &covers {
+                                uncovered.remove(ch);
+                            }
+                            group.fonts.push(FontMatch {
+                                id,
+                                unicode_ranges: pattern.unicode_ranges,
+                                fallbacks: Vec::new(),
+                            });
+                            if !group.fonts.is_empty() {
+                                css_fallbacks.push(group);
+                            }
+                            continue 'families;
+                        }
+                        // No cached face in this file covers the
+                        // current uncovered set; fall through and
+                        // probe fresh cmaps below.
+                    }
+
+                    // Cold path: mmap + read head.macStyle for each
+                    // face to pick the best style match, then
+                    // cmap-probe that face first. Fall through to
+                    // the next-best style match only if the top
+                    // choice covers zero new codepoints.
+                    let Some(bytes) = read_or_mmap_font(&path) else { continue };
+                    let num_faces = FcCountFontFaces(bytes.as_slice());
+                    let bytes_hash = crate::utils::content_dedup_hash_u64(bytes.as_slice());
+
+                    // For single-face files (TTF/OTF), skip the head
+                    // sort entirely — one face, probe it directly.
+                    let face_order: Vec<usize> = if num_faces == 1 {
+                        vec![0]
+                    } else {
+                        collect_face_style_order(
+                            bytes.as_slice(),
+                            num_faces,
+                            want_bold,
+                            want_italic,
+                        )
+                    };
+
+                    for face_index in face_order {
+                        let Some(cov) = FcParseFontFaceFast(
+                            bytes.as_slice(), face_index, &uncovered,
+                        ) else { continue };
+                        if cov.covered.is_empty() {
+                            continue;
+                        }
+
+                        let mut pat = cov.pattern.clone();
+                        let family_guessed = crate::config::guess_family_from_filename(&path);
+                        pat.name = Some(family.clone());
+                        pat.family = Some(family_guessed);
+
+                        let id = self.cache.insert_fast_pattern(
+                            pat.clone(),
+                            FcFontPath {
+                                path: path_str.clone(),
+                                font_index: face_index,
+                                bytes_hash,
+                            },
+                        );
+                        for ch in &cov.covered {
+                            uncovered.remove(ch);
+                        }
+                        group.fonts.push(FontMatch {
+                            id,
+                            unicode_ranges: pat.unicode_ranges,
+                            fallbacks: Vec::new(),
+                        });
+                        // CSS semantic: one face per family.
+                        // We're done with this family — no more
+                        // faces from this file, no more files in
+                        // the family.
+                        if !group.fonts.is_empty() {
+                            css_fallbacks.push(group);
+                        }
+                        continue 'families;
+                    }
+                }
+
+                // No file in this family covered anything new.
+                // Move on to the next family without contributing
+                // to css_fallbacks.
+            }
+
+            chains.push(FontFallbackChain {
+                css_fallbacks,
+                unicode_fallbacks: Vec::new(),
+                original_stack: stack.clone(),
+            });
+        }
+
+        chains
+    }
+
     // ── Internal methods ────────────────────────────────────────────────────
 
     /// Insert a parsed font into the cache (called by Builder threads).
@@ -542,4 +814,67 @@ impl Drop for FcFontRegistry {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Open `path` as an mmap (on platforms with `mmapio`) or fall back
+/// to `std::fs::read` on wasm. Returns an `Arc<crate::FontBytes>`
+/// compatible with [`FcFontCache::get_font_bytes`]'s shared-bytes
+/// cache.
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn read_or_mmap_font(path: &std::path::Path) -> Option<std::sync::Arc<crate::FontBytes>> {
+    #[cfg(all(not(target_family = "wasm"), feature = "std"))]
+    {
+        crate::open_font_bytes_mmap(&path.to_string_lossy())
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let bytes = std::fs::read(path).ok()?;
+        Some(std::sync::Arc::new(crate::FontBytes::Owned(
+            std::sync::Arc::from(bytes.as_slice()),
+        )))
+    }
+}
+
+/// For a multi-face TTC, read `head.macStyle` from each face and
+/// return an iteration order prioritising the best style match to
+/// the requested (`want_bold`, `want_italic`).
+///
+/// Cost: one `ReadScope::read::<FontData>` for the TTC directory
+/// + N × 54-byte `head` reads. Small relative to cmap parse
+/// (~1 ms vs ~10 ms), but called only when we're probing a file
+/// whose cache entries don't cover — typical excel.html run
+/// never enters this path.
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn collect_face_style_order(
+    bytes: &[u8],
+    num_faces: usize,
+    want_bold: bool,
+    want_italic: bool,
+) -> Vec<usize> {
+    use allsorts::{
+        binary::read::ReadScope, font_data::FontData,
+        tables::{FontTableProvider, HeadTable}, tag,
+    };
+
+    let scope = ReadScope::new(bytes);
+    let Ok(font_file) = scope.read::<FontData<'_>>() else {
+        return (0..num_faces).collect();
+    };
+
+    let mut styles: Vec<(usize, bool, bool)> = Vec::with_capacity(num_faces);
+    for fi in 0..num_faces {
+        let Ok(provider) = font_file.table_provider(fi) else { continue };
+        let Ok(Some(head_data)) = provider.table_data(tag::HEAD) else { continue };
+        let Ok(head) = ReadScope::new(&head_data).read::<HeadTable>() else { continue };
+        styles.push((fi, head.is_bold(), head.is_italic()));
+    }
+    if styles.is_empty() {
+        return (0..num_faces).collect();
+    }
+    styles.sort_by_key(|(_, is_bold, is_italic)| {
+        let bold_mismatch = (*is_bold != want_bold) as u8;
+        let italic_mismatch = (*is_italic != want_italic) as u8;
+        (bold_mismatch, italic_mismatch)
+    });
+    styles.into_iter().map(|(fi, _, _)| fi).collect()
 }

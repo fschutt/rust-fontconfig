@@ -1590,6 +1590,40 @@ impl FcFontCache {
         }
     }
 
+    /// Insert a *fast-probed* pattern into the cache and return its
+    /// fresh `FontId`. Used by [`FcFontRegistry::request_fonts_fast`]
+    /// when a cmap probe discovers a font that covers some subset of
+    /// the requested codepoints. Unlike [`insert_builder_font`] this
+    /// does **not** populate the token index (we don't have NAME
+    /// table data), so fuzzy-name lookups on fast-probed fonts fall
+    /// through to the filename-guess in `known_paths`.
+    pub fn insert_fast_pattern(&self, pattern: FcPattern, path: FcFontPath) -> FontId {
+        let id = FontId::new();
+        let mut state = self.state_write();
+        state.patterns.insert(pattern.clone(), id);
+        state.disk_fonts.insert(id, path);
+        state.metadata.insert(id, pattern);
+        id
+    }
+
+    /// Look up all `FontId`s whose `FcFontPath` matches `path`.
+    /// Cheap way for `request_fonts_fast` to reuse fast-probed
+    /// entries across layout passes without re-reading the cmap.
+    ///
+    /// O(n) over the disk_fonts map; fine for the typical case of
+    /// <100 parsed fonts, and we skip the scan entirely when a
+    /// stack's first candidate covers.
+    pub fn lookup_paths_cached(&self, path: &str) -> Option<Vec<FontId>> {
+        let state = self.state_read();
+        let mut out = Vec::new();
+        for (id, font_path) in &state.disk_fonts {
+            if font_path.path == path {
+                out.push(*id);
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+
     /// Get font data for a given font ID.
     ///
     /// Returns owned values (not references) because the underlying
@@ -3925,6 +3959,165 @@ pub(crate) fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPa
             })
             .collect(),
     )
+}
+
+/// Coverage info returned by a fast-probe parse.
+///
+/// Produced by [`FcParseFontFaceFast`] / [`FcProbeCoverage`] — the
+/// v4.2 "cheap cmap-only" entry point. Unlike `parse_font_faces`,
+/// this path does **not** read NAME, OS/2, POST, HHEA, HMTX, HEAD's
+/// style metadata, or anything else. It only reads the table
+/// directory, `head.macStyle` (2 bytes), and the cmap subtable that
+/// matches the codepoints we care about. ~1 ms/face on warm FS
+/// cache vs ~13 ms for the full parse.
+///
+/// The `pattern.unicode_ranges` is populated from the *actual* cmap
+/// contents (one `UnicodeRange` per covered codepoint in the input
+/// set) rather than the OS/2 `ulUnicodeRange` bitfield. That's more
+/// precise (OS/2 bits lie on many fonts — they're hints, not ground
+/// truth) and means `FontFallbackChain::resolve_char`'s coverage
+/// check matches what the shaper can actually render.
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[derive(Debug, Clone)]
+pub struct FastCoverage {
+    /// Metadata pattern with `unicode_ranges` populated from the
+    /// codepoints this face covered from the request set. `name` /
+    /// `family` fields are left empty — callers already have the
+    /// filename-guessed family in [`FcFontRegistry.known_paths`];
+    /// we avoid the NAME table read entirely.
+    pub pattern: FcPattern,
+    /// Subset of the input codepoints that this face covers (maps
+    /// to a non-zero gid via the best cmap subtable). May be empty
+    /// if the face covers none, in which case callers should fall
+    /// through to the next candidate path.
+    pub covered: alloc::collections::BTreeSet<char>,
+    /// `head.macStyle.bold` (bit 0).
+    pub is_bold: bool,
+    /// `head.macStyle.italic` (bit 1).
+    pub is_italic: bool,
+}
+
+/// Fast per-face coverage probe.
+///
+/// Opens the provided font bytes as a `FontData` (detects TTC
+/// collections), walks the given face, reads `head.macStyle` for
+/// bold/italic flags, picks the best cmap subtable, and records
+/// which of the requested codepoints have a non-zero gid.
+///
+/// Cost: table-dir parse + head (54 bytes) + cmap (5-100 KiB,
+/// faulted in from mmap). No heap allocation besides the
+/// covered-codepoints set and the returned `FcPattern`.
+///
+/// Returns `None` only if the font bytes are structurally bad or
+/// the face index is out of range — empty coverage returns
+/// `Some` with `covered.is_empty()`, so the caller can distinguish
+/// "this face doesn't have the char we want" (try next face) from
+/// "this file is corrupt" (give up on the whole file).
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[allow(non_snake_case)]
+pub fn FcParseFontFaceFast(
+    font_bytes: &[u8],
+    font_index: usize,
+    codepoints: &alloc::collections::BTreeSet<char>,
+) -> Option<FastCoverage> {
+    use allsorts::{
+        binary::read::ReadScope,
+        font_data::FontData,
+        tables::{
+            cmap::{Cmap, CmapSubtable},
+            FontTableProvider, HeadTable,
+        },
+        tag,
+    };
+
+    let scope = ReadScope::new(font_bytes);
+    let font_file = scope.read::<FontData<'_>>().ok()?;
+    let provider = font_file.table_provider(font_index).ok()?;
+
+    // head — 54 bytes, macStyle at offset 44. Cheap.
+    let head_data = provider.table_data(tag::HEAD).ok()??;
+    let head_table = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
+    let is_bold = head_table.is_bold();
+    let is_italic = head_table.is_italic();
+
+    // cmap — find the best Unicode subtable, probe each codepoint.
+    // The mmap page-cache only faults in the bytes we touch.
+    let cmap_data = provider.table_data(tag::CMAP).ok()??;
+    let cmap = ReadScope::new(&cmap_data).read::<Cmap<'_>>().ok()?;
+    let encoding_record = find_best_cmap_subtable(&cmap)?;
+    let cmap_subtable = ReadScope::new(&cmap_data)
+        .offset(encoding_record.offset as usize)
+        .read::<CmapSubtable<'_>>()
+        .ok()?;
+
+    let mut covered: alloc::collections::BTreeSet<char> =
+        alloc::collections::BTreeSet::new();
+    let mut covered_ranges: Vec<UnicodeRange> = Vec::new();
+    for ch in codepoints {
+        let cp = *ch as u32;
+        if let Ok(Some(gid)) = cmap_subtable.map_glyph(cp) {
+            if gid != 0 {
+                covered.insert(*ch);
+                // Accumulate into ranges for the FcPattern. Merge
+                // adjacent codepoints so `unicode_ranges` stays
+                // compact (common case on Western text: one range).
+                if let Some(last) = covered_ranges.last_mut() {
+                    if cp == last.end + 1 {
+                        last.end = cp;
+                        continue;
+                    }
+                }
+                covered_ranges.push(UnicodeRange { start: cp, end: cp });
+            }
+        }
+    }
+
+    let weight = if is_bold {
+        FcWeight::Bold
+    } else {
+        FcWeight::Normal
+    };
+    let italic_match = if is_italic {
+        PatternMatch::True
+    } else {
+        PatternMatch::False
+    };
+
+    let pattern = FcPattern {
+        name: None,
+        family: None,
+        weight,
+        italic: italic_match,
+        oblique: PatternMatch::DontCare,
+        monospace: PatternMatch::DontCare,
+        unicode_ranges: covered_ranges,
+        ..Default::default()
+    };
+
+    Some(FastCoverage {
+        pattern,
+        covered,
+        is_bold,
+        is_italic,
+    })
+}
+
+/// Count the number of faces inside a TTC, or `1` for a single-face
+/// font file. Used by [`FcFontRegistry::request_fonts_fast`] to
+/// iterate every face in a `.ttc` without paying the full-parse
+/// cost (the TTC header is 12 bytes).
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[allow(non_snake_case)]
+pub fn FcCountFontFaces(font_bytes: &[u8]) -> usize {
+    if font_bytes.len() >= 12 && &font_bytes[0..4] == b"ttcf" {
+        let num_fonts = u32::from_be_bytes([
+            font_bytes[8], font_bytes[9], font_bytes[10], font_bytes[11],
+        ]);
+        // Same cap as parse_font_faces, for safety.
+        std::cmp::min(num_fonts as usize, 100).max(1)
+    } else {
+        1
+    }
 }
 
 /// Parse font bytes and extract font patterns for in-memory fonts.
