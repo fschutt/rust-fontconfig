@@ -38,6 +38,100 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use std::collections::HashSet;
+
+/// Fine-grained heap-probe writer used to attribute per-phase allocation
+/// inside `request_fonts` during leak investigations.
+///
+/// Gated by three `AZ_PROFILE` tokens + one path env var, all required:
+/// - `AZ_PROFILE` contains `heap` — heap tracking opted in
+/// - `AZ_PROFILE` contains `jsonl` — JSONL output format selected
+/// - `AZ_PROFILE` contains `detail` — opt in to the *fine-grained*
+///   rfc_* probes on top of the coarser phase probes emitted by
+///   `azul_layout::probe::emit_phase_heap`
+/// - `AZ_PROFILE_OUT=<path>` — destination file for the JSONL records
+///
+/// Without `detail` these probes are inert — the common "just capture
+/// regenerate_layout phases" workflow stays cheap.
+///
+/// Env parsing is duplicated here (rather than depending on
+/// `azul_core::profile`) so this crate stays standalone and usable
+/// outside the azul tree.
+#[cfg(all(feature = "std", target_os = "macos"))]
+fn rfc_probe_heap(label: &str) {
+    if !rfc_detail_enabled() { return; }
+    if let Some(p) = rfc_detail_path() {
+        let heap = rfc_heap_bytes();
+        write_detail_line(p, &format!(
+            r#"{{"ev":"phase","call":0,"label":"{}","heap":{}}}"#,
+            label, heap
+        ));
+    }
+}
+
+#[cfg(not(all(feature = "std", target_os = "macos")))]
+fn rfc_probe_heap(_label: &str) {}
+
+#[cfg(all(feature = "std", target_os = "macos"))]
+fn rfc_probe_heap_extra(label: &str, extra: u64) {
+    if !rfc_detail_enabled() { return; }
+    if let Some(p) = rfc_detail_path() {
+        let heap = rfc_heap_bytes();
+        write_detail_line(p, &format!(
+            r#"{{"ev":"phase","call":0,"label":"{}","heap":{},"extra":{}}}"#,
+            label, heap, extra
+        ));
+    }
+}
+
+#[cfg(not(all(feature = "std", target_os = "macos")))]
+fn rfc_probe_heap_extra(_label: &str, _extra: u64) {}
+
+/// All three of `heap`, `jsonl`, `detail` must appear in `AZ_PROFILE`.
+#[cfg(all(feature = "std", target_os = "macos"))]
+fn rfc_detail_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let Ok(v) = std::env::var("AZ_PROFILE") else { return false };
+        let has = |tok: &str| {
+            v.split(',').any(|p| p.trim().eq_ignore_ascii_case(tok))
+        };
+        has("heap") && has("jsonl") && has("detail")
+    })
+}
+
+#[cfg(all(feature = "std", target_os = "macos"))]
+fn rfc_detail_path() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var("AZ_PROFILE_OUT").ok()).as_deref()
+}
+
+#[cfg(all(feature = "std", target_os = "macos"))]
+fn rfc_heap_bytes() -> usize {
+    unsafe {
+        extern "C" {
+            fn mstats() -> MStats;
+        }
+        #[repr(C)]
+        struct MStats {
+            bytes_total: usize,
+            chunks_used: usize,
+            bytes_used: usize,
+            chunks_free: usize,
+            bytes_free: usize,
+        }
+        mstats().bytes_used
+    }
+}
+
+#[cfg(all(feature = "std", target_os = "macos"))]
+fn write_detail_line(path: &str, line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", line);
+    }
+}
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -210,6 +304,8 @@ impl FcFontRegistry {
     ) -> Vec<FontFallbackChain> {
         let deadline = Instant::now() + Duration::from_secs(5);
 
+        rfc_probe_heap("rf_start");
+
         // 1. Expand generic families and collect all unique family names we need
         let mut needed_families: Vec<String> = Vec::new();
         let mut expanded_stacks: Vec<Vec<String>> = Vec::new();
@@ -225,11 +321,37 @@ impl FcFontRegistry {
             expanded_stacks.push(expanded);
         }
 
-        // Fast path: if disk cache was loaded, all previously-known fonts are
-        // already in the patterns map. We can resolve chains immediately.
-        if self.cache_loaded.load(Ordering::Acquire) {
-            return self.resolve_chains(&expanded_stacks);
+        rfc_probe_heap("rf_after_expand");
+
+        // Fast path: the pattern map is fully settled. This is true when
+        // either:
+        //   - a disk cache was loaded at startup (`cache_loaded`), or
+        //   - the builder pool has already drained every known font file
+        //     and shut down (`build_complete`).
+        //
+        // In both cases `resolve_chains` has every pattern it could
+        // possibly need — there is no work the slow path below can do
+        // that wouldn't be wasted. Walking `known_paths` to compute
+        // "missing" / "incomplete" family lists and pushing jobs into
+        // `build_queue` on every call is a pure leak once the builder
+        // threads have exited: each `FcBuildJob` is ~250 B + path string
+        // and nothing consumes them. That was the root cause of the
+        // azul `regenerate_layout` resize-loop leak (~13 KiB/call
+        // retained across ~158 permanently-missing families like CJK /
+        // Arabic fonts that the system doesn't have installed).
+        //
+        // Short-circuiting here — rather than deeper in the function —
+        // also saves the allocations for `needed_families`, `missing`,
+        // `incomplete_paths` on every layout pass, which was measurable
+        // on its own (~500 B transient / call).
+        if self.cache_loaded.load(Ordering::Acquire)
+            || self.build_complete.load(Ordering::Acquire)
+        {
+            let result = self.resolve_chains(&expanded_stacks);
+            rfc_probe_heap("rf_after_resolve_fast");
+            return result;
         }
+        rfc_probe_heap("rf_not_fast_path");
 
         // 2. Wait for Scout to finish (typically < 100ms).
         //    Uses condvar instead of busy-polling.
@@ -263,6 +385,8 @@ impl FcFontRegistry {
                 .collect()
         };
 
+        rfc_probe_heap_extra("rf_after_missing", missing.len() as u64);
+
         // 4. Find font files that match needed families but haven't been
         //    fully parsed yet. Uses completed_paths (not processed_paths!)
         //    because processed_paths is set BEFORE parsing, while
@@ -272,9 +396,16 @@ impl FcFontRegistry {
             .map(|(known, completed)| find_incomplete_paths(&needed_families, &known, &completed))
             .unwrap_or_default();
 
-        // 5. If nothing is missing AND all files are processed, resolve immediately
+        rfc_probe_heap_extra("rf_after_incomplete", incomplete_paths.len() as u64);
+
+        // 5. If nothing is missing AND all files are processed, resolve immediately.
+        //    (The `build_complete == true` case is caught at the top of the
+        //    function — if we reach this point, the builder pool is still
+        //    live and it is safe to push jobs into `build_queue`.)
         if missing.is_empty() && incomplete_paths.is_empty() {
-            return self.resolve_chains(&expanded_stacks);
+            let r = self.resolve_chains(&expanded_stacks);
+            rfc_probe_heap("rf_step5_fast_return");
+            return r;
         }
 
         // 6. Boost all relevant paths to Critical priority
@@ -312,6 +443,7 @@ impl FcFontRegistry {
         } else {
             incomplete_paths.iter().map(|(p, _)| p.clone()).collect()
         };
+        rfc_probe_heap_extra("rf_after_push_queue", wait_paths.len() as u64);
         self.queue_condvar.notify_all();
 
         // 7. Wait for all wait_paths to be completed.
@@ -342,8 +474,12 @@ impl FcFontRegistry {
             }
         }
 
+        rfc_probe_heap("rf_after_wait");
+
         // 8. Resolve chains from the now-populated registry
-        self.resolve_chains(&expanded_stacks)
+        let r = self.resolve_chains(&expanded_stacks);
+        rfc_probe_heap("rf_after_resolve_slow");
+        r
     }
 
     // ── Delegated accessors ─────────────────────────────────────────────────
@@ -513,6 +649,12 @@ impl FcFontRegistry {
     /// Returns true if a disk cache was successfully loaded at startup.
     pub fn is_cache_loaded(&self) -> bool {
         self.cache_loaded.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "std")]
+    #[doc(hidden)]
+    pub fn chain_cache_len(&self) -> usize {
+        self.cache.chain_cache_len()
     }
 
     /// Fast-path font resolution: for each stack + codepoints pair,

@@ -1590,6 +1590,12 @@ impl FcFontCache {
         }
     }
 
+    #[cfg(feature = "std")]
+    #[doc(hidden)]
+    pub fn chain_cache_len(&self) -> usize {
+        self.shared.chain_cache.lock().map(|c| c.len()).unwrap_or(0)
+    }
+
     /// Insert a *fast-probed* pattern into the cache and return its
     /// fresh `FontId`. Used by [`FcFontRegistry::request_fonts_fast`]
     /// when a cmap probe discovers a font that covers some subset of
