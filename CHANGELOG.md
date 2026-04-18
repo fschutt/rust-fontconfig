@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.2.1] - 2026-04-18
+
+### Fixed
+
+- **`FcFontRegistry::request_fonts`: build_queue leak after `build_complete`**.
+  Promote the existing `cache_loaded` fast-path at the top of the function
+  into a joint `cache_loaded || build_complete` short-circuit. Once
+  either is true, the pattern map is fully settled; walking `known_paths`
+  to compute "missing" / "incomplete" family lists and pushing
+  `FcBuildJob` items into `build_queue` is wasted work whose only
+  observable effect is a steady leak of ~13 KiB per call — the builder
+  threads have shut down and nothing drains the queue.
+
+  Discovered via per-phase heap probes in a downstream resize-loop
+  regression (~100 MiB RSS growth across a 5-second interactive
+  session). Each call was retaining ~158 `FcBuildJob` items, one per
+  permanently-missing system family (Arabic / CJK / etc.).
+
+### Added
+
+- Optional fine-grained heap probes inside `request_fonts`, gated
+  behind `AZ_PROFILE=heap,jsonl,detail` + `AZ_PROFILE_OUT=<path>`.
+  Permanent diagnostic infrastructure for future memory
+  investigations; inert unless both env vars are set.
+
+- `FcFontCache::chain_cache_len()` — cheap accessor returning the
+  current number of cached resolved chains.
+
 ## [3.3.0] - 2026-04-14
 
 ### Added
