@@ -53,6 +53,23 @@ pub fn system_font_dirs(os: OperatingSystem) -> &'static [&'static str] {
             "/usr/share/fonts",
             "/usr/local/share/fonts",
         ],
+        // Android system-font directories are world-readable. Vendor partitions
+        // (`/product/fonts`, `/system_ext/fonts`) carry OEM-specific families
+        // (Samsung One UI, MIUI, EMUI). `/data/fonts` is the user-selected
+        // font directory exposed by recent OEM ROMs.
+        OperatingSystem::Android => &[
+            "/system/fonts",
+            "/product/fonts",
+            "/system_ext/fonts",
+            "/data/fonts",
+        ],
+        // iOS bundles system fonts under sandboxed paths that cannot be
+        // enumerated with a plain `read_dir`. The cache enumerates them via
+        // `CTFontManagerCopyAvailableFontURLs` in `lib.rs::build_inner`; the
+        // returned `CFURL`s point inside `/System/Library/...` paths that are
+        // openable through the CoreText I/O bridge even though the underlying
+        // directory is unreadable.
+        OperatingSystem::IOS => &[],
         // Windows paths require env var resolution — handled in font_directories()
         OperatingSystem::Windows => &[],
         OperatingSystem::Wasm => &[],
@@ -93,6 +110,10 @@ pub fn font_directories(os: OperatingSystem) -> Vec<PathBuf> {
                 user_profile
             )));
         }
+        // No env-var-resolved user-font dir on iOS (no $HOME inside the sandbox)
+        // or Android (apps own /data/data/<package>/files/fonts but that's a
+        // private app dir, not a fontconfig directory).
+        OperatingSystem::IOS | OperatingSystem::Android => {}
         OperatingSystem::Wasm => {}
     }
 
@@ -136,6 +157,27 @@ pub fn common_font_families(os: OperatingSystem) -> &'static [&'static str] {
             "Times New Roman", "Calibri",
             // Monospace
             "Consolas", "Courier New",
+        ],
+        OperatingSystem::IOS => &[
+            // System UI fonts (filenames use SFNS/SFUI prefix)
+            "San Francisco", "SFNS", "SFNSDisplay", "SFNSText", "SFUI",
+            ".AppleSystemUIFont", "System Font",
+            // Sans-serif
+            "Helvetica Neue", "Helvetica", "Avenir", "Avenir Next",
+            // Serif
+            "Times New Roman", "Georgia",
+            // Monospace
+            "Menlo", "SF Mono", "Courier",
+        ],
+        OperatingSystem::Android => &[
+            // System UI fonts
+            "Roboto", "Roboto Flex", "Roboto Condensed",
+            // Sans-serif
+            "Noto Sans", "Droid Sans",
+            // Serif
+            "Noto Serif", "Roboto Serif", "Droid Serif",
+            // Monospace
+            "Roboto Mono", "Droid Sans Mono", "Noto Sans Mono",
         ],
         OperatingSystem::Wasm => &[],
     }

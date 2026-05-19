@@ -14,6 +14,8 @@ use crate::registry::FcFontRegistry;
 use crate::scoring::{assign_scout_priority, FcBuildJob};
 use crate::utils::is_font_file;
 use crate::FcParseFont;
+#[cfg(target_os = "ios")]
+use crate::OperatingSystem;
 
 impl FcFontRegistry {
     /// Scout thread: enumerates font directories and populates the build queue.
@@ -27,6 +29,23 @@ impl FcFontRegistry {
         let font_dirs = config::font_directories(self.os);
         let common_token_sets = config::tokenize_common_families(self.os);
         let lazy = self.lazy_scout.load(Ordering::Acquire);
+
+        // iOS: the app sandbox denies `read_dir` on `/System/Library/...`
+        // even though every individual font URL is openable. CoreText is
+        // the only enumeration path. Branch off here, hand the resulting
+        // PathBufs to the same `known_paths` / `build_queue` merge that
+        // the per-directory walk uses.
+        #[cfg(target_os = "ios")]
+        {
+            if self.os == OperatingSystem::IOS {
+                let ios_paths = crate::mobile_ios::copy_available_font_urls();
+                self.publish_ios_font_urls(ios_paths, &common_token_sets, lazy);
+                self.scan_complete.store(true, Ordering::Release);
+                self.queue_condvar.notify_all();
+                self.progress.notify_all();
+                return;
+            }
+        }
 
         // Per-directory publish: walk one top-level font directory
         // at a time, collect its paths, then take a brief write
@@ -95,6 +114,63 @@ impl FcFontRegistry {
 
         self.scan_complete.store(true, Ordering::Release);
         self.queue_condvar.notify_all();
+        self.progress.notify_all();
+    }
+
+    /// Merge a batch of CoreText-discovered font URLs into the registry,
+    /// mirroring the per-directory publish path used by `scout_thread`.
+    ///
+    /// iOS-only: the standard `read_dir` walk returns nothing inside the app
+    /// sandbox, so this is the only way the async registry sees system fonts.
+    #[cfg(target_os = "ios")]
+    fn publish_ios_font_urls(
+        &self,
+        ios_paths: Vec<PathBuf>,
+        common_token_sets: &[Vec<alloc::string::String>],
+        lazy: bool,
+    ) {
+        // Filter to recognized font extensions. CoreText also returns app-bundled
+        // resources occasionally, so the filter keeps us pruning anything not
+        // parseable.
+        let filtered: Vec<PathBuf> = ios_paths
+            .into_iter()
+            .filter(|p| is_font_file(p))
+            .collect();
+
+        if filtered.is_empty() {
+            return;
+        }
+
+        let Ok(mut known_paths) = self.known_paths.write() else { return };
+        let mut queue_opt = (!lazy).then(|| self.build_queue.lock().ok()).flatten();
+
+        for path in &filtered {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let guessed_family = config::guess_family_from_filename(path);
+
+            known_paths
+                .entry(guessed_family.clone())
+                .or_insert_with(Vec::new)
+                .push(path.clone());
+
+            if let Some(queue) = queue_opt.as_mut() {
+                let all_tokens = config::tokenize_lowercase(stem);
+                let priority = assign_scout_priority(&all_tokens, common_token_sets);
+                queue.push(FcBuildJob {
+                    priority,
+                    path: path.clone(),
+                    font_index: None,
+                    guessed_family,
+                });
+            }
+        }
+
+        if let Some(mut queue) = queue_opt {
+            queue.sort();
+            drop(queue);
+        }
+        drop(known_paths);
+
         self.progress.notify_all();
     }
 

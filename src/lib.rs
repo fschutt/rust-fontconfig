@@ -107,12 +107,17 @@ pub mod multithread;
 #[cfg(feature = "cache")]
 pub mod disk_cache;
 
+#[cfg(all(target_os = "ios", feature = "std", feature = "parsing"))]
+mod mobile_ios;
+
 /// Operating system type for generic font family resolution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperatingSystem {
     Windows,
     Linux,
     MacOS,
+    IOS,
+    Android,
     Wasm,
 }
 
@@ -121,17 +126,23 @@ impl OperatingSystem {
     pub fn current() -> Self {
         #[cfg(target_os = "windows")]
         return OperatingSystem::Windows;
-        
+
         #[cfg(target_os = "linux")]
         return OperatingSystem::Linux;
-        
+
         #[cfg(target_os = "macos")]
         return OperatingSystem::MacOS;
-        
+
+        #[cfg(target_os = "ios")]
+        return OperatingSystem::IOS;
+
+        #[cfg(target_os = "android")]
+        return OperatingSystem::Android;
+
         #[cfg(target_family = "wasm")]
         return OperatingSystem::Wasm;
-        
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos", target_family = "wasm")))]
+
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos", target_os = "ios", target_os = "android", target_family = "wasm")))]
         return OperatingSystem::Linux; // Default fallback
     }
     
@@ -168,7 +179,7 @@ impl OperatingSystem {
                 ]);
                 fonts.iter().map(|s| s.to_string()).collect()
             }
-            OperatingSystem::MacOS => {
+            OperatingSystem::MacOS | OperatingSystem::IOS => {
                 let mut fonts = Vec::new();
                 if has_cjk {
                     fonts.extend_from_slice(&["Hiragino Mincho ProN", "STSong", "AppleMyungjo"]);
@@ -176,13 +187,24 @@ impl OperatingSystem {
                 if has_arabic {
                     fonts.push("Geeza Pro");
                 }
-                fonts.extend_from_slice(&["Times", "New York", "Palatino"]);
+                fonts.extend_from_slice(&["Times New Roman", "Times", "New York", "Palatino"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Android => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Noto Serif CJK SC", "Noto Serif CJK JP", "Noto Serif CJK KR"]);
+                }
+                if has_arabic {
+                    fonts.push("Noto Naskh Arabic");
+                }
+                fonts.extend_from_slice(&["Noto Serif", "Roboto Serif", "Droid Serif"]);
                 fonts.iter().map(|s| s.to_string()).collect()
             }
             OperatingSystem::Wasm => Vec::new(),
         }
     }
-    
+
     /// Get system-specific fonts for the "sans-serif" generic family
     /// Prioritizes fonts based on Unicode range coverage
     pub fn get_sans_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
@@ -230,11 +252,11 @@ impl OperatingSystem {
                 fonts.extend_from_slice(&["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"]);
                 fonts.iter().map(|s| s.to_string()).collect()
             }
-            OperatingSystem::MacOS => {
+            OperatingSystem::MacOS | OperatingSystem::IOS => {
                 let mut fonts = Vec::new();
                 if has_cjk {
                     fonts.extend_from_slice(&[
-                        "Hiragino Sans", "Hiragino Kaku Gothic ProN", 
+                        "Hiragino Sans", "Hiragino Kaku Gothic ProN",
                         "PingFang SC", "PingFang TC", "Apple SD Gothic Neo"
                     ]);
                 }
@@ -247,13 +269,38 @@ impl OperatingSystem {
                 if has_thai {
                     fonts.push("Thonburi");
                 }
-                fonts.extend_from_slice(&["San Francisco", "Helvetica Neue", "Lucida Grande"]);
+                fonts.extend_from_slice(&[
+                    "San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular",
+                    "Helvetica Neue", "Helvetica", "Lucida Grande",
+                ]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Android => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&[
+                        "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR",
+                        "Droid Sans Fallback",
+                    ]);
+                }
+                if has_arabic {
+                    fonts.push("Noto Sans Arabic");
+                }
+                if has_hebrew {
+                    fonts.push("Noto Sans Hebrew");
+                }
+                if has_thai {
+                    fonts.push("Noto Sans Thai");
+                }
+                fonts.extend_from_slice(&[
+                    "Roboto", "Roboto-Regular", "Noto Sans", "Droid Sans",
+                ]);
                 fonts.iter().map(|s| s.to_string()).collect()
             }
             OperatingSystem::Wasm => Vec::new(),
         }
     }
-    
+
     /// Get system-specific fonts for the "monospace" generic family
     /// Prioritizes fonts based on Unicode range coverage
     pub fn get_monospace_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
@@ -279,12 +326,20 @@ impl OperatingSystem {
                 ]);
                 fonts.iter().map(|s| s.to_string()).collect()
             }
-            OperatingSystem::MacOS => {
+            OperatingSystem::MacOS | OperatingSystem::IOS => {
                 let mut fonts = Vec::new();
                 if has_cjk {
                     fonts.extend_from_slice(&["Hiragino Sans", "PingFang SC"]);
                 }
                 fonts.extend_from_slice(&["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"]);
+                fonts.iter().map(|s| s.to_string()).collect()
+            }
+            OperatingSystem::Android => {
+                let mut fonts = Vec::new();
+                if has_cjk {
+                    fonts.extend_from_slice(&["Noto Sans Mono CJK SC", "Noto Sans Mono CJK JP"]);
+                }
+                fonts.extend_from_slice(&["Roboto Mono", "Droid Sans Mono", "Noto Sans Mono", "DejaVu Sans Mono"]);
                 fonts.iter().map(|s| s.to_string()).collect()
             }
             OperatingSystem::Wasm => Vec::new(),
@@ -1886,6 +1941,50 @@ impl FcFontCache {
                 (None, "/System/Library/Fonts".to_owned()),
                 (None, "/Library/Fonts".to_owned()),
                 (None, "/System/Library/AssetsV2".to_owned()),
+            ];
+
+            let font_entries = FcScanDirectoriesInner(&font_dirs);
+            for (pattern, path) in font_entries {
+                if matches_filter(&pattern) {
+                    let id = FontId::new();
+                    state.patterns.insert(pattern.clone(), id);
+                    state.metadata.insert(id, pattern.clone());
+                    state.disk_fonts.insert(id, path);
+                    state.index_pattern_tokens(&pattern, id);
+                }
+            }
+        }
+
+        // iOS: the app sandbox denies a plain `read_dir` on `/System/Library/...`,
+        // but `CTFontManagerCopyAvailableFontURLs` returns sandbox-mediated
+        // `CFURL`s that *are* openable. We enumerate via CoreText, then feed
+        // each URL into the same `FcParseFont` path the desktop arms use.
+        #[cfg(target_os = "ios")]
+        {
+            let font_files = crate::mobile_ios::copy_available_font_urls();
+            let font_entries = FcParseFontFiles(&font_files);
+            for (pattern, path) in font_entries {
+                if matches_filter(&pattern) {
+                    let id = FontId::new();
+                    state.patterns.insert(pattern.clone(), id);
+                    state.metadata.insert(id, pattern.clone());
+                    state.disk_fonts.insert(id, path);
+                    state.index_pattern_tokens(&pattern, id);
+                }
+            }
+        }
+
+        // Android: system fonts live at world-readable paths. Vendor partitions
+        // (`/product/fonts`, `/system_ext/fonts`) carry OEM-specific families
+        // on Samsung One UI / MIUI / EMUI; `/data/fonts` is the per-user font
+        // dir on recent ROMs.
+        #[cfg(target_os = "android")]
+        {
+            let font_dirs = vec![
+                (None, "/system/fonts".to_owned()),
+                (None, "/product/fonts".to_owned()),
+                (None, "/system_ext/fonts".to_owned()),
+                (None, "/data/fonts".to_owned()),
             ];
 
             let font_entries = FcScanDirectoriesInner(&font_dirs);
