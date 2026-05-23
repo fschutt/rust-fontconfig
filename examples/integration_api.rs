@@ -103,10 +103,10 @@ fn main() {
                 .unwrap_or("?");
             if let Some(source) = cache.get_font_by_id(font_id) {
                 match source {
-                    rust_fontconfig::FontSource::Disk(path) => {
+                    rust_fontconfig::OwnedFontSource::Disk(path) => {
                         println!("  {} -> {}", name, path.path);
                     }
-                    rust_fontconfig::FontSource::Memory(font) => {
+                    rust_fontconfig::OwnedFontSource::Memory(font) => {
                         println!("  {} -> memory (id: {})", name, font.id);
                     }
                 }

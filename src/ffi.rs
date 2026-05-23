@@ -918,7 +918,7 @@ pub extern "C" fn fc_cache_get_font_path(
         let id_rust = FontId::from_fontid_c(&*id);
 
         match cache.get_font_by_id(&id_rust) {
-            Some(FontSource::Disk(path)) => {
+            Some(OwnedFontSource::Disk(path)) => {
                 let path_c = FcFontPathC {
                     path: CString::new(path.path.clone())
                         .unwrap_or_default()
@@ -928,7 +928,7 @@ pub extern "C" fn fc_cache_get_font_path(
 
                 Box::into_raw(Box::new(path_c))
             }
-            Some(FontSource::Memory(font)) => {
+            Some(OwnedFontSource::Memory(font)) => {
                 // For memory fonts, return a special path
                 let path_c = FcFontPathC {
                     path: CString::new(format!("memory:{}", font.id))
@@ -1626,7 +1626,7 @@ pub extern "C" fn fc_registry_query(
 
         match registry.query(&pattern_rust) {
             Some(match_obj) => {
-                let cache = registry.into_fc_font_cache();
+                let cache = registry.shared_cache();
                 let match_c = font_match_to_c(&cache, &match_obj);
                 Box::into_raw(Box::new(match_c))
             }
@@ -1760,7 +1760,7 @@ pub extern "C" fn fc_registry_snapshot(
     }
     unsafe {
         let registry = &*registry;
-        let cache = registry.into_fc_font_cache();
+        let cache = registry.shared_cache();
         Box::into_raw(Box::new(cache))
     }
 }

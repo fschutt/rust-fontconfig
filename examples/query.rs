@@ -31,8 +31,8 @@ fn main() {
         }
         if let Some(source) = cache.get_font_by_id(&result.id) {
             match source {
-                rust_fontconfig::FontSource::Disk(path) => println!("  Path: {}", path.path),
-                rust_fontconfig::FontSource::Memory(font) => {
+                rust_fontconfig::OwnedFontSource::Disk(path) => println!("  Path: {}", path.path),
+                rust_fontconfig::OwnedFontSource::Memory(font) => {
                     println!("  Memory font: {}", font.id)
                 }
             }

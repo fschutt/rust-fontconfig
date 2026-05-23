@@ -31,7 +31,7 @@ fn main() {
                     oblique: PatternMatch::False,
                     ..Default::default()
                 },
-                pattern,
+                &pattern,
             );
             println!(
                 "  id={} name={:?} family={:?} italic={:?} bold={:?} weight={:?} stretch={:?} style_score={} subfamily={:?}",
@@ -74,7 +74,7 @@ fn main() {
                         oblique: PatternMatch::False,
                         ..Default::default()
                     },
-                    pattern,
+                    &pattern,
                 );
                 println!(
                     "    [{}] id={} name={:?} family={:?} italic={:?} bold={:?} weight={:?} style_score={} subfamily={:?}",

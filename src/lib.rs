@@ -1344,7 +1344,9 @@ pub enum FontBytes {
     /// fallback when mmap is unavailable.
     Owned(std::sync::Arc<[u8]>),
     /// File-backed mmap. Read-only; pages are demand-loaded by the
-    /// kernel.
+    /// kernel. Absent on wasm targets, where `mmapio` is unavailable
+    /// (the optional dep is gated to `cfg(not(target_family="wasm"))`).
+    #[cfg(not(target_family = "wasm"))]
     Mmapped(mmapio::Mmap),
 }
 
@@ -1355,6 +1357,7 @@ impl FontBytes {
     pub fn as_slice(&self) -> &[u8] {
         match self {
             FontBytes::Owned(arc) => arc,
+            #[cfg(not(target_family = "wasm"))]
             FontBytes::Mmapped(m) => &m[..],
         }
     }
@@ -1382,6 +1385,7 @@ impl core::fmt::Debug for FontBytes {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let kind = match self {
             FontBytes::Owned(_) => "Owned",
+            #[cfg(not(target_family = "wasm"))]
             FontBytes::Mmapped(_) => "Mmapped",
         };
         write!(f, "FontBytes::{}({} bytes)", kind, self.as_slice().len())
@@ -4818,7 +4822,11 @@ fn detect_monospace(
 ///
 /// Uses [`config::tokenize_font_stem`] and [`config::FONT_STYLE_TOKENS`]
 /// to extract the family name and detect style hints from the filename.
-#[cfg(feature = "std")]
+///
+/// Only compiled for the filename-only (`not(parsing)`) scan path — its
+/// sole caller is [`FcFontCache::build_from_filenames`]. With `parsing`
+/// on, allsorts reads real metadata and this fallback is unused.
+#[cfg(all(feature = "std", not(feature = "parsing")))]
 fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     match ext.as_str() {

@@ -137,8 +137,8 @@ fn main() {
 
     // Step 7: Snapshot to FcFontCache for text resolution
     let t6 = Instant::now();
-    let new_cache = registry.into_fc_font_cache();
-    println!("  7. into_fc_font_cache()        {:>10?}", t6.elapsed());
+    let new_cache = registry.shared_cache();
+    println!("  7. shared_cache()              {:>10?}", t6.elapsed());
 
     let new_resolved = new_chain.resolve_text(&new_cache, test_text);
     print!("     Text '{}': ", test_text);

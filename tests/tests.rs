@@ -22,11 +22,11 @@ fn test_operating_system_font_expansion() {
     let macos_os = OperatingSystem::MacOS;
     assert_eq!(
         macos_os.get_serif_fonts(no_ranges),
-        vec!["Times", "New York", "Palatino"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        vec!["Times New Roman", "Times", "New York", "Palatino"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
     );
     assert_eq!(
         macos_os.get_sans_serif_fonts(no_ranges),
-        vec!["San Francisco", "Helvetica Neue", "Lucida Grande"]
+        vec!["San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular", "Helvetica Neue", "Helvetica", "Lucida Grande"]
             .iter().map(|s| s.to_string()).collect::<Vec<_>>()
     );
     assert_eq!(
@@ -53,8 +53,8 @@ fn test_operating_system_font_expansion() {
     let expanded = expand_font_families(&families, OperatingSystem::MacOS, no_ranges);
     assert_eq!(expanded[0], "Arial");
     assert_eq!(expanded[1], "San Francisco");
-    assert_eq!(expanded[2], "Helvetica Neue");
-    assert_eq!(expanded[3], "Lucida Grande");
+    assert_eq!(expanded[2], ".AppleSystemUIFont");
+    assert_eq!(expanded[3], ".SFUIText");
     
     // Test non-generic family (should pass through unchanged)
     let specific = vec!["MyCustomFont".to_string()];
