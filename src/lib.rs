@@ -1,6 +1,6 @@
 //! # rust-fontconfig
 //!
-//! Pure-Rust rewrite of the Linux fontconfig library (no system dependencies) - using allsorts as a font parser to support `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf`
+//! Pure-Rust rewrite of the Linux fontconfig library (no system dependencies). Enable the `parsing` feature to parse `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf` with allsorts.
 //!
 //! **NOTE**: Also works on Windows, macOS and WASM - without external dependencies!
 //!

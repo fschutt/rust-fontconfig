@@ -1,6 +1,6 @@
 # rust-fontconfig
 
-Pure-Rust rewrite of the Linux fontconfig library (no system dependencies) - using allsorts as a font parser to support `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf`
+Pure-Rust rewrite of the Linux fontconfig library (no system dependencies). Enable the `parsing` feature to parse `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf` with allsorts.
 
 **NOTE**: Also works on Windows, macOS and WASM - without external dependencies!
 
@@ -17,7 +17,7 @@ There are a number of reasons why I want to have a pure-Rust version of fontconf
 - Font parsing / loading can be easily multithreaded (parsing font files in parallel)
 - It reduces the number of necessary non-Rust dependencies on Linux for azul to 0
 - fontconfig (or at least the Rust bindings) do not allow you to store an in-memory cache, only an on-disk cache, requiring disk access on every query (= slow)
-- `no_std` support ("bring your own font files") for WASM
+- in-memory ("bring your own font files") font loading for WASM and sandboxed environments
  
 Now for the more practical reasons:
 
@@ -27,6 +27,32 @@ Now for the more practical reasons:
 - The rust rewrite uses multithreading and memory mapping, since that is faster than reading each file individually
 - The rust rewrite only parses the font tables necessary to select the name, not the entire font
 - The rust rewrite uses very few allocations (some are necessary because of UTF-16 / UTF-8 conversions and multithreading lifetime issues)
+
+## Installation
+
+```toml
+[dependencies]
+rust-fontconfig = { version = "4.4", features = ["parsing"] }
+```
+
+The default build (`std` only) discovers system fonts via **filename
+heuristics**. Enable `parsing` to read the actual font tables with allsorts for
+accurate family names, weights, Unicode coverage and
+`.woff`/`.woff2`/`.ttc`/`.otf`/`.ttf` support.
+
+### Cargo features
+
+| Feature | Default | Description |
+|---------|:-------:|-------------|
+| `std` | ✅ | Filesystem scanning + mmap-backed font loading. Currently required — the crate is std-only as of v4.1. |
+| `parsing` | | Parse font tables via allsorts (accurate metadata; WOFF/WOFF2/TTC/OTF/TTF). Implies `std`. |
+| `multithreading` | | Parallel font scanning/parsing via rayon. |
+| `cache` | | Persist the parsed cache to disk (serde + bincode + dirs). |
+| `async-registry` | | `FcFontRegistry` for incremental/background font discovery. Implies `parsing`. |
+| `ffi` | | C API bindings. Implies `parsing` + `async-registry`. |
+
+> **WASM:** `wasm32-*` targets build out of the box — `mmapio` and `rayon` are
+> excluded automatically via `cfg`. Build with `--features parsing`.
 
 ## Usage
 
@@ -61,10 +87,10 @@ fn main() {
         // Get font file path
         if let Some(source) = cache.get_font_by_id(&font_match.id) {
             match source {
-                rust_fontconfig::FontSource::Disk(path) => {
+                rust_fontconfig::OwnedFontSource::Disk(path) => {
                     println!("Path: {}", path.path);
                 }
-                rust_fontconfig::FontSource::Memory(font) => {
+                rust_fontconfig::OwnedFontSource::Memory(font) => {
                     println!("Memory font: {}", font.id);
                 }
             }
@@ -180,7 +206,7 @@ The rust-fontconfig library provides C-compatible bindings that can be used from
 
 #### Binary Downloads
 
-You can download pre-built binary files from the [latest GitHub release](https://github.com/maps4print/rust-fontconfig/releases/latest):
+You can download pre-built binary files from the [latest GitHub release](https://github.com/fschutt/rust-fontconfig/releases/latest):
 - Windows: `rust_fontconfig.dll` and `rust_fontconfig.lib`
 - macOS: `librust_fontconfig.dylib` and `librust_fontconfig.a`
 - Linux: `librust_fontconfig.so` and `librust_fontconfig.a`
@@ -191,7 +217,7 @@ Alternatively, you can build the library from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/maps4print/rust-fontconfig.git
+git clone https://github.com/fschutt/rust-fontconfig.git
 cd rust-fontconfig
 
 # Build with FFI support
@@ -292,7 +318,7 @@ cl.exe /I./include /Fe:font_example.exe example.c rust_fontconfig.lib
 - Support for font weights (thin, light, normal, bold, etc.)
 - Support for font stretches (condensed, normal, expanded, etc.)
 - In-memory font loading and caching
-- Optional `no_std` support ("bring your own fonts" for WASM)
+- WASM support (`wasm32-*` targets; `mmapio`/`rayon` auto-excluded via `cfg`)
 - C API for integration with non-Rust languages
 
 ## License
