@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.0] - 2026-05-23
+
+### Changed
+
+- Bumped `allsorts-azul` 0.16.2 → 0.16.4 (semver-compatible patch bump
+  within the 0.16 line).
+
+### Fixed
+
+- **WASM builds**: `FontBytes::Mmapped(mmapio::Mmap)` was gated only on
+  `std`, but `mmapio` is excluded on `target_family = "wasm"`, so the
+  variant referenced a crate that isn't linked there. The variant and
+  its match arms are now gated on `not(target_family = "wasm")`; WASM
+  targets fall back to `FontBytes::Owned`.
+- **C bindings (`ffi`) + examples**: realigned to the v4.x shared-cache
+  API — `FontSource` → `OwnedFontSource` and
+  `FcFontRegistry::into_fc_font_cache()` → `shared_cache()`, and the
+  `&FcPattern` borrow now expected by `calculate_style_score`. The
+  exported C ABI is unchanged.
+- `--all-features` dead-code warning for `pattern_from_filename`: gated
+  to match its sole caller, `build_from_filenames`
+  (`std` + `not(parsing)`).
+- `test_operating_system_font_expansion` assertions updated to match the
+  macOS/iOS serif + sans-serif expansion lists shipped in 4.3.0.
+
 ## [4.2.1] - 2026-04-18
 
 ### Fixed
