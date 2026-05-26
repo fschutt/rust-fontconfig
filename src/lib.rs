@@ -4287,7 +4287,7 @@ fn FcParseFontBytesInner(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPatt
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern, FcFontPath)> {
-    #[cfg(feature = "multithreading")]
+    #[cfg(all(feature = "multithreading", not(target_family = "wasm")))]
     {
         use rayon::prelude::*;
 
@@ -4300,7 +4300,9 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
             .flatten()
             .collect()
     }
-    #[cfg(not(feature = "multithreading"))]
+    // wasm has no rayon (it's target-gated off), so even with `multithreading`
+    // enabled wasm falls back to the sequential path.
+    #[cfg(not(all(feature = "multithreading", not(target_family = "wasm"))))]
     {
         paths
             .iter()
@@ -4352,7 +4354,7 @@ fn FcScanSingleDirectoryRecursive(dir: PathBuf) -> Vec<(FcPattern, FcFontPath)> 
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> {
     let result = {
-        #[cfg(feature = "multithreading")]
+        #[cfg(all(feature = "multithreading", not(target_family = "wasm")))]
         {
             use rayon::prelude::*;
 
@@ -4361,7 +4363,7 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
                 .filter_map(|file| FcParseFont(file))
                 .collect::<Vec<Vec<_>>>()
         }
-        #[cfg(not(feature = "multithreading"))]
+        #[cfg(not(all(feature = "multithreading", not(target_family = "wasm"))))]
         {
             files_to_parse
                 .iter()
