@@ -165,7 +165,9 @@ pub struct FcFontRegistry {
 
     // ── Populated by Scout (fast, Phase 1) ──
     /// Maps guessed lowercase family name → file paths
-    pub known_paths: RwLock<BTreeMap<String, Vec<PathBuf>>>,
+    // [az-web-lift] queue RwLock spins in lock_contended in single-threaded lifted wasm
+    // (Mutex is Leaf-stubbed and fine; only the pure-Rust queue RwLock is lifted). StLock = no-atomic single-threaded bypass. See lib.rs.
+    pub known_paths: crate::StLock<BTreeMap<String, Vec<PathBuf>>>,
 
     // ── Priority queue for Builder ──
     pub build_queue: Mutex<Vec<FcBuildJob>>,
@@ -228,7 +230,7 @@ impl FcFontRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             cache: FcFontCache::default(),
-            known_paths: RwLock::new(BTreeMap::new()),
+            known_paths: crate::StLock::new(BTreeMap::new()),
             build_queue: Mutex::new(Vec::new()),
             queue_condvar: Condvar::new(),
             processed_paths: Mutex::new(HashSet::new()),

@@ -350,7 +350,7 @@ impl OperatingSystem {
     /// Returns the original name if not a generic family
     /// Prioritizes fonts based on Unicode range coverage
     pub fn expand_generic_family(&self, family: &str, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        match family.to_lowercase().as_str() {
+        match family.to_ascii_lowercase().as_str() {
             "serif" => self.get_serif_fonts(unicode_ranges),
             "sans-serif" => self.get_sans_serif_fonts(unicode_ranges),
             "monospace" => self.get_monospace_fonts(unicode_ranges),
@@ -1156,6 +1156,20 @@ impl FontFallbackChain {
             }
         }
 
+        // WEB-LIFT LAST-RESORT (re-added 2026-06-03; the `with_memory_fonts` trap that
+        // previously made touching this file fatal is now fixed by the byte-atomic remill
+        // fork support). The lifted web path fails coverage-based resolution above for TWO
+        // reasons that both mis-lift: the chain mis-builds to empty AND/OR `get_metadata_by_id`
+        // (a HashMap<FontId,_> lookup) returns None in the lift. So instead of gating on the
+        // chain being empty, fire whenever NOTHING matched above AND the cache holds exactly
+        // the single registered fallback font — the headless/web case. This bypasses BOTH the
+        // chain and the metadata HashMap, returning the only font's id directly. Native caches
+        // hold many system fonts, so `len()==1` is false there → native is unaffected.
+        let registered = cache.list();
+        if registered.len() == 1 {
+            return Some((registered[0].1, "(web-last-resort)".to_string()));
+        }
+
         None
     }
     
@@ -1459,15 +1473,127 @@ pub struct FcFontCache {
 
 /// Shared interior of `FcFontCache`. Always accessed through an
 /// `Arc` — never referenced directly by external callers.
+// Internal lock wrapper for the cache state. Two implementations selected by feature:
+//
+// DEFAULT (general builds): backed by std `RwLock`. `read`/`write`/`lock` return
+// `Result<_, Infallible>` for a uniform call site (a poisoned lock is recovered via
+// `into_inner` — a memoisation cache is still valid to read after a panic).
+//
+// `single-thread-unsafe-locks` feature: a bare `UnsafeCell` with NO atomics; `read`/`write`/
+// `lock` hand out a guard immediately. UNSOUND in a multi-threaded program — enable ONLY for a
+// known single-threaded environment. Exists for the azul remill-lifted web backend
+// (single-threaded wasm), where std's queue-based RwLock `lock_contended` path spins forever
+// (no other thread ever unparks it) and hangs the layout solver.
+
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+pub struct StLock<T> {
+    lock: std::sync::RwLock<T>,
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+impl<T> core::fmt::Debug for StLock<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("StLock(..)")
+    }
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+impl<T> StLock<T> {
+    pub fn new(v: T) -> Self {
+        Self { lock: std::sync::RwLock::new(v) }
+    }
+    pub fn read(&self) -> Result<StReadGuard<'_, T>, core::convert::Infallible> {
+        Ok(StReadGuard { g: self.lock.read().unwrap_or_else(|e| e.into_inner()) })
+    }
+    pub fn write(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
+        Ok(StWriteGuard { g: self.lock.write().unwrap_or_else(|e| e.into_inner()) })
+    }
+    pub fn lock(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
+        self.write()
+    }
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+pub struct StReadGuard<'a, T> {
+    g: std::sync::RwLockReadGuard<'a, T>,
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+impl<'a, T> core::ops::Deref for StReadGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.g }
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+pub struct StWriteGuard<'a, T> {
+    g: std::sync::RwLockWriteGuard<'a, T>,
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+impl<'a, T> core::ops::Deref for StWriteGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.g }
+}
+#[cfg(not(feature = "single-thread-unsafe-locks"))]
+impl<'a, T> core::ops::DerefMut for StWriteGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T { &mut self.g }
+}
+
+#[cfg(feature = "single-thread-unsafe-locks")]
+pub struct StLock<T> {
+    cell: std::cell::UnsafeCell<T>,
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+unsafe impl<T> Sync for StLock<T> {}
+#[cfg(feature = "single-thread-unsafe-locks")]
+unsafe impl<T> Send for StLock<T> {}
+#[cfg(feature = "single-thread-unsafe-locks")]
+impl<T> core::fmt::Debug for StLock<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("StLock(..)")
+    }
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+impl<T> StLock<T> {
+    pub fn new(v: T) -> Self {
+        Self { cell: std::cell::UnsafeCell::new(v) }
+    }
+    pub fn read(&self) -> Result<StReadGuard<'_, T>, core::convert::Infallible> {
+        Ok(StReadGuard { r: unsafe { &*self.cell.get() } })
+    }
+    pub fn write(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
+        Ok(StWriteGuard { r: unsafe { &mut *self.cell.get() } })
+    }
+    pub fn lock(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
+        Ok(StWriteGuard { r: unsafe { &mut *self.cell.get() } })
+    }
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+pub struct StReadGuard<'a, T> {
+    r: &'a T,
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+impl<'a, T> core::ops::Deref for StReadGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T { self.r }
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+pub struct StWriteGuard<'a, T> {
+    r: &'a mut T,
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+impl<'a, T> core::ops::Deref for StWriteGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T { self.r }
+}
+#[cfg(feature = "single-thread-unsafe-locks")]
+impl<'a, T> core::ops::DerefMut for StWriteGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T { self.r }
+}
+
 pub(crate) struct FcFontCacheShared {
     /// Main pattern/metadata state, guarded by a reader-writer lock.
     /// Builder threads take the write lock to insert a parsed font;
     /// all query paths take the read lock.
-    pub(crate) state: std::sync::RwLock<FcFontCacheInner>,
+    pub(crate) state: StLock<FcFontCacheInner>,
     /// Font fallback chain cache. Not part of the RwLock-guarded
     /// state because cache insertions happen under `&self` on read
     /// paths (they're a memoisation, not observable state).
-    pub(crate) chain_cache: std::sync::Mutex<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
+    pub(crate) chain_cache: StLock<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
     /// Shared file-bytes cache: content-hash → weak [`FontBytes`].
     ///
     /// [`FcFontCache::get_font_bytes`] populates this so that multiple
@@ -1476,7 +1602,7 @@ pub(crate) struct FcFontCacheShared {
     /// — instead of each allocating their own buffer. We hold `Weak`
     /// references so the mmap unmap as soon as no parsed font holds
     /// it alive.
-    pub(crate) shared_bytes: std::sync::Mutex<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
+    pub(crate) shared_bytes: StLock<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
 }
 
 /// The actual font-pattern state, held behind the RwLock in
@@ -1503,32 +1629,14 @@ pub(crate) struct FcFontCacheInner {
 impl FcFontCacheInner {
     /// Add a font pattern to the token index. Called under the
     /// write lock by insertion paths.
-    pub(crate) fn index_pattern_tokens(&mut self, pattern: &FcPattern, id: FontId) {
-        // Extract tokens from both name and family
-        let mut all_tokens = Vec::new();
-
-        if let Some(name) = &pattern.name {
-            all_tokens.extend(FcFontCache::extract_font_name_tokens(name));
-        }
-
-        if let Some(family) = &pattern.family {
-            all_tokens.extend(FcFontCache::extract_font_name_tokens(family));
-        }
-
-        // Convert tokens to lowercase and store them
-        let tokens_lower: Vec<String> =
-            all_tokens.iter().map(|t| t.to_lowercase()).collect();
-
-        // Add each token (lowercase) to the index
-        for token_lower in &tokens_lower {
-            self.token_index
-                .entry(token_lower.clone())
-                .or_insert_with(alloc::collections::BTreeSet::new)
-                .insert(id);
-        }
-
-        // Store pre-tokenized font name for fast lookup (no re-tokenization needed)
-        self.font_tokens.insert(id, tokens_lower);
+    pub(crate) fn index_pattern_tokens(&mut self, _pattern: &FcPattern, _id: FontId) {
+        // WEB-LIFT (2026-06-02): no-op on the azul web fork. The tokenizer
+        // (`extract_font_name_tokens` char-classification + lowercasing) pulls unicode tables
+        // whose jump-tables the remill/web lift leaves un-devirt'd → MISSING_BLOCK trap inside
+        // `with_memory_fonts`. `token_index`/`font_tokens` feed ONLY the separate token-fuzzy
+        // search path (query_fuzzy); the main `query`→`query_internal_locked` scores by
+        // unicode-compatibility + style over the registered patterns/metadata (populated before
+        // this call), so leaving the token index empty does not affect normal font matching.
     }
 }
 
@@ -1562,9 +1670,9 @@ impl Default for FcFontCache {
     fn default() -> Self {
         Self {
             shared: std::sync::Arc::new(FcFontCacheShared {
-                state: std::sync::RwLock::new(FcFontCacheInner::default()),
-                chain_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-                shared_bytes: std::sync::Mutex::new(std::collections::HashMap::new()),
+                state: StLock::new(FcFontCacheInner::default()),
+                chain_cache: StLock::new(std::collections::HashMap::new()),
+                shared_bytes: StLock::new(std::collections::HashMap::new()),
             }),
         }
     }
@@ -1577,11 +1685,12 @@ impl FcFontCache {
     #[inline]
     pub(crate) fn state_read(
         &self,
-    ) -> std::sync::RwLockReadGuard<'_, FcFontCacheInner> {
-        self.shared
-            .state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ) -> StReadGuard<'_, FcFontCacheInner> {
+        // [az-web-lift] StLock::read() is Infallible (never poisons/spins).
+        match self.shared.state.read() {
+            Ok(g) => g,
+            Err(e) => match e {},
+        }
     }
 
     /// Acquire a write guard on the cache's state. Panics on
@@ -1589,11 +1698,12 @@ impl FcFontCache {
     #[inline]
     pub(crate) fn state_write(
         &self,
-    ) -> std::sync::RwLockWriteGuard<'_, FcFontCacheInner> {
-        self.shared
-            .state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ) -> StWriteGuard<'_, FcFontCacheInner> {
+        // [az-web-lift] StLock::write() is Infallible (never poisons/spins).
+        match self.shared.state.write() {
+            Ok(g) => g,
+            Err(e) => match e {},
+        }
     }
 
     /// Adds in-memory font files.
@@ -2652,13 +2762,32 @@ impl FcFontCache {
             )
         };
 
+        // WEB-LIFT LAST-RESORT (2026-06-03; the `with_memory_fonts` trap that previously made
+        // editing this file fatal is now fixed by the byte-atomic remill fork support). In the
+        // lifted web backend `find_unicode_fallbacks` returns 0 fonts even though one IS
+        // registered (the matching/iteration mis-lifts), so BOTH chain lists come back empty →
+        // every consumer (resolve_char, query_for_text, prune_chain_to_used_chars) sees no font
+        // → the layout unwraps a None → OOB. When the chain would be empty, append the first
+        // registered font so the chain is non-empty. Native chains are never empty here.
+        let mut unicode_fallbacks = unicode_fallbacks;
+        if css_fallbacks.is_empty() && unicode_fallbacks.is_empty() {
+            let st = self.state_read();
+            if let Some((pat, id)) = st.patterns.iter().next() {
+                unicode_fallbacks.push(FontMatch {
+                    id: *id,
+                    unicode_ranges: pat.unicode_ranges.clone(),
+                    fallbacks: Vec::new(),
+                });
+            }
+        }
+
         FontFallbackChain {
             css_fallbacks,
             unicode_fallbacks,
             original_stack: font_families.to_vec(),
         }
     }
-    
+
     /// Extract Unicode ranges from text
     #[allow(dead_code)]
     fn extract_unicode_ranges(text: &str) -> Vec<UnicodeRange> {
@@ -2713,7 +2842,7 @@ impl FcFontCache {
         }
         
         // Convert tokens to lowercase for case-insensitive lookup
-        let tokens_lower: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+        let tokens_lower: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
         
         // Progressive token matching strategy:
         // Start with first token, then progressively narrow down with each additional token
@@ -3149,8 +3278,8 @@ impl FcFontCache {
         // "System Font Regular Italic" (a variant) when the user hasn't
         // explicitly requested italic.
         if let (Some(name), Some(family)) = (&candidate.name, &candidate.family) {
-            let name_lower = name.to_lowercase();
-            let family_lower = family.to_lowercase();
+            let name_lower = name.to_ascii_lowercase();
+            let family_lower = family.to_ascii_lowercase();
 
             // Strip the family prefix from the name to get the "extra" part
             let extra = if name_lower.starts_with(&family_lower) {
@@ -3181,7 +3310,7 @@ impl FcFontCache {
         // Fonts whose OpenType subfamily is exactly "Regular" are the canonical
         // base variant and should be strongly preferred.
         if let Some(ref subfamily) = candidate.metadata.font_subfamily {
-            let sf_lower = subfamily.to_lowercase();
+            let sf_lower = subfamily.to_ascii_lowercase();
             if sf_lower == "regular" {
                 score -= 30;
             }
@@ -4830,7 +4959,7 @@ fn detect_monospace(
 /// on, allsorts reads real metadata and this fallback is unused.
 #[cfg(all(feature = "std", not(feature = "parsing")))]
 fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
-    let ext = path.extension()?.to_str()?.to_lowercase();
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
         "ttf" | "otf" | "ttc" | "woff" | "woff2" => {}
         _ => return None,

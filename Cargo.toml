@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "4.4.2"
+version = "4.4.3"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -43,6 +43,11 @@ parsing = ["allsorts", "std"]
 ffi = ["parsing", "std", "async-registry"]
 cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
+# Replace the internal RwLock-backed `StLock` with a NO-ATOMIC UnsafeCell bypass.
+# UNSOUND in multi-threaded programs — enable ONLY in a known single-threaded environment
+# (e.g. the azul remill-lifted single-threaded-wasm web backend, where std's queue RwLock
+# `lock_contended` spins forever and hangs). Off by default.
+single-thread-unsafe-locks = []
 
 [[example]]
 name = "registry"
