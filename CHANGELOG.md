@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.3] - 2026-06-06
+
+### Fixed
+
+- **Bundled in-memory fonts were unusable on caches with no system fonts**
+  (headless / wasm / embedder-bundled-font setups). A font registered via
+  `FcFontCache::with_memory_fonts` with a naive pattern (the font bytes plus
+  a name, but an empty `unicode_ranges`) could never be selected to shape
+  any character. Two independent root causes, both fixed:
+
+  1. `with_memory_fonts` / `with_memory_font_with_id` stored the empty
+     `unicode_ranges` verbatim, and `FontFallbackChain::resolve_char`
+     deliberately skips any font that reports no coverage. They now
+     auto-populate `unicode_ranges` from the font's cmap/OS2 tables when the
+     caller leaves them empty, reusing the exact pipeline the on-disk
+     builder uses (`FcParseFontBytes` → `parse_font_faces`). This requires
+     the `parsing` feature; without it the caller-supplied pattern is stored
+     unchanged and the caller must populate `unicode_ranges` themselves.
+
+  2. Generic CSS families (`serif` / `sans-serif` / `monospace`) were
+     expanded to a hardcoded list of real per-OS font names and the generic
+     name itself was dropped, so a registered memory font (whatever its
+     family name) was never reached. The chain builder now falls back to a
+     generic `name: None` query for the originally-requested generic
+     family **only when the expanded OS-specific stack matched nothing**, so
+     systems with real fonts are unaffected and any fallback match comes
+     after real matches.
+
 ## [4.4.0] - 2026-05-23
 
 ### Changed

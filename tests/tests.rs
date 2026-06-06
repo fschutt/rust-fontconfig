@@ -748,3 +748,69 @@ fn test_failing_isolated_2() {
         "Should match Arial Bold font ID"
     );
 }
+
+/// Regression test for the headless / wasm / embedder-bundled-font bug.
+///
+/// A bundled IN-MEMORY font, registered via `with_memory_fonts` with the
+/// kind of NAIVE pattern a normal caller actually writes (a generic-ish
+/// name and, crucially, an EMPTY `unicode_ranges`), must be usable to shape
+/// text when the document asks for the generic CSS family `"serif"` and the
+/// cache has NO system fonts at all.
+///
+/// Before the fix this returned `None` for two independent reasons:
+///   1. `with_memory_fonts` stored the empty `unicode_ranges` verbatim, and
+///      `resolve_char` skips fonts with no range info, so the font could
+///      never be selected for any character.
+///   2. The generic `"serif"` family was expanded to a hardcoded list of
+///      real OS font names (Times, DejaVu Serif, ...) and the original
+///      generic name was dropped, so a registered memory font was never
+///      reached.
+///
+/// Requires the `parsing` feature: without it the crate cannot inspect the
+/// font's cmap/OS2 to learn its Unicode coverage, so the empty ranges
+/// cannot be auto-populated.
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[test]
+fn test_memory_font_generic_serif_resolves_char() {
+    // A real Latin TTF, embedded into the test binary.
+    let font_bytes = include_bytes!("fixtures/InstrumentSerif-Regular.ttf").to_vec();
+
+    // Empty cache: no system fonts (headless / wasm / embedder scenario).
+    let cache = FcFontCache::default();
+
+    // Exactly what a normal caller writes: a name, and an EMPTY
+    // unicode_ranges (they do NOT hand-compute the cmap).
+    let pattern = FcPattern {
+        name: Some("serif".to_string()),
+        family: Some("serif".to_string()),
+        unicode_ranges: Vec::new(),
+        ..Default::default()
+    };
+    let font = FcFont {
+        bytes: font_bytes,
+        font_index: 0,
+        id: "bundled-serif".to_string(),
+    };
+    cache.with_memory_fonts(vec![(pattern, font)]);
+
+    // Resolve a chain for the generic CSS family "serif".
+    let mut trace: Vec<TraceMsg> = Vec::new();
+    let chain = cache.resolve_font_chain_with_scripts(
+        &["serif".to_string()],
+        FcWeight::Normal,
+        PatternMatch::False,
+        PatternMatch::False,
+        None,
+        &mut trace,
+    );
+
+    // The bundled font is the ONLY font available; it MUST be selected to
+    // render an ASCII 'A'.
+    let resolved = chain.resolve_char(&cache, 'A');
+    assert!(
+        resolved.is_some(),
+        "bundled in-memory 'serif' font must resolve ASCII 'A' on a headless cache; \
+         got None (chain = {:#?})",
+        chain
+    );
+}

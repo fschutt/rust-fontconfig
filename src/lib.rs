@@ -1711,6 +1711,13 @@ impl FcFontCache {
     /// Note: takes `&self` — the shared cache handles interior
     /// mutability via the RwLock.
     pub fn with_memory_fonts(&self, fonts: Vec<(FcPattern, FcFont)>) -> &Self {
+        // Auto-detect Unicode coverage for any naively-registered font
+        // (empty `unicode_ranges`) BEFORE taking the write lock, so we don't
+        // hold it across font parsing. See `populate_memory_font_ranges`.
+        let fonts: Vec<(FcPattern, FcFont)> = fonts
+            .into_iter()
+            .map(|(pattern, font)| (Self::populate_memory_font_ranges(pattern, &font), font))
+            .collect();
         let mut state = self.state_write();
         for (pattern, font) in fonts {
             let id = FontId::new();
@@ -1729,12 +1736,57 @@ impl FcFontCache {
         pattern: FcPattern,
         font: FcFont,
     ) -> &Self {
+        let pattern = Self::populate_memory_font_ranges(pattern, &font);
         let mut state = self.state_write();
         state.patterns.insert(pattern.clone(), id);
         state.metadata.insert(id, pattern.clone());
         state.memory_fonts.insert(id, font);
         state.index_pattern_tokens(&pattern, id);
         self
+    }
+
+    /// Fill in a memory font's `unicode_ranges` from its raw bytes when the
+    /// caller left them empty.
+    ///
+    /// A normal caller of [`FcFontCache::with_memory_fonts`] just hands over
+    /// a name and the font bytes — they don't hand-compute the cmap. But
+    /// [`FontFallbackChain::resolve_char`] deliberately skips any font that
+    /// reports *no* coverage (it refuses to assume a blank range list means
+    /// "covers everything"). Without this step a naively-registered bundled
+    /// font could never be selected for any character — the exact bug that
+    /// bites headless / wasm / embedder-bundled-font setups.
+    ///
+    /// With the `parsing` feature we reuse the *same* OS/2 + cmap detection
+    /// pipeline the on-disk builder uses (via [`FcParseFontBytes`] →
+    /// `parse_font_faces`). Without `parsing` the pattern is returned
+    /// unchanged and the caller must populate `unicode_ranges` themselves.
+    #[cfg(all(feature = "std", feature = "parsing"))]
+    fn populate_memory_font_ranges(mut pattern: FcPattern, font: &FcFont) -> FcPattern {
+        if !pattern.unicode_ranges.is_empty() {
+            return pattern;
+        }
+        if let Some(faces) = FcParseFontBytes(&font.bytes, &font.id) {
+            // A `.ttc` yields several faces; pick the one matching this
+            // font's index, else fall back to the first parsed face. All
+            // patterns of a single face share the same `unicode_ranges`.
+            let ranges = faces
+                .iter()
+                .find(|(_, f)| f.font_index == font.font_index)
+                .or_else(|| faces.first())
+                .map(|(p, _)| p.unicode_ranges.clone())
+                .unwrap_or_default();
+            if !ranges.is_empty() {
+                pattern.unicode_ranges = ranges;
+            }
+        }
+        pattern
+    }
+
+    /// Without the `parsing` feature there is no cmap/OS2 parser available,
+    /// so the caller-provided pattern is stored verbatim.
+    #[cfg(not(all(feature = "std", feature = "parsing")))]
+    fn populate_memory_font_ranges(pattern: FcPattern, _font: &FcFont) -> FcPattern {
+        pattern
     }
 
     /// Register a newly-parsed on-disk font. Called by the builder
@@ -2641,9 +2693,23 @@ impl FcFontCache {
         // Expand generic CSS families to OS-specific fonts
         let expanded_families = expand_font_families(font_families, os, &[]);
 
+        // Keep the originally-requested generic families ("serif",
+        // "sans-serif", "monospace", ...) around. The expansion above turns
+        // them into a hardcoded list of real OS font names and drops the
+        // generic name itself; the chain builder uses this list to fall back
+        // to *registered* fonts when none of those OS names exist (wasm,
+        // headless caches, or an embedder that only registered an in-memory
+        // bundled font). See `resolve_font_chain_uncached`.
+        let generic_fallbacks: Vec<String> = font_families
+            .iter()
+            .filter(|f| config::is_generic_family(f))
+            .cloned()
+            .collect();
+
         // Build the chain
         let chain = self.resolve_font_chain_uncached(
             &expanded_families,
+            &generic_fallbacks,
             weight,
             italic,
             oblique,
@@ -2670,6 +2736,7 @@ impl FcFontCache {
     fn resolve_font_chain_uncached(
         &self,
         font_families: &[String],
+        generic_fallbacks: &[String],
         weight: FcWeight,
         italic: PatternMatch,
         oblique: PatternMatch,
@@ -2732,7 +2799,54 @@ impl FcFontCache {
                 fonts: matches,
             });
         }
-        
+
+        // Headless / wasm / memory-only fallback.
+        //
+        // Generic CSS families ("serif"/"sans-serif"/"monospace"/...) were
+        // expanded by the caller to a hardcoded list of real OS font names.
+        // On a system that actually has those fonts the loop above matched
+        // them and we're done. But on wasm, a headless cache, or an embedder
+        // that only registered an in-memory bundled font, NONE of those OS
+        // names exist — and the original generic name was dropped, so a
+        // registered font (whatever its family name) would never be reached.
+        //
+        // So: if the whole expanded stack matched nothing at all, retry each
+        // originally-requested generic family as a generic `name: None`
+        // query, which any registered font can satisfy. This runs ONLY when
+        // nothing else matched, so on systems with real fonts it adds nothing
+        // and never reorders real matches (any such fallback must come AFTER
+        // real matches).
+        if !generic_fallbacks.is_empty()
+            && css_fallbacks.iter().all(|g| g.fonts.is_empty())
+        {
+            for generic in generic_fallbacks {
+                let monospace = if generic.eq_ignore_ascii_case("monospace") {
+                    PatternMatch::True
+                } else {
+                    PatternMatch::False
+                };
+                let pattern = FcPattern {
+                    name: None,
+                    weight,
+                    italic,
+                    oblique,
+                    monospace,
+                    unicode_ranges: Vec::new(),
+                    ..Default::default()
+                };
+                let mut matches = self.query_internal(&pattern, trace);
+                if matches.len() > 5 {
+                    matches.truncate(5);
+                }
+                if !matches.is_empty() {
+                    css_fallbacks.push(CssFallbackGroup {
+                        css_name: generic.clone(),
+                        fonts: matches,
+                    });
+                }
+            }
+        }
+
         // Populate unicode_fallbacks. CSS fallback fonts may falsely claim
         // coverage of a script via the OS/2 unicode-range bits without
         // actually having glyphs, so we supplement the CSS chain with an
