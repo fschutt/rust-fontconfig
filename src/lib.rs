@@ -4101,7 +4101,7 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
         // Extract additional style information
         let is_oblique = os2_table
             .fs_selection
-            .contains(allsorts::tables::os2::FsSelection::OBLIQUE);
+            .contains(allsorts::tables::os2::FsSelectionFlag::OBLIQUE);
         let weight = FcWeight::from_u16(os2_table.us_weight_class);
         let stretch = FcStretch::from_u16(os2_table.us_width_class);
 
