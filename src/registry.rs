@@ -135,7 +135,49 @@ fn write_detail_line(path: &str, line: &str) {
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+
+/// `std::time::Instant::now()` aborts on browser wasm ("time not implemented
+/// on this platform"). The registry reads the clock exclusively to bound waits
+/// on the scout/builder threads — which cannot exist on wasm
+/// (`std::thread::spawn` is unavailable there; `spawn_scout_and_builders` is
+/// never called). This stub makes every deadline *born expired*: each wait
+/// loop checks state once and takes its timeout exit immediately, instead of
+/// panicking at `Instant::now()` or blocking on a condvar no thread will ever
+/// signal. Resolution then proceeds from whatever the cache already holds
+/// (memory fonts), which is exactly right for wasm.
+#[cfg(target_family = "wasm")]
+#[derive(Clone, Copy)]
+struct Instant;
+#[cfg(target_family = "wasm")]
+impl Instant {
+    fn now() -> Self {
+        Instant
+    }
+    fn elapsed(&self) -> Duration {
+        Duration::MAX
+    }
+    fn saturating_duration_since(&self, _earlier: Instant) -> Duration {
+        Duration::ZERO
+    }
+}
+#[cfg(target_family = "wasm")]
+impl core::ops::Add<Duration> for Instant {
+    type Output = Instant;
+    fn add(self, _rhs: Duration) -> Instant {
+        Instant
+    }
+}
+
+/// True when this target has no scout/builder threads (see the `Instant` stub
+/// above): wait-timeout warnings are then expected on every call and must not
+/// spam the console.
+#[cfg(target_family = "wasm")]
+const WAITLESS_TARGET: bool = true;
+#[cfg(not(target_family = "wasm"))]
+const WAITLESS_TARGET: bool = false;
 
 use crate::{
     expand_font_families, FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
@@ -364,10 +406,12 @@ impl FcFontRegistry {
             while !self.scan_complete.load(Ordering::Acquire) {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
+                    if !WAITLESS_TARGET {
                     eprintln!(
-                        "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
-                         Proceeding with available fonts."
-                    );
+                            "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
+                             Proceeding with available fonts."
+                        );
+                }
                     return self.resolve_chains(&expanded_stacks);
                 }
                 completed = match self.progress.wait_timeout(completed, remaining) {
@@ -463,10 +507,12 @@ impl FcFontRegistry {
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
+                    if !WAITLESS_TARGET {
                     eprintln!(
-                        "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
-                         Proceeding with available fonts."
-                    );
+                            "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
+                             Proceeding with available fonts."
+                        );
+                }
                     break;
                 }
                 completed = match self.progress.wait_timeout(completed, remaining) {
@@ -605,7 +651,6 @@ impl FcFontRegistry {
     /// do the actual header parsing, and it is the builder output
     /// that populates `unicode_ranges`.
     pub fn wait_for_scout(&self) {
-        use std::time::{Duration, Instant};
         if self.cache_loaded.load(Ordering::Acquire) {
             return;
         }
@@ -619,9 +664,11 @@ impl FcFontRegistry {
         while !self.build_complete.load(Ordering::Acquire) {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                eprintln!(
-                    "[rfc-font-registry] WARNING: wait_for_scout timed out (5s)."
-                );
+                if !WAITLESS_TARGET {
+                    eprintln!(
+                        "[rfc-font-registry] WARNING: wait_for_scout timed out (5s)."
+                    );
+                }
                 return;
             }
             completed = match self.progress.wait_timeout(completed, remaining) {
