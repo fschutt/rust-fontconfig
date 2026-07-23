@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "4.4.6"
+version = "4.4.7"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -75,4 +75,9 @@ required-features = ["parsing"]
 
 [[example]]
 name = "unicode_aware_fonts"
+required-features = ["parsing"]
+
+[[example]]
+name = "repro_font_fallback"
+path = "examples/repro_font_fallback.rs"
 required-features = ["parsing"]

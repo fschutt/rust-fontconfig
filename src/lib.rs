@@ -2783,8 +2783,24 @@ impl FcFontCache {
                 // Generic families need full pattern matching
                 self.query_internal(&pattern, trace)
             } else {
-                // Specific font names: use fast token-based fuzzy matching
-                self.fuzzy_query_by_name(family, weight, italic, oblique, &[], trace)
+                // Specific font names: use fast token-based fuzzy matching.
+                let mut m = self.fuzzy_query_by_name(family, weight, italic, oblique, &[], trace);
+                // The token-fuzzy index is a no-op on the azul web-lift fork
+                // (`index_pattern_tokens`), so `fuzzy_query_by_name` returns nothing
+                // for every specific family name. Without a fallback here the whole
+                // expanded CSS stack ("DejaVu Sans", "Noto Sans", "Liberation Sans",
+                // …) resolves to NOTHING, and generic families collapse to the
+                // coverage/style-ranked `name: None` fallback below — which grabs the
+                // highest-Unicode-coverage CJK megafont (Noto Sans JP/CJK) for plain
+                // Latin body text and picks arbitrary weights (a Bold-Italic for a
+                // Regular request). Fall back to a normalized exact-family lookup so
+                // the real Latin fallback names actually match. Normalized equality
+                // ("noto sans" -> "notosans") also fixes the substring leak where
+                // "Noto Sans" would otherwise latch onto "Noto Sans JP".
+                if m.is_empty() {
+                    m = self.query_by_family_normalized(family, weight, italic, oblique);
+                }
+                m
             };
             
             // For generic families, limit to top 5 fonts to avoid too many matches
@@ -3099,7 +3115,80 @@ impl FcFontCache {
             })
             .collect()
     }
-    
+
+    /// Resolve a specific CSS family name to registered faces by NORMALIZED
+    /// family equality, ranked by style (weight/italic/oblique) closeness.
+    ///
+    /// This is the correct, stable matcher for a concrete `font-family` name
+    /// (as opposed to a generic like `sans-serif`): it matches
+    /// `font-family: "DejaVu Sans"` to the family whose normalized name is
+    /// exactly `dejavusans` — never to `dejavusansmono` or `dejavusanscondensed`,
+    /// and never `"Noto Sans"` to `"Noto Sans JP"`. `normalize_family_name`
+    /// strips spaces/hyphens/case so the CSS spelling and the stored family
+    /// spelling line up regardless of formatting.
+    ///
+    /// Among faces of the matched family the best style score wins (exact
+    /// weight, then nearest weight; correct slant), so `font-weight: bold`
+    /// selects the Bold face and a Regular request avoids Bold/Italic faces.
+    /// Falls back to matching the stored `name` by the same normalized rule for
+    /// fonts that carry no family field.
+    fn query_by_family_normalized(
+        &self,
+        family: &str,
+        weight: FcWeight,
+        italic: PatternMatch,
+        oblique: PatternMatch,
+    ) -> Vec<FontMatch> {
+        let target = crate::utils::normalize_family_name(family);
+        if target.is_empty() {
+            return Vec::new();
+        }
+        let query = FcPattern {
+            weight,
+            italic,
+            oblique,
+            ..Default::default()
+        };
+        let state = self.state_read();
+        let mut candidates: Vec<(FontId, i32, FcPattern)> = Vec::new();
+        for (stored_pattern, id) in &state.patterns {
+            let meta = state.metadata.get(id).unwrap_or(stored_pattern);
+            let fam_norm = meta
+                .family
+                .as_deref()
+                .map(crate::utils::normalize_family_name)
+                .unwrap_or_default();
+            let matches_family = fam_norm == target
+                || meta
+                    .name
+                    .as_deref()
+                    .map(crate::utils::normalize_family_name)
+                    .is_some_and(|n| n == target);
+            if !matches_family {
+                continue;
+            }
+            let style_score = Self::calculate_style_score(&query, meta);
+            candidates.push((*id, style_score, meta.clone()));
+        }
+        drop(state);
+
+        // Lowest style score first; deterministic tiebreak: non-italic, then name.
+        candidates.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.italic.cmp(&b.2.italic))
+                .then_with(|| a.2.name.cmp(&b.2.name))
+        });
+        candidates.truncate(5);
+        candidates
+            .into_iter()
+            .map(|(id, _, pattern)| FontMatch {
+                id,
+                unicode_ranges: pattern.unicode_ranges.clone(),
+                fallbacks: Vec::new(),
+            })
+            .collect()
+    }
+
     /// Extract tokens from a font name
     /// E.g., "NotoSansJP" -> ["Noto", "Sans", "JP"]
     /// E.g., "Noto Sans CJK JP" -> ["Noto", "Sans", "CJK", "JP"]
