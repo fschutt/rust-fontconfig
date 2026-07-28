@@ -5164,15 +5164,24 @@ fn analyze_cmap_coverage(provider: &impl FontTableProvider) -> Option<Vec<Unicod
     for &(start, end) in blocks_to_check {
         let test_codepoints = get_verification_codepoints(start, end);
         let required_hits = (test_codepoints.len() + 1) / 2;
+        // Blocks the font does NOT have are the common case: a Latin face covers a
+        // handful of the ~50 probed here. Stop as soon as the remaining probes
+        // cannot reach `required_hits` rather than testing every codepoint to
+        // confirm a foregone conclusion. Same verdict, fewer cmap lookups.
+        let allowed_misses = test_codepoints.len() - required_hits;
         let mut hits = 0;
+        let mut misses = 0;
 
         for cp in test_codepoints {
-            if let Ok(Some(gid)) = cmap_subtable.map_glyph(cp) {
-                if gid != 0 {
-                    hits += 1;
-                    if hits >= required_hits {
-                        break;
-                    }
+            if matches!(cmap_subtable.map_glyph(cp), Ok(Some(gid)) if gid != 0) {
+                hits += 1;
+                if hits >= required_hits {
+                    break;
+                }
+            } else {
+                misses += 1;
+                if misses > allowed_misses {
+                    break;
                 }
             }
         }
