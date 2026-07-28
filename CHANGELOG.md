@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.8] - 2026-07-28
+
+### Fixed
+
+- **Font coverage was capped by OS/2's claims, so fonts were unmatchable for
+  codepoints they can actually draw.** A font's `unicode_ranges` was
+  effectively `(OS/2 ulUnicodeRange claims ∩ cmap reality)`:
+  `verify_unicode_ranges_with_cmap` iterates the OS/2 ranges and keeps the ones
+  the cmap confirms, so it can only ever *shrink* the set, and the full cmap
+  analysis only ran when OS/2 was **all-zero**. Nothing could add a block the
+  cmap covers but OS/2 failed to claim.
+
+  Fonts get these bits wrong in both directions. Over-claiming was already
+  handled; under-claiming was invisible. Noto Sans CJK's JP face has Hangul
+  glyphs in its cmap but leaves the Hangul bits clear, so on a stock Ubuntu box
+  with NotoSansCJK installed — where `fc-match :charset=D55C` happily answers
+  "Noto Sans CJK JP" — this crate reported **zero** fonts covering Hangul and
+  `한` resolved to no font at all. fontconfig has no such failure mode:
+  `FcFreeTypeCharSet` walks the cmap and `ulUnicodeRange` never bounds coverage.
+
+  Coverage is now cmap-authoritative. The over-claim pruning stays, then every
+  block the cmap actually covers is unioned in; OS/2 is demoted to a hint that
+  can only lose an argument with the cmap. On the same box: 0 → 30 fonts
+  correctly reporting Hangul coverage.
+
+  The two sources use different block boundaries, so the union overlaps — and
+  `calculate_unicode_coverage` *ranks fallback candidates by summing range
+  widths*, so an un-coalesced union would double-count and inflate scores (the
+  failure shape where a CJK megafont wins a Latin run). Ranges are therefore
+  coalesced into a sorted, disjoint set.
+
+### Added
+
+- `FcFontCache::query_with_fallback` — a **total** resolve, the `fc-match`
+  contract. `query` stays fallible on purpose: it answers "was this exact
+  request satisfiable?", which a caller reporting an unresolved font-family
+  needs. A *renderer* must not be handed that `None` — either the text
+  silently vanishes, or the caller invents its own fallback whose font is not
+  registered where the renderer later looks it up by hash. Relaxation mirrors
+  fontconfig's own: the pattern as given → `name`/`family` cleared but weight,
+  slant, monospace and coverage kept (a Bold request must not silently become
+  Regular) → coverage only. An empty cache is the only legitimate `None`.
+
+- `FcFontCache::normalize_unicode_ranges` — coalesce ranges into a sorted,
+  disjoint set, keeping `calculate_unicode_coverage` honest.
+
+### Performance
+
+- The cmap block probe now stops as soon as a block's verdict is decided
+  instead of only on success, so blocks a font lacks — the common case, a Latin
+  face covers a handful of the ~50 probed — no longer test every sample
+  codepoint to confirm a foregone conclusion. Identical verdicts.
+  Full scan of 431 system fonts: ~108ms → ~94ms, against ~67ms for the
+  OS/2-bounded scan this replaces.
+
 ## [4.4.3] - 2026-06-06
 
 ### Fixed
