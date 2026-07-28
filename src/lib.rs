@@ -3426,6 +3426,39 @@ impl FcFontCache {
             .sum()
     }
 
+    /// Coalesce ranges into a sorted, **disjoint** set.
+    ///
+    /// [`FcFontCache::calculate_unicode_coverage`] sums `end - start + 1` with no
+    /// overlap handling, and that sum ranks fallback candidates. A font's coverage
+    /// is built from two sources whose block boundaries do not align — the OS/2
+    /// `ulUnicodeRange` bit mappings and the cmap block probe — so merging them
+    /// naively double-counts the overlap and inflates the score. That is exactly
+    /// how a CJK megafont wins a Latin run it has no business winning.
+    ///
+    /// Touching ranges (`prev.end + 1 == next.start`) are merged as well: they
+    /// describe the same contiguous coverage, and leaving them split would make
+    /// one set compare unequal to another purely by which source produced it.
+    pub fn normalize_unicode_ranges(mut ranges: Vec<UnicodeRange>) -> Vec<UnicodeRange> {
+        if ranges.len() < 2 {
+            return ranges;
+        }
+
+        ranges.sort_unstable();
+
+        let mut out: Vec<UnicodeRange> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match out.last_mut() {
+                // Overlapping or touching: extend. `saturating_add` so an `end` of
+                // u32::MAX cannot wrap around into a bogus failure-to-merge.
+                Some(prev) if range.start <= prev.end.saturating_add(1) => {
+                    prev.end = prev.end.max(range.end);
+                }
+                _ => out.push(range),
+            }
+        }
+        out
+    }
+
     /// Calculate how well a font's Unicode ranges cover the requested ranges
     /// Returns a compatibility score (higher is better, 0 means no overlap)
     pub fn calculate_unicode_compatibility(
@@ -4273,17 +4306,33 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
             }
         }
 
-        // Verify OS/2 reported ranges against actual CMAP support
-        // OS/2 ulUnicodeRange bits can be unreliable - fonts may claim support
-        // for ranges they don't actually have glyphs for
+        // OS/2's ulUnicodeRange bits are a HINT, never an upper bound.
+        //
+        // Fonts get these bits wrong in BOTH directions. Over-claiming is the
+        // well-known one: a font advertises a block it has no glyphs for, so
+        // verify against the cmap and drop what it cannot actually draw.
+        //
+        // Under-claiming is the one that used to be invisible here. Noto Sans
+        // CJK's JP face has Hangul glyphs in its cmap but leaves the Hangul bits
+        // clear; gating coverage on OS/2 made those codepoints permanently
+        // unmatchable, so 한국어 resolved to no font at all even with the covering
+        // face installed. fontconfig does not have this failure mode because it
+        // builds FcCharSet by walking the cmap itself and never consults
+        // ulUnicodeRange for coverage.
+        //
+        // So: prune what OS/2 over-claims, then union in everything the cmap
+        // actually covers. Coverage becomes cmap-authoritative, and OS/2 is
+        // reduced to a hint that can only ever lose an argument with the cmap.
         unicode_ranges = verify_unicode_ranges_with_cmap(&provider, unicode_ranges);
 
-        // If still empty (OS/2 had no ranges or all were invalid), do full CMAP analysis
-        if unicode_ranges.is_empty() {
-            if let Some(cmap_ranges) = analyze_cmap_coverage(&provider) {
-                unicode_ranges = cmap_ranges;
-            }
+        if let Some(cmap_ranges) = analyze_cmap_coverage(&provider) {
+            unicode_ranges.extend(cmap_ranges);
         }
+
+        // The two sources use different block boundaries, so the union overlaps.
+        // `calculate_unicode_coverage` sums range widths to rank fallbacks —
+        // leaving overlaps in would double-count and inflate this font's score.
+        unicode_ranges = FcFontCache::normalize_unicode_ranges(unicode_ranges);
 
         // Use the shared detect_monospace helper for PANOSE + hmtx fallback
         let is_monospace = detect_monospace(&provider, &os2_table, detected_monospace)

@@ -887,3 +887,86 @@ fn query_with_fallback_is_total_like_fc_match() {
         "an empty cache is the only legitimate None",
     );
 }
+
+/// A font's coverage is unioned from two sources whose block boundaries do not
+/// align: the OS/2 `ulUnicodeRange` bit mappings and the cmap block probe.
+/// `calculate_unicode_coverage` ranks fallback candidates by SUMMING range
+/// widths, so an un-coalesced union counts the shared codepoints twice and
+/// hands the font a score it did not earn — which is how a CJK megafont ends up
+/// winning a Latin run it has no business winning.
+#[test]
+fn normalize_unicode_ranges_coalesces_so_coverage_is_not_double_counted() {
+    let r = |start, end| UnicodeRange { start, end };
+
+    let raw = vec![
+        r(0x0100, 0x017F), // Latin Extended-A, listed first to prove sorting
+        r(0x0000, 0x007F), // Basic Latin
+        r(0x0040, 0x00FF), // overlaps Basic Latin, then TOUCHES Latin Ext-A
+        r(0x0000, 0x007F), // exact duplicate
+    ];
+
+    // Overlapping, touching and duplicated ranges collapse to one contiguous run.
+    let merged = FcFontCache::normalize_unicode_ranges(raw.clone());
+    assert_eq!(merged, vec![r(0x0000, 0x017F)]);
+
+    // The whole point: the ranking sum equals the codepoints actually covered.
+    assert_eq!(FcFontCache::calculate_unicode_coverage(&merged), 0x180);
+    // What the raw union would have claimed instead — 1.5x inflated.
+    assert_eq!(FcFontCache::calculate_unicode_coverage(&raw), 0x240);
+
+    // A genuine gap must NOT be bridged.
+    let disjoint =
+        FcFontCache::normalize_unicode_ranges(vec![r(0x0200, 0x02FF), r(0x0000, 0x007F)]);
+    assert_eq!(disjoint, vec![r(0x0000, 0x007F), r(0x0200, 0x02FF)]);
+
+    // An `end` at u32::MAX must not wrap while testing adjacency.
+    let maxed = FcFontCache::normalize_unicode_ranges(vec![r(0x0000, u32::MAX), r(0x0010, 0x0020)]);
+    assert_eq!(maxed, vec![r(0x0000, u32::MAX)]);
+}
+
+/// The coverage a parsed font reports must be a normalized set, which is what
+/// keeps the ranking sum above honest for REAL fonts and not just hand-built
+/// range vectors.
+///
+/// Before coverage became cmap-authoritative this vector was whatever the OS/2
+/// bits claimed, minus what the cmap disproved. Now the cmap's own blocks are
+/// unioned in, so without coalescing this font would report overlapping ranges.
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[test]
+fn parsed_font_coverage_is_a_normalized_set() {
+    let font_bytes = include_bytes!("fixtures/InstrumentSerif-Regular.ttf").to_vec();
+
+    let cache = FcFontCache::default();
+    let pattern = FcPattern {
+        name: Some("instrument".to_string()),
+        // Empty: the crate must derive coverage from the font itself.
+        unicode_ranges: Vec::new(),
+        ..Default::default()
+    };
+    cache.with_memory_fonts(vec![(
+        pattern.clone(),
+        FcFont { bytes: font_bytes, font_index: 0, id: "instrument".to_string() },
+    )]);
+
+    let mut trace = Vec::new();
+    let matched = cache
+        .query(&pattern, &mut trace)
+        .expect("the registered font matches itself");
+
+    let ranges = &matched.unicode_ranges;
+    assert!(!ranges.is_empty(), "a parsed Latin font must report some coverage");
+
+    for pair in ranges.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        assert!(
+            a.end.saturating_add(1) < b.start,
+            "ranges must be sorted, disjoint and non-touching; {a:?} then {b:?} in {ranges:?}",
+        );
+    }
+
+    // Sanity: a Latin serif face covers Basic Latin.
+    assert!(
+        ranges.iter().any(|r| r.start <= 'A' as u32 && 'A' as u32 <= r.end),
+        "a Latin font must cover 'A', got {ranges:?}",
+    );
+}
