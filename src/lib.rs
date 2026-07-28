@@ -2208,8 +2208,66 @@ impl FcFontCache {
         self.state_read().patterns.len()
     }
 
+    /// Like [`FcFontCache::query`], but **total**: it returns `None` only when the
+    /// cache holds no fonts at all.
+    ///
+    /// This is the `fc-match` contract. `fc-match` never fails — fontconfig
+    /// substitutes through its config chain, which is why `fc-match Cantarell`
+    /// answers with e.g. `NotoSans-Regular.ttf` on a machine that has no
+    /// Cantarell. [`FcFontCache::query`] deliberately does NOT do that: it is the
+    /// honest "was this exact request satisfiable?" answer, and a caller that
+    /// wants to report an unresolved family needs it.
+    ///
+    /// A *rendering* caller must use this one instead. Handing a renderer `None`
+    /// means one of two things, and both are bugs the caller usually discovers
+    /// far from here: text silently vanishes, or the caller invents its own
+    /// fallback whose font is not registered where the renderer later looks it
+    /// up by hash — so layout succeeds and rendering cannot resolve what layout
+    /// produced.
+    ///
+    /// Resolution order, mirroring fontconfig's own relaxation:
+    ///   1. the pattern exactly as given;
+    ///   2. the same pattern with `name`/`family` cleared — keeps weight, slant,
+    ///      monospace and the requested unicode coverage, so a Bold request does
+    ///      not silently become Regular;
+    ///   3. coverage only — the last-resort "any font that can draw this text".
+    ///
+    /// Each step is a strictly wider query than the last, so this never returns a
+    /// *worse* match than `query` would have.
+    pub fn query_with_fallback(
+        &self,
+        pattern: &FcPattern,
+        trace: &mut Vec<TraceMsg>,
+    ) -> Option<FontMatch> {
+        if let Some(m) = self.query(pattern, trace) {
+            return Some(m);
+        }
+
+        // 2. Drop the family/name constraint, keep how it should LOOK.
+        if pattern.name.is_some() || pattern.family.is_some() {
+            let relaxed = FcPattern {
+                name: None,
+                family: None,
+                ..pattern.clone()
+            };
+            if let Some(m) = self.query(&relaxed, trace) {
+                return Some(m);
+            }
+        }
+
+        // 3. Coverage only. Anything that can render the requested ranges.
+        let bare = FcPattern {
+            unicode_ranges: pattern.unicode_ranges.clone(),
+            ..FcPattern::default()
+        };
+        self.query(&bare, trace)
+    }
+
     /// Queries a font from the in-memory cache, returns the first found font (early return)
     /// Memory fonts are always preferred over disk fonts with the same match quality.
+    ///
+    /// This is FALLIBLE by design — see [`FcFontCache::query_with_fallback`] for the
+    /// `fc-match`-style total variant that a renderer should use.
     pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
         let state = self.state_read();
         let mut matches = Vec::new();

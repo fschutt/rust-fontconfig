@@ -814,3 +814,76 @@ fn test_memory_font_generic_serif_resolves_char() {
         chain
     );
 }
+
+/// `query` is fallible and `query_with_fallback` is total — the `fc-match`
+/// contract.
+///
+/// `fc-match Cantarell` answers `NotoSans-Regular.ttf` on a machine with no
+/// Cantarell, because fontconfig substitutes through its config chain. `query`
+/// deliberately does not: it reports honestly that the exact request could not
+/// be met. A RENDERER must not be handed that hole — either the text silently
+/// vanishes, or the caller invents a fallback whose font is not registered
+/// where the renderer later looks it up by hash.
+#[test]
+fn query_with_fallback_is_total_like_fc_match() {
+    let installed = FcPattern {
+        name: Some("Only Font".to_string()),
+        family: Some("Only Family".to_string()),
+        weight: FcWeight::Normal,
+        unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
+        ..Default::default()
+    };
+    let mut cache = FcFontCache::default();
+    cache.with_memory_fonts(vec![(
+        installed.clone(),
+        FcFont { bytes: vec![0, 1, 2, 3], font_index: 0, id: "only-font".to_string() },
+    )]);
+
+    // A family that simply is not installed — the "Cantarell" case.
+    let missing = FcPattern {
+        family: Some("Cantarell".to_string()),
+        ..Default::default()
+    };
+
+    let mut trace = Vec::new();
+    assert!(
+        cache.query(&missing, &mut trace).is_none(),
+        "query must stay FALLIBLE — callers rely on it to report an unresolved family",
+    );
+
+    let mut trace = Vec::new();
+    let fallback = cache.query_with_fallback(&missing, &mut trace);
+    assert!(
+        fallback.is_some(),
+        "query_with_fallback must be TOTAL while any font exists (fc-match never fails)",
+    );
+
+    // It must fall back to the font we actually have, not to nothing-in-particular.
+    let mut trace = Vec::new();
+    let expected = cache.query(&installed, &mut trace).expect("the installed font matches itself");
+    assert_eq!(
+        fallback.unwrap().id,
+        expected.id,
+        "the fallback must resolve to the one font in the cache",
+    );
+
+    // Style is preserved where it can be: a BOLD request for a missing family
+    // still resolves rather than failing.
+    let missing_bold = FcPattern {
+        family: Some("Cantarell".to_string()),
+        weight: FcWeight::Bold,
+        ..Default::default()
+    };
+    let mut trace = Vec::new();
+    assert!(
+        cache.query_with_fallback(&missing_bold, &mut trace).is_some(),
+        "a bold request for a missing family must still resolve",
+    );
+
+    // The ONE case where it may fail: there is genuinely nothing to return.
+    let mut trace = Vec::new();
+    assert!(
+        FcFontCache::default().query_with_fallback(&missing, &mut trace).is_none(),
+        "an empty cache is the only legitimate None",
+    );
+}
