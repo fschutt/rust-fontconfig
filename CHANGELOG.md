@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.4.9] - 2026-07-29
+
+### Fixed
+
+- **A font without an OS/2 table was reported as not a font at all.**
+  `parse_font_faces` read the table with
+
+      let os2_data = provider.table_data(tag::OS_2).ok()??;
+
+  so a missing OS/2 short-circuited the whole function and `FcParseFontBytes`
+  returned `None` for the entire face — even though allsorts parses such fonts
+  perfectly well. OS/2 is *optional* in TrueType; only OpenType requires it.
+
+  This is not a hypothetical shape. printpdf embeds the 14 standard PDF fonts
+  (Helvetica, Times, Courier, Symbol, ZapfDingbats) as TrueType subsets whose
+  table directory is `cmap cvt fpgm glyf head hhea hmtx loca maxp name post
+  prep` — no OS/2. All 14 failed to parse, so none of them could be registered
+  as memory fonts, and `font-family: Helvetica` in printpdf's HTML renderer
+  resolved to nothing and silently fell back to a substitute face.
+
+  Nothing in the function actually needed OS/2. `head.macStyle` already
+  supplied bold and italic twelve lines earlier, `post.isFixedPitch` plus the
+  `hmtx` width scan cover monospace, and coverage has been cmap-authoritative
+  since 4.4.8. OS/2 is now optional; when it is absent:
+
+  - `weight` falls back to the `head.macStyle` bold bit, so the face lands on
+    `Bold` or `Normal` rather than a precise weight class
+  - `stretch` defaults to `Normal`, `oblique` to false
+  - the `ulUnicodeRange` bits claim nothing, leaving coverage to come entirely
+    from the cmap — which is where it already came from
+
+  Faces that do carry an OS/2 table are unaffected: every value is read exactly
+  as before.
+
 ## [4.4.8] - 2026-07-28
 
 ### Fixed
