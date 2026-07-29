@@ -306,7 +306,38 @@ impl FcFontRegistry {
     }
 
     /// Spawn the Scout thread and Builder pool. Returns immediately.
+    ///
+    /// **No-op under the `single-thread-unsafe-locks` feature.** That feature
+    /// replaces `StLock` — which guards `known_paths`, among others — with a
+    /// bare `UnsafeCell<T>` carrying `unsafe impl Sync` and `unsafe impl Send`
+    /// (see `lib.rs`). It is a lock that does not lock. The name asserts the
+    /// caller is single-threaded; until now nothing enforced that, and this
+    /// function spawned a scout plus N builders regardless. Every one of them
+    /// then reached `known_paths` through an UnsafeCell with no
+    /// synchronization at all, which is unconditional UB — not a race that
+    /// might be benign, an aliasing violation the compiler is entitled to
+    /// assume cannot happen.
+    ///
+    /// It is reachable: azul turns the feature on transitively through its
+    /// `web_lift` feature (`layout/Cargo.toml`), and `web_lift` is not
+    /// restricted to single-threaded targets by anything.
+    ///
+    /// Making this a no-op enforces the premise instead of trusting it. Font
+    /// resolution still works — `request_fonts` populates the queue and the
+    /// synchronous paths drain it — it simply happens on the calling thread,
+    /// which is what the feature claims is the case anyway.
     pub fn spawn_scout_and_builders(self: &Arc<Self>) {
+        #[cfg(feature = "single-thread-unsafe-locks")]
+        {
+            // Deliberately not a panic: a consumer that enabled this feature
+            // for a genuinely single-threaded target is correct to call this,
+            // and should get a working registry rather than a crash.
+            let _ = self;
+            return;
+        }
+
+        #[cfg(not(feature = "single-thread-unsafe-locks"))]
+        {
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -331,6 +362,7 @@ impl FcFontRegistry {
                     registry.builder_thread();
                 })
                 .expect("failed to spawn font builder thread");
+        }
         }
     }
 
@@ -1068,4 +1100,67 @@ fn collect_face_style_order(
         (bold_mismatch, italic_mismatch)
     });
     styles.into_iter().map(|(fi, _, _)| fi).collect()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod spawn_gating_tests {
+    use super::*;
+
+    /// Names of live threads in this process, read from `/proc/self/task`.
+    fn thread_names() -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir("/proc/self/task") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| std::fs::read_to_string(e.path().join("comm")).ok())
+            .map(|s| s.trim().to_string())
+            .collect()
+    }
+
+    /// `single-thread-unsafe-locks` turns `StLock` into a bare `UnsafeCell`
+    /// with `unsafe impl Sync`. Spawning the scout and builder pool under it
+    /// is unconditional UB, so the spawn must not happen — and with the
+    /// feature off it must, or the async registry does nothing.
+    ///
+    /// Asserted by looking at the actual threads rather than by trusting the
+    /// `cfg`: the point of the check is that the two features cannot be
+    /// combined, and a `cfg` cannot verify itself.
+    #[test]
+    fn spawning_is_gated_on_the_lock_implementation() {
+        let registry = FcFontRegistry::new();
+        registry.spawn_scout_and_builders();
+
+        // The scout can finish quickly on a machine with few font dirs, so
+        // poll rather than sleep-once: we need "did it ever exist", and a
+        // builder pool idles on the condvar and stays visible.
+        let mut saw_rfc_thread = false;
+        for _ in 0..100 {
+            if thread_names().iter().any(|n| n.starts_with("rfc-font-")) {
+                saw_rfc_thread = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        if cfg!(feature = "single-thread-unsafe-locks") {
+            assert!(
+                !saw_rfc_thread,
+                "spawn_scout_and_builders() started rfc-font-* threads while \
+                 `single-thread-unsafe-locks` is enabled. Under that feature \
+                 StLock is an UnsafeCell with `unsafe impl Sync` and no \
+                 synchronization whatsoever, so those threads reach \
+                 known_paths through an aliasing violation. Live threads: {:?}",
+                thread_names(),
+            );
+        } else {
+            assert!(
+                saw_rfc_thread,
+                "spawn_scout_and_builders() started no rfc-font-* threads on \
+                 the default (real RwLock) build — the async registry would \
+                 never discover a system font. Live threads: {:?}",
+                thread_names(),
+            );
+        }
+    }
 }
