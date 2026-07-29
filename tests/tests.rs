@@ -970,3 +970,112 @@ fn parsed_font_coverage_is_a_normalized_set() {
         "a Latin font must cover 'A', got {ranges:?}",
     );
 }
+
+/// Rebuild `font` without the table `drop_tag`, recomputing the table directory
+/// so the result is a valid sfnt rather than a file with dangling offsets.
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn strip_table(font: &[u8], drop_tag: &[u8; 4]) -> Vec<u8> {
+    let num = u16::from_be_bytes([font[4], font[5]]) as usize;
+    let mut tables: Vec<([u8; 4], u32, Vec<u8>)> = Vec::new();
+
+    for i in 0..num {
+        let rec = 12 + i * 16;
+        let tag: [u8; 4] = font[rec..rec + 4].try_into().unwrap();
+        let checksum = u32::from_be_bytes(font[rec + 4..rec + 8].try_into().unwrap());
+        let offset = u32::from_be_bytes(font[rec + 8..rec + 12].try_into().unwrap()) as usize;
+        let len = u32::from_be_bytes(font[rec + 12..rec + 16].try_into().unwrap()) as usize;
+        if &tag != drop_tag {
+            tables.push((tag, checksum, font[offset..offset + len].to_vec()));
+        }
+    }
+    tables.sort_by_key(|(tag, _, _)| *tag);
+
+    let n = tables.len();
+    let entry_selector = (usize::BITS - 1 - n.leading_zeros()) as u16;
+    let search_range = (1u16 << entry_selector) * 16;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&font[0..4]); // sfntVersion
+    out.extend_from_slice(&(n as u16).to_be_bytes());
+    out.extend_from_slice(&search_range.to_be_bytes());
+    out.extend_from_slice(&entry_selector.to_be_bytes());
+    out.extend_from_slice(&((n as u16) * 16 - search_range).to_be_bytes());
+
+    let mut body = Vec::new();
+    let mut offset = 12 + n * 16;
+    for (tag, checksum, data) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&checksum.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        let pad = (4 - data.len() % 4) % 4;
+        body.extend(std::iter::repeat(0).take(pad));
+        offset += data.len() + pad;
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Set or clear the `head.macStyle` bold bit, which is the only weight signal a
+/// font without an OS/2 table has.
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn set_head_bold(font: &mut [u8]) {
+    let num = u16::from_be_bytes([font[4], font[5]]) as usize;
+    for i in 0..num {
+        let rec = 12 + i * 16;
+        if &font[rec..rec + 4] == b"head" {
+            let offset = u32::from_be_bytes(font[rec + 8..rec + 12].try_into().unwrap()) as usize;
+            let mac_style = offset + 44; // head.macStyle, bit 0 = bold
+            let cur = u16::from_be_bytes([font[mac_style], font[mac_style + 1]]);
+            font[mac_style..mac_style + 2].copy_from_slice(&(cur | 1).to_be_bytes());
+            return;
+        }
+    }
+    panic!("no head table");
+}
+
+/// A font without an OS/2 table must still parse.
+///
+/// OS/2 is optional in TrueType - only OpenType requires it - and fonts that
+/// omit it are common enough to matter: printpdf's embedded base-14 PDF font
+/// subsets (Helvetica, Times, Courier, ...) have no OS/2 table at all. Reading
+/// it with `??` made every one of them fail to parse, so `font-family:
+/// Helvetica` resolved to nothing and text silently fell back.
+#[test]
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn parses_a_font_without_an_os2_table() {
+    let original = include_bytes!("fixtures/InstrumentSerif-Regular.ttf").to_vec();
+
+    let baseline = FcParseFontBytes(&original, "InstrumentSerif")
+        .expect("fixture itself must parse");
+    let (baseline_pattern, _) = &baseline[0];
+
+    let stripped = strip_table(&original, b"OS/2");
+    assert!(
+        stripped.len() < original.len(),
+        "fixture had no OS/2 table to strip, so this test proves nothing"
+    );
+
+    let parsed = FcParseFontBytes(&stripped, "InstrumentSerif")
+        .expect("a font without OS/2 must still parse");
+    let (pattern, _) = &parsed[0];
+
+    // The name table still names it, and coverage is cmap-derived so it survives
+    // losing OS/2's unicode-range hints entirely.
+    assert_eq!(pattern.family, baseline_pattern.family);
+    assert!(
+        !pattern.unicode_ranges.is_empty(),
+        "coverage comes from the cmap, so it must survive the loss of OS/2"
+    );
+
+    // Without OS/2 the weight falls back to head.macStyle: regular here...
+    assert_eq!(pattern.weight, FcWeight::Normal);
+
+    // ...and Bold once the macStyle bit is set.
+    let mut bolded = strip_table(&original, b"OS/2");
+    set_head_bold(&mut bolded);
+    let parsed_bold = FcParseFontBytes(&bolded, "InstrumentSerif")
+        .expect("a bold font without OS/2 must still parse");
+    assert_eq!(parsed_bold[0].0.weight, FcWeight::Bold);
+}

@@ -4272,31 +4272,53 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
             detected_monospace = Some(post_table.header.is_fixed_pitch != 0);
         }
 
-        // Get font properties from OS/2 table
-        let os2_data = provider.table_data(tag::OS_2).ok()??;
-        let os2_table = ReadScope::new(&os2_data)
-            .read_dep::<Os2>(os2_data.len())
-            .ok()?;
+        // Get font properties from OS/2 table.
+        //
+        // OS/2 is OPTIONAL in TrueType - only OpenType requires it - and plenty
+        // of real fonts ship without one, including the base-14 PDF font subsets
+        // printpdf embeds. This used to be `.ok()??`, which turned "no OS/2" into
+        // "not a font" and made the whole face invisible to the cache even though
+        // allsorts parses it perfectly well.
+        //
+        // Nothing below actually needs OS/2: `head.macStyle` already gave us bold
+        // and italic, `post`/`hmtx` cover monospace, and coverage has been
+        // cmap-authoritative since 4.4.8. So treat it as the hint it is.
+        let os2_data = provider.table_data(tag::OS_2).ok().flatten();
+        let os2_table = os2_data
+            .as_deref()
+            .and_then(|data| ReadScope::new(data).read_dep::<Os2>(data.len()).ok());
 
         // Extract additional style information
-        let is_oblique = os2_table
-            .fs_selection
-            .contains(allsorts::tables::os2::FsSelectionFlag::OBLIQUE);
-        let weight = FcWeight::from_u16(os2_table.us_weight_class);
-        let stretch = FcStretch::from_u16(os2_table.us_width_class);
+        let is_oblique = os2_table.as_ref().is_some_and(|os2| {
+            os2.fs_selection
+                .contains(allsorts::tables::os2::FsSelectionFlag::OBLIQUE)
+        });
+        // Without OS/2 the only weight signal is the `head.macStyle` bold bit, so
+        // the face lands on Bold or Normal rather than a precise class.
+        let weight = os2_table.as_ref().map_or(
+            if is_bold { FcWeight::Bold } else { FcWeight::Normal },
+            |os2| FcWeight::from_u16(os2.us_weight_class),
+        );
+        let stretch = os2_table
+            .as_ref()
+            .map_or(FcStretch::Normal, |os2| FcStretch::from_u16(os2.us_width_class));
 
         // Extract unicode ranges from OS/2 table (fast, but may be inaccurate)
         // These are hints about what the font *should* support
         // For actual glyph coverage verification, query the font file directly
         let mut unicode_ranges = Vec::new();
 
-        // Process the 4 Unicode range bitfields from OS/2 table
-        let os2_ranges = [
-            os2_table.ul_unicode_range1,
-            os2_table.ul_unicode_range2,
-            os2_table.ul_unicode_range3,
-            os2_table.ul_unicode_range4,
-        ];
+        // Process the 4 Unicode range bitfields from OS/2 table. All-zero when
+        // there is no OS/2 table, which claims nothing and leaves the cmap union
+        // below to supply the whole coverage set.
+        let os2_ranges = os2_table.as_ref().map_or([0u32; 4], |os2| {
+            [
+                os2.ul_unicode_range1,
+                os2.ul_unicode_range2,
+                os2.ul_unicode_range3,
+                os2.ul_unicode_range4,
+            ]
+        });
 
         for &(bit, start, end) in UNICODE_RANGE_MAPPINGS {
             let range_idx = bit / 32;
@@ -4335,7 +4357,7 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
         unicode_ranges = FcFontCache::normalize_unicode_ranges(unicode_ranges);
 
         // Use the shared detect_monospace helper for PANOSE + hmtx fallback
-        let is_monospace = detect_monospace(&provider, &os2_table, detected_monospace)
+        let is_monospace = detect_monospace(&provider, os2_table.as_ref(), detected_monospace)
             .unwrap_or(false);
 
         let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
@@ -5226,17 +5248,20 @@ fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn detect_monospace(
     provider: &impl FontTableProvider,
-    os2_table: &Os2,
+    os2_table: Option<&Os2>,
     detected_monospace: Option<bool>,
 ) -> Option<bool> {
     if let Some(is_monospace) = detected_monospace {
         return Some(is_monospace);
     }
 
-    // Try using PANOSE classification
-    if os2_table.panose[0] == 2 {
-        // 2 = Latin Text
-        return Some(os2_table.panose[3] == 9); // 9 = Monospaced
+    // Try using PANOSE classification, when there is an OS/2 table to read it
+    // from; otherwise fall straight through to the hmtx width check.
+    if let Some(os2_table) = os2_table {
+        if os2_table.panose[0] == 2 {
+            // 2 = Latin Text
+            return Some(os2_table.panose[3] == 9); // 9 = Monospaced
+        }
     }
 
     // Check glyph widths in hmtx table
