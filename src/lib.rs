@@ -366,6 +366,12 @@ impl OperatingSystem {
 /// Expand a CSS font-family stack with generic families resolved to OS-specific fonts
 /// Prioritizes fonts based on Unicode range coverage
 /// Example: ["Arial", "sans-serif"] on macOS with CJK ranges -> ["Arial", "PingFang SC", "Hiragino Sans", ...]
+///
+/// NOTE: this free function only sees the per-OS LAST-RESORT lists. When a
+/// system font configuration is available, prefer
+/// [`FcFontCache::expand_font_families_config_first`], which consults the
+/// parsed `<alias>`/`<prefer>` preferences (the machine's ACTUAL
+/// configuration) before any built-in list.
 pub fn expand_font_families(families: &[String], os: OperatingSystem, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
     let mut expanded = Vec::new();
     
@@ -1624,6 +1630,15 @@ pub(crate) struct FcFontCacheInner {
     /// Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>.
     /// Avoids re-tokenization during fuzzy search.
     pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
+    /// System-configured family alias preferences, parsed from the
+    /// platform font configuration (Linux: `$FONTCONFIG_FILE` or
+    /// `/etc/fonts/fonts.conf` + included conf.d files, `<alias>` /
+    /// `<prefer>` blocks). Keyed by the normalized alias family
+    /// ("sans-serif", "arial", ...), values are the preferred concrete
+    /// families in configuration order. THE authority for generic-family
+    /// resolution: the hard-coded per-OS lists are only consulted when
+    /// this map has no entry (e.g. no fontconfig installed).
+    pub(crate) system_aliases: BTreeMap<String, Vec<String>>,
 }
 
 impl FcFontCacheInner {
@@ -1679,6 +1694,69 @@ impl Default for FcFontCache {
 }
 
 impl FcFontCache {
+    /// The system-configured preferred families for `family` (normalized
+    /// lookup), parsed from the platform font configuration at build time.
+    /// Empty when the platform has no such configuration.
+    pub fn system_alias_prefs(&self, family: &str) -> Vec<String> {
+        let norm = crate::utils::normalize_family_name(family);
+        self.state_read()
+            .system_aliases
+            .get(&norm)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Expand a CSS font-family stack, resolving each entry through the
+    /// SYSTEM configuration first and only falling back to the built-in
+    /// per-OS lists when the configuration is silent.
+    ///
+    /// Resolution per family, in order:
+    /// 1. `<alias>`/`<prefer>` preferences parsed from the platform font
+    ///    configuration (generic families like `sans-serif` AND named
+    ///    substitutions like `Arial` -> `Liberation Sans`). The machine's
+    ///    actual configuration is the authority — this is what real
+    ///    fontconfig does, and what makes azul agree with every other
+    ///    application on the box.
+    /// 2. For generic families with no configured preference: the built-in
+    ///    per-OS candidates ([`OperatingSystem::expand_generic_family`]) as
+    ///    a LAST resort (containers without any fontconfig installed).
+    /// 3. Named families always keep themselves FIRST, before any
+    ///    configured substitution (CSS: exact match wins when present;
+    ///    the alias only helps when the named family is missing).
+    pub fn expand_font_families_config_first(
+        &self,
+        families: &[String],
+        os: OperatingSystem,
+        unicode_ranges: &[UnicodeRange],
+    ) -> Vec<String> {
+        let mut expanded: Vec<String> = Vec::new();
+        let mut push_unique = |v: &mut Vec<String>, f: String| {
+            if !v.iter().any(|e| e.eq_ignore_ascii_case(&f)) {
+                v.push(f);
+            }
+        };
+        for family in families {
+            let is_generic = matches!(
+                family.to_ascii_lowercase().as_str(),
+                "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui"
+            );
+            if !is_generic {
+                push_unique(&mut expanded, family.clone());
+            }
+            let prefs = self.system_alias_prefs(family);
+            if !prefs.is_empty() {
+                for pref in prefs {
+                    push_unique(&mut expanded, pref);
+                }
+            } else if is_generic {
+                for fallback in os.expand_generic_family(family, unicode_ranges) {
+                    push_unique(&mut expanded, fallback);
+                }
+            }
+        }
+        expanded
+    }
+
     /// Acquire a read guard on the cache's state. Panics if the lock
     /// was poisoned by a panic inside the write guard — same
     /// contract as `RwLock::read().expect(..)`.
@@ -2001,7 +2079,10 @@ impl FcFontCache {
     /// ```
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build_with_families(families: &[impl AsRef<str>]) -> Self {
-        // Expand generic families to OS-specific names
+        // Expand generic families to OS-specific names. This runs BEFORE the
+        // cache exists, so only the built-in lists are available here — the
+        // filter is a superset selector (which files to parse), not the
+        // final resolution, which goes config-first at query time.
         let os = OperatingSystem::current();
         let mut target_families: Vec<String> = Vec::new();
         
@@ -2055,7 +2136,8 @@ impl FcFontCache {
 
         #[cfg(target_os = "linux")]
         {
-            if let Some((font_entries, render_configs)) = FcScanDirectories() {
+            if let Some((font_entries, render_configs, system_aliases)) = FcScanDirectories() {
+                state.system_aliases = system_aliases;
                 for (mut pattern, path) in font_entries {
                     if matches_filter(&pattern) {
                         // Apply per-font render config if a matching family rule exists
@@ -3615,19 +3697,29 @@ impl FcFontCache {
 }
 
 #[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
-fn FcScanDirectories() -> Option<(Vec<(FcPattern, FcFontPath)>, BTreeMap<String, FcFontRenderConfig>)> {
+fn FcScanDirectories() -> Option<(
+    Vec<(FcPattern, FcFontPath)>,
+    BTreeMap<String, FcFontRenderConfig>,
+    BTreeMap<String, Vec<String>>,
+)> {
     use std::fs;
     use std::path::Path;
 
-    const BASE_FONTCONFIG_PATH: &str = "/etc/fonts/fonts.conf";
+    // Real fontconfig honors $FONTCONFIG_FILE as the root config; so do we
+    // (hermetic test setups and sandboxes depend on it).
+    let base_path = std::env::var("FONTCONFIG_FILE")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "/etc/fonts/fonts.conf".to_string());
 
-    if !Path::new(BASE_FONTCONFIG_PATH).exists() {
+    if !Path::new(&base_path).exists() {
         return None;
     }
 
     let mut font_paths = Vec::with_capacity(32);
-    let mut paths_to_visit = vec![(None, PathBuf::from(BASE_FONTCONFIG_PATH))];
+    let mut paths_to_visit = vec![(None, PathBuf::from(&base_path))];
     let mut render_configs: BTreeMap<String, FcFontRenderConfig> = BTreeMap::new();
+    let mut system_aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     while let Some((prefix, path_to_visit)) = paths_to_visit.pop() {
         let path = match process_path(&prefix, path_to_visit, true) {
@@ -3652,6 +3744,10 @@ fn FcScanDirectories() -> Option<(Vec<(FcPattern, FcFontPath)>, BTreeMap<String,
 
             // Also parse render config blocks from this file
             ParseFontsConfRenderConfig(&xml_utf8, &mut render_configs);
+
+            // And <alias>/<prefer> preference blocks (generic families and
+            // named substitutions alike).
+            ParseFontsConfAliases(&xml_utf8, &mut system_aliases);
         } else if metadata.is_dir() {
             let dir_entries = match fs::read_dir(&path) {
                 Ok(dir_entries) => dir_entries,
@@ -3695,7 +3791,112 @@ fn FcScanDirectories() -> Option<(Vec<(FcPattern, FcFontPath)>, BTreeMap<String,
         return None;
     }
 
-    Some((FcScanDirectoriesInner(&font_paths), render_configs))
+    Some((FcScanDirectoriesInner(&font_paths), render_configs, system_aliases))
+}
+
+/// Parse `<alias><family>NAME</family><prefer><family>...</family>...</prefer></alias>`
+/// blocks from a fontconfig XML file into `aliases`.
+///
+/// Keys are normalized with [`crate::utils::normalize_family_name`];
+/// preferred families keep their configured order, appended across files
+/// in include order (fontconfig semantics), deduplicated.
+#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+fn ParseFontsConfAliases(input: &str, aliases: &mut BTreeMap<String, Vec<String>>) {
+    use xmlparser::Token::*;
+    use xmlparser::Tokenizer;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Idle,
+        InAlias,
+        InAliasFamily,
+        InPrefer,
+        InPreferFamily,
+    }
+
+    let mut state = State::Idle;
+    let mut alias_key: Option<String> = None;
+    let mut preferred: Vec<String> = Vec::new();
+    let mut text_buf = String::new();
+
+    for token_result in Tokenizer::from(input) {
+        let token = match token_result {
+            Ok(token) => token,
+            Err(_) => continue,
+        };
+        match token {
+            ElementStart { local, .. } => match local.as_str() {
+                "alias" => {
+                    state = State::InAlias;
+                    alias_key = None;
+                    preferred.clear();
+                }
+                "family" if state == State::InAlias => {
+                    state = State::InAliasFamily;
+                    text_buf.clear();
+                }
+                "prefer" if state == State::InAlias => {
+                    state = State::InPrefer;
+                }
+                "family" if state == State::InPrefer => {
+                    state = State::InPreferFamily;
+                    text_buf.clear();
+                }
+                _ => {}
+            },
+            Text { text } => {
+                if state == State::InAliasFamily || state == State::InPreferFamily {
+                    text_buf.push_str(text.as_str());
+                }
+            }
+            ElementEnd { end, .. } => {
+                use xmlparser::ElementEnd;
+                let closed = match end {
+                    ElementEnd::Close(_, local) => Some(local.as_str().to_owned()),
+                    _ => None,
+                };
+                let Some(closed) = closed else { continue };
+                match closed.as_str() {
+                    "family" => match state {
+                        State::InAliasFamily => {
+                            let t = text_buf.trim();
+                            if !t.is_empty() && alias_key.is_none() {
+                                alias_key = Some(t.to_owned());
+                            }
+                            state = State::InAlias;
+                        }
+                        State::InPreferFamily => {
+                            let t = text_buf.trim();
+                            if !t.is_empty() {
+                                preferred.push(t.to_owned());
+                            }
+                            state = State::InPrefer;
+                        }
+                        _ => {}
+                    },
+                    "prefer" if state == State::InPrefer => {
+                        state = State::InAlias;
+                    }
+                    "alias" => {
+                        if let Some(key) = alias_key.take() {
+                            if !preferred.is_empty() {
+                                let norm = crate::utils::normalize_family_name(&key);
+                                let entry = aliases.entry(norm).or_default();
+                                for fam in preferred.drain(..) {
+                                    if !entry.iter().any(|e| e == &fam) {
+                                        entry.push(fam);
+                                    }
+                                }
+                            }
+                        }
+                        state = State::Idle;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // Parses the fonts.conf file
@@ -5339,4 +5540,101 @@ fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
         metadata: FcFontMetadata::default(),
         render_config: FcFontRenderConfig::default(),
     })
+}
+
+#[cfg(all(test, feature = "std", feature = "parsing", target_os = "linux"))]
+mod system_alias_tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"<?xml version="1.0"?>
+<fontconfig>
+  <alias>
+    <family>sans-serif</family>
+    <prefer>
+      <family>Noto Sans</family>
+      <family>DejaVu Sans</family>
+    </prefer>
+  </alias>
+  <alias>
+    <family>Arial</family>
+    <prefer><family>Liberation Sans</family></prefer>
+  </alias>
+  <alias binding="same">
+    <family>monospace</family>
+    <prefer><family>Noto Sans Mono</family></prefer>
+  </alias>
+</fontconfig>"#;
+
+    const SECOND_FILE: &str = r#"<fontconfig>
+  <alias>
+    <family>sans-serif</family>
+    <prefer>
+      <family>Ubuntu</family>
+      <family>Noto Sans</family>
+    </prefer>
+  </alias>
+</fontconfig>"#;
+
+    #[test]
+    fn alias_blocks_parse_with_order_and_dedup_across_files() {
+        let mut aliases = BTreeMap::new();
+        ParseFontsConfAliases(SAMPLE, &mut aliases);
+        ParseFontsConfAliases(SECOND_FILE, &mut aliases);
+        let key = crate::utils::normalize_family_name("sans-serif");
+        assert_eq!(
+            aliases.get(&key).map(Vec::as_slice),
+            Some(&["Noto Sans".to_string(), "DejaVu Sans".to_string(), "Ubuntu".to_string()][..]),
+            "prefer entries append across files in include order, deduplicated"
+        );
+        assert_eq!(
+            aliases.get("arial").map(Vec::as_slice),
+            Some(&["Liberation Sans".to_string()][..]),
+            "named-family aliases parse too (key normalized)"
+        );
+        assert_eq!(
+            aliases.get("monospace").map(Vec::as_slice),
+            Some(&["Noto Sans Mono".to_string()][..]),
+            "alias attributes (binding=...) do not confuse the parser"
+        );
+    }
+
+    #[test]
+    fn config_first_expansion_beats_the_builtin_lists() {
+        let cache = FcFontCache::default();
+        {
+            let mut state = cache.state_write();
+            let mut aliases = BTreeMap::new();
+            ParseFontsConfAliases(SAMPLE, &mut aliases);
+            state.system_aliases = aliases;
+        }
+        let out = cache.expand_font_families_config_first(
+            &["Arial".to_string(), "sans-serif".to_string()],
+            OperatingSystem::Linux,
+            &[],
+        );
+        assert_eq!(
+            out,
+            vec![
+                "Arial".to_string(),            // named family keeps itself first
+                "Liberation Sans".to_string(),  // its configured substitution
+                "Noto Sans".to_string(),        // sans-serif configured prefer list
+                "DejaVu Sans".to_string(),
+            ],
+            "configured preferences resolve the stack; no built-in list entries leak in"
+        );
+    }
+
+    #[test]
+    fn generic_family_without_config_falls_back_to_builtin_lists() {
+        let cache = FcFontCache::default();
+        let out = cache.expand_font_families_config_first(
+            &["sans-serif".to_string()],
+            OperatingSystem::Linux,
+            &[],
+        );
+        assert!(
+            !out.is_empty() && out.iter().any(|f| f == "DejaVu Sans"),
+            "no configuration parsed -> the built-in candidates are the last resort: {out:?}"
+        );
+    }
 }

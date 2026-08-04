@@ -387,7 +387,9 @@ impl FcFontRegistry {
         let mut expanded_stacks: Vec<Vec<String>> = Vec::new();
 
         for stack in family_stacks {
-            let expanded = expand_font_families(stack, self.os, &[]);
+            // Config-first: the machine's parsed alias preferences beat the
+            // built-in per-OS candidate lists (which remain a last resort).
+            let expanded = self.cache.expand_font_families_config_first(stack, self.os, &[]);
             for family in &expanded {
                 let normalized = normalize_family_name(family);
                 if !needed_families.contains(&normalized) {
