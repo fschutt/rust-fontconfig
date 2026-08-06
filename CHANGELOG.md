@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.5.0] - 2026-08-06
+
+### Performance
+
+- **Family lookup is an index probe, not a scan of every font.**
+  `query_by_family_normalized` walked the entire pattern map and allocated
+  a normalized `String` per face on every call. It is the only path a
+  specific (non-generic) family name can take — `fuzzy_query_by_name` is a
+  no-op on the azul web fork, so every name falls through to it — which made
+  a lookup O(fonts) with two allocations each, hit or miss.
+
+  A downstream measurement (azul, system font set): ~0.52 ms per lookup, and
+  a CSS stack whose generics expand to the system's `<alias><prefer>` lists
+  asks ~150 times, so 74 ms of a 177 ms cold document layout was spent here,
+  most of it on families nobody has installed.
+
+  `FcFontCacheInner` now carries `family_index: BTreeMap<String, Vec<FontId>>`,
+  built at insertion from the normalized `family` and `name`. A lookup is one
+  probe and a MISS costs nothing.
+
+  Deliberately maintained by its own `index_pattern_family` rather than
+  folded into `index_pattern_tokens`: that one is a no-op on the azul web
+  fork (its unicode tokenizer traps under the lift), and the family index
+  has to exist on every target or specific family names stop resolving.
+
+  No API change — the version is bumped to 4.5.0 rather than a patch because
+  the internal state layout changed, and consumers pinning `<4.5` should
+  bump deliberately.
+
 ## [4.4.9] - 2026-07-29
 
 ### Fixed

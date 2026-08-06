@@ -1079,3 +1079,79 @@ fn parses_a_font_without_an_os2_table() {
         .expect("a bold font without OS/2 must still parse");
     assert_eq!(parsed_bold[0].0.weight, FcWeight::Bold);
 }
+
+/// A family lookup must find the fonts that carry that family, and must
+/// answer "nobody has it" without walking the cache.
+///
+/// `query_by_family_normalized` used to be the ONLY path a specific family
+/// name could take (`fuzzy_query_by_name` is a no-op on the azul web fork),
+/// and it walked every registered pattern allocating a normalized `String`
+/// per face per call. azul measured ~0.52 ms per lookup against a system
+/// font set, and a CSS stack with generic expansion asks ~150 times — 74 ms
+/// of a 177 ms cold pagination went here. It is a `family_index` probe now.
+///
+/// NEGATIVE CONTROL: making `index_pattern_family` a no-op (so the index is
+/// always empty) makes every resolve below come back with no fonts — run
+/// and seen.
+#[test]
+fn a_family_lookup_finds_its_faces_and_misses_cheaply() {
+    let mk = |id: &str| FcFont {
+        bytes: vec![0, 1, 2, 3],
+        font_index: 0,
+        id: id.to_string(),
+    };
+    let pat = |family: &str, name: &str| FcPattern {
+        family: Some(family.to_string()),
+        name: Some(name.to_string()),
+        ..Default::default()
+    };
+
+    let cache = FcFontCache::default();
+    cache.with_memory_fonts(vec![
+        (pat("Test Sans", "Test Sans Regular"), mk("ts-regular")),
+        (pat("Test Sans", "Test Sans Bold"), mk("ts-bold")),
+        (pat("Other Family", "Other Regular"), mk("other")),
+    ]);
+
+    let mut trace = Vec::new();
+    let resolve = |fam: &str, trace: &mut Vec<TraceMsg>| {
+        cache
+            .resolve_font_chain_with_scripts(
+                &[fam.to_string()],
+                FcWeight::Normal,
+                PatternMatch::False,
+                PatternMatch::False,
+                None,
+                trace,
+            )
+            .css_fallbacks
+            .iter()
+            .find(|g| g.css_name == fam)
+            .map_or(0, |g| g.fonts.len())
+    };
+
+    assert!(
+        resolve("Test Sans", &mut trace) >= 1,
+        "a registered family must resolve to at least one face"
+    );
+    // Normalization strips case and separators, so the CSS spelling and the
+    // stored spelling do not have to match byte for byte.
+    assert!(
+        resolve("test  sans", &mut trace) >= 1,
+        "family matching is normalized (case and separators)"
+    );
+    assert!(
+        resolve("Other Family", &mut trace) >= 1,
+        "the second family resolves independently"
+    );
+
+    // The miss is the case the index exists for: it must not leak another
+    // family's faces just because they are the only thing in the cache.
+    assert_eq!(
+        resolve("Nonexistent Family Name", &mut trace),
+        0,
+        "a family nobody has must resolve to NO fonts for its own CSS group \
+         - matching something else here is what makes a missing font render \
+         as an arbitrary one"
+    );
+}

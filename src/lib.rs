@@ -1630,6 +1630,20 @@ pub(crate) struct FcFontCacheInner {
     /// Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>.
     /// Avoids re-tokenization during fuzzy search.
     pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
+    /// Normalized family/name -> the fonts that carry it.
+    ///
+    /// `query_by_family_normalized` used to answer "which fonts are called
+    /// X?" by walking EVERY registered pattern and allocating a normalized
+    /// `String` per face per call. That is O(fonts) with two allocations
+    /// each, and it is the ONLY path a specific family name can take,
+    /// because `index_pattern_tokens` is a no-op on the azul web fork so
+    /// `fuzzy_query_by_name` always comes back empty. Measured from azul:
+    /// ~0.52 ms per lookup, and a CSS stack with generic expansion asks
+    /// ~150 times.
+    ///
+    /// Built once at insertion instead, so a lookup is a single map probe
+    /// and a MISS costs nothing.
+    pub(crate) family_index: BTreeMap<String, alloc::vec::Vec<FontId>>,
     /// System-configured family alias preferences, parsed from the
     /// platform font configuration (Linux: `$FONTCONFIG_FILE` or
     /// `/etc/fonts/fonts.conf` + included conf.d files, `<alias>` /
@@ -1644,6 +1658,28 @@ pub(crate) struct FcFontCacheInner {
 impl FcFontCacheInner {
     /// Add a font pattern to the token index. Called under the
     /// write lock by insertion paths.
+    /// Record `id` under the normalized spellings of its family and name.
+    ///
+    /// Deliberately NOT part of `index_pattern_tokens`: that one is a no-op
+    /// on the azul web fork (its unicode tokenizer traps under the lift),
+    /// and the family index must exist everywhere or every specific family
+    /// name silently stops resolving. This only calls
+    /// `normalize_family_name`, which the linear scan it replaces already
+    /// ran once per font per lookup.
+    pub(crate) fn index_pattern_family(&mut self, pattern: &FcPattern, id: FontId) {
+        for key in [pattern.family.as_deref(), pattern.name.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(crate::utils::normalize_family_name)
+            .filter(|k| !k.is_empty())
+        {
+            let slot = self.family_index.entry(key).or_default();
+            if !slot.contains(&id) {
+                slot.push(id);
+            }
+        }
+    }
+
     pub(crate) fn index_pattern_tokens(&mut self, _pattern: &FcPattern, _id: FontId) {
         // WEB-LIFT (2026-06-02): no-op on the azul web fork. The tokenizer
         // (`extract_font_name_tokens` char-classification + lowercasing) pulls unicode tables
@@ -1803,6 +1839,7 @@ impl FcFontCache {
             state.metadata.insert(id, pattern.clone());
             state.memory_fonts.insert(id, font);
             state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
         }
         self
     }
@@ -1820,6 +1857,7 @@ impl FcFontCache {
         state.metadata.insert(id, pattern.clone());
         state.memory_fonts.insert(id, font);
         state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
         self
     }
 
@@ -1877,6 +1915,7 @@ impl FcFontCache {
         {
             let mut state = self.state_write();
             state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
             state.patterns.insert(pattern.clone(), id);
             state.disk_fonts.insert(id, path);
             state.metadata.insert(id, pattern);
@@ -2045,6 +2084,7 @@ impl FcFontCache {
                         bytes_hash: 0,
                     });
                     state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
                     state.metadata.insert(id, pattern.clone());
                     state.patterns.insert(pattern, id);
                 }
@@ -2151,6 +2191,7 @@ impl FcFontCache {
                         state.metadata.insert(id, pattern.clone());
                         state.disk_fonts.insert(id, path);
                         state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
                     }
                 }
             }
@@ -2178,6 +2219,7 @@ impl FcFontCache {
                     state.metadata.insert(id, pattern.clone());
                     state.disk_fonts.insert(id, path);
                     state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
                 }
             }
         }
@@ -2199,6 +2241,7 @@ impl FcFontCache {
                     state.metadata.insert(id, pattern.clone());
                     state.disk_fonts.insert(id, path);
                     state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
                 }
             }
         }
@@ -2218,6 +2261,7 @@ impl FcFontCache {
                     state.metadata.insert(id, pattern.clone());
                     state.disk_fonts.insert(id, path);
                     state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
                 }
             }
         }
@@ -2243,6 +2287,7 @@ impl FcFontCache {
                     state.metadata.insert(id, pattern.clone());
                     state.disk_fonts.insert(id, path);
                     state.index_pattern_tokens(&pattern, id);
+                    state.index_pattern_family(&pattern, id);
                 }
             }
         }
@@ -3290,23 +3335,25 @@ impl FcFontCache {
             ..Default::default()
         };
         let state = self.state_read();
+        // ONE map probe. This used to walk every registered pattern and
+        // allocate a normalized String per face per call — O(fonts) with two
+        // allocations each, on the only path a specific family name can take
+        // (`fuzzy_query_by_name` is a no-op on the azul web fork, so it
+        // always falls through to here). Measured from azul at ~0.52 ms per
+        // lookup against a system font set, and a CSS stack with generic
+        // expansion asks ~150 times.
+        //
+        // A family nobody has is now free: the probe misses and returns.
+        let Some(ids) = state.family_index.get(&target) else {
+            return Vec::new();
+        };
         let mut candidates: Vec<(FontId, i32, FcPattern)> = Vec::new();
-        for (stored_pattern, id) in &state.patterns {
-            let meta = state.metadata.get(id).unwrap_or(stored_pattern);
-            let fam_norm = meta
-                .family
-                .as_deref()
-                .map(crate::utils::normalize_family_name)
-                .unwrap_or_default();
-            let matches_family = fam_norm == target
-                || meta
-                    .name
-                    .as_deref()
-                    .map(crate::utils::normalize_family_name)
-                    .is_some_and(|n| n == target);
-            if !matches_family {
+        for id in ids {
+            let Some(meta) = state.metadata.get(id).or_else(|| {
+                state.patterns.iter().find(|(_, pid)| *pid == id).map(|(p, _)| p)
+            }) else {
                 continue;
-            }
+            };
             let style_score = Self::calculate_style_score(&query, meta);
             candidates.push((*id, style_score, meta.clone()));
         }
