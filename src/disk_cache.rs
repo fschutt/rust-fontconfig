@@ -68,8 +68,19 @@ impl FcFontRegistry {
     /// On WASM this is a no-op that always returns `None`.
     #[cfg(not(target_family = "wasm"))]
     pub fn load_from_disk_cache(&self) -> Option<()> {
-        let cache_path = get_font_cache_path()?;
-        let data = std::fs::read(&cache_path).ok()?;
+        self.load_from_disk_cache_at(&get_font_cache_path()?)
+    }
+
+    /// Same as [`FcFontRegistry::load_from_disk_cache`], but reads from an
+    /// explicit path instead of the platform cache directory.
+    ///
+    /// This exists so the cache round-trip is testable without mutating the
+    /// process environment (`HOME` / `XDG_CACHE_HOME`), which is what
+    /// [`get_font_cache_path`] is derived from and which cannot be changed
+    /// safely from a test that runs alongside others in the same process.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn load_from_disk_cache_at(&self, cache_path: &std::path::Path) -> Option<()> {
+        let data = std::fs::read(cache_path).ok()?;
         let manifest: FontManifest = bincode::deserialize(&data).ok()?;
 
         if manifest.version != FontManifest::CURRENT_VERSION {
@@ -112,6 +123,12 @@ impl FcFontRegistry {
         None
     }
 
+    /// No-op on WASM — no filesystem access available.
+    #[cfg(target_family = "wasm")]
+    pub fn load_from_disk_cache_at(&self, _cache_path: &std::path::Path) -> Option<()> {
+        None
+    }
+
     /// Serialize the current registry state to the on-disk font cache.
     ///
     /// Collects all discovered font paths and their parsed metadata into a
@@ -123,7 +140,20 @@ impl FcFontRegistry {
     /// On WASM this is a no-op that always returns `None` (no filesystem access).
     #[cfg(not(target_family = "wasm"))]
     pub fn save_to_disk_cache(&self) -> Option<()> {
-        let cache_path = get_font_cache_path()?;
+        self.save_to_disk_cache_at(&get_font_cache_path()?)
+    }
+
+    /// Same as [`FcFontRegistry::save_to_disk_cache`], but writes to an
+    /// explicit path instead of the platform cache directory. See
+    /// [`FcFontRegistry::load_from_disk_cache_at`] for why this seam exists.
+    ///
+    /// The write is atomic: the manifest is serialized to a sibling
+    /// `manifest.bin.tmp-<pid>` and then renamed over the destination. A
+    /// process killed mid-write therefore leaves either the previous manifest
+    /// or no manifest at all — never a truncated one that
+    /// `load_from_disk_cache` would have to reject on every subsequent launch.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn save_to_disk_cache_at(&self, cache_path: &std::path::Path) -> Option<()> {
         std::fs::create_dir_all(cache_path.parent()?).ok()?;
 
         let state = self.cache.state_read();
@@ -159,8 +189,25 @@ impl FcFontRegistry {
             entries,
         };
 
+        // `state_read` is held for the duration of the collection above; drop
+        // it before touching the filesystem so a slow disk cannot stall
+        // readers/writers of the registry.
+        drop(state);
+
         let data = bincode::serialize(&manifest).ok()?;
-        std::fs::write(&cache_path, data).ok()?;
+
+        let mut tmp_name = cache_path.file_name()?.to_os_string();
+        tmp_name.push(alloc::format!(".tmp-{}", std::process::id()));
+        let tmp_path = cache_path.with_file_name(tmp_name);
+
+        if std::fs::write(&tmp_path, data).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return None;
+        }
+        if std::fs::rename(&tmp_path, cache_path).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return None;
+        }
 
         Some(())
     }
@@ -168,6 +215,12 @@ impl FcFontRegistry {
     /// No-op on WASM — no filesystem access available.
     #[cfg(target_family = "wasm")]
     pub fn save_to_disk_cache(&self) -> Option<()> {
+        None
+    }
+
+    /// No-op on WASM — no filesystem access available.
+    #[cfg(target_family = "wasm")]
+    pub fn save_to_disk_cache_at(&self, _cache_path: &std::path::Path) -> Option<()> {
         None
     }
 }

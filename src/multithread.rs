@@ -233,8 +233,29 @@ impl FcFontRegistry {
                         && self.scan_complete.load(Ordering::Acquire)
                         && queue.is_empty()
                     {
-                        self.build_complete.store(true, Ordering::Release);
+                        // Exactly one builder thread wins this transition; the
+                        // others observe `Err` and simply exit. Only the winner
+                        // persists, so N builders cannot produce N concurrent
+                        // writes of the same manifest.
+                        let is_winner = self
+                            .build_complete
+                            .compare_exchange(
+                                false,
+                                true,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok();
                         self.progress.notify_all();
+                        // Release the build-queue lock BEFORE touching the
+                        // filesystem: persisting takes the cache state lock and
+                        // does real I/O, and holding the queue lock across that
+                        // would both stall `request_fonts` and invert the
+                        // queue-then-state lock order used elsewhere.
+                        drop(queue);
+                        if is_winner {
+                            self.persist_cache_on_build_complete();
+                        }
                         return;
                     }
 
@@ -295,4 +316,36 @@ fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<PathBuf>) {
             results.push(path);
         }
     }
+}
+
+impl FcFontRegistry {
+    /// Write the freshly-completed scan to the on-disk manifest.
+    ///
+    /// **Why this lives here.** Before this, `save_to_disk_cache` had no caller
+    /// anywhere: not in this crate, and not in the two known consumers. The
+    /// manifest at `dirs::cache_dir()/rfc/fonts/manifest.bin` was therefore
+    /// never created, so `load_from_disk_cache` missed on *every* launch and
+    /// every process paid the full cold scan (~190 ms on macOS with ~370
+    /// system fonts) that the cache exists to avoid. Making persistence a
+    /// property of "the scan finished" rather than something each embedder has
+    /// to remember to call is the only shape in which it cannot be forgotten
+    /// again.
+    ///
+    /// Runs on the builder thread that just finished, immediately before that
+    /// thread exits — never on a caller's thread, so it cannot add latency to
+    /// layout.
+    #[cfg(all(feature = "cache", not(target_family = "wasm")))]
+    fn persist_cache_on_build_complete(&self) {
+        // Nothing discovered (e.g. a registry that only ever held memory
+        // fonts): writing an empty manifest would make the next launch load a
+        // cache that claims the system has no fonts.
+        if self.cache.state_read().disk_fonts.is_empty() {
+            return;
+        }
+        let _ = self.save_to_disk_cache();
+    }
+
+    /// Persistence is compiled out without the `cache` feature.
+    #[cfg(not(all(feature = "cache", not(target_family = "wasm"))))]
+    fn persist_cache_on_build_complete(&self) {}
 }
