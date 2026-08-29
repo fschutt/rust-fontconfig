@@ -30,9 +30,11 @@ use crate::FcPattern;
 ///
 /// - **Low**: Default for all fonts discovered by the scout thread.
 /// - **Medium**: Reserved for disk cache hits (cheap deserialization).
-/// - **High**: Common OS default fonts (e.g. Arial, Segoe UI, SF Pro) that
-///   are very likely to be needed early. Identified by token-matching
-///   filenames against [`config::common_font_families`].
+/// - **High**: Families the embedder marked as likely needed early, via
+///   the injected [`crate::config::FcScanConfig::priority_families`]
+///   (with [`crate::config::FcScanConfig::os_defaults`], the common OS
+///   fonts: Arial, Segoe UI, SF Pro, ...). Identified by token-matching
+///   filenames against those families.
 /// - **Critical**: The main thread is blocked waiting for this font.
 ///   Set by [`FcFontRegistry::request_fonts`] when a layout pass needs
 ///   a font that hasn't been parsed yet.
@@ -92,11 +94,12 @@ impl Ord for FcBuildJob {
 ///
 /// # Heuristic
 ///
-/// Tokenizes the filename and checks for overlap with common OS font
-/// families (e.g. "Helvetica Neue", "Segoe UI", "DejaVu Sans").
-/// If any common family's tokens are a substring of the file's tokens
-/// (joined, case-insensitive), the font gets **High** priority.
-/// Everything else gets **Low**.
+/// Tokenizes the filename and checks for overlap with the injected
+/// priority families (`common_token_sets`, built by the scout from
+/// [`crate::config::FcScanConfig::priority_token_sets`]). If any such
+/// family's tokens are a substring of the file's tokens (joined,
+/// case-insensitive), the font gets **High** priority. Everything else
+/// gets **Low**.
 pub fn assign_scout_priority(
     file_tokens: &[String],
     common_token_sets: &[Vec<String>],
@@ -242,6 +245,27 @@ mod tests {
 
         let tokens = tokenize_all("SomeObscureFont");
         assert_eq!(assign_scout_priority(&tokens, &common), Priority::Low);
+    }
+
+    #[test]
+    fn assign_scout_priority_follows_injected_families() {
+        // The whole point of FcScanConfig: an embedder whose detected UI
+        // font is "Cantarell" (GNOME; in no built-in table) injects it
+        // and its files outrank everything - including families the OS
+        // defaults would have boosted.
+        let config = config::FcScanConfig {
+            font_dirs: Vec::new(),
+            priority_families: vec!["Cantarell".to_string()],
+        };
+        let sets = config.priority_token_sets();
+
+        let tokens = tokenize_all("Cantarell-Bold");
+        assert_eq!(assign_scout_priority(&tokens, &sets), Priority::High);
+
+        // Arial is High under every built-in table, but this embedder
+        // did not ask for it.
+        let tokens = tokenize_all("Arial");
+        assert_eq!(assign_scout_priority(&tokens, &sets), Priority::Low);
     }
 
     // ── find_family_paths ───────────────────────────────────────────────

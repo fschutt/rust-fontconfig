@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.6.0] - 2026-08-29
+
+### Added
+
+- **Scan directories and priority families are injected, not invented.**
+  The async registry used to decide for itself where fonts live and which
+  families deserve parse priority, by reading the per-OS tables
+  (`config::font_directories` / `config::common_font_families`) directly
+  from the scout thread. Both tables are guesses, and a wrong guess is
+  expensive: an embedder whose detected system UI font was not in the
+  guessed priority list (Cantarell on GNOME, for one) paid the first
+  layout in .notdef tofu while the builder pool chewed through every
+  other font on disk. The host knows where its fonts live and which
+  family its UI is about to ask for; this crate does not.
+
+  New `config::FcScanConfig { font_dirs, priority_families }` carries
+  that host knowledge, injected via
+  `FcFontRegistry::new_with_config(FcScanConfig)`. The scout reads only
+  the injected config. The old tables survive in exactly one place:
+  `FcScanConfig::os_defaults(os)` is the explicitly-chosen fallback that
+  wraps them, and `FcFontRegistry::new()` keeps its behavior by
+  delegating to it. `FcScanConfig::empty()` scans nothing (memory fonts
+  only); `FcScanConfig::priority_token_sets()` pre-tokenizes the
+  families for the scout's matcher; `FcFontRegistry::scan_dirs()`
+  exposes what a registry is configured to scan.
+
+  The `config` free functions are unchanged and stay public - direct
+  callers (and the synchronous `FcFontCache::build` paths) are not
+  affected. Additive only: no existing item was renamed or removed.
+
 ## [4.5.0] - 2026-08-06
 
 ### Performance

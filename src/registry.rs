@@ -7,7 +7,8 @@
 //!
 //! # Architecture
 //!
-//! - **Scout** (1 thread): Enumerates font directories, guesses family names from
+//! - **Scout** (1 thread): Enumerates the injected scan directories
+//!   ([`crate::config::FcScanConfig`]), guesses family names from
 //!   filenames, and feeds paths to the Builder's priority queue. Takes ~5-20ms.
 //! - **Builder Pool** (N threads): Parses font files from the priority queue, verifies
 //!   CMAP tables, and writes results to the shared cache.
@@ -184,6 +185,7 @@ use crate::{
     FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
     UnicodeRange,
 };
+use crate::config::FcScanConfig;
 use crate::scoring::{
     family_exists_in_patterns, find_family_paths, find_incomplete_paths,
     FcBuildJob, Priority,
@@ -253,7 +255,23 @@ pub struct FcFontRegistry {
     /// in the background.
     pub lazy_scout: AtomicBool,
 
+    // ── Injected host knowledge ──
+    /// Where fonts live and which families the scout parses first.
+    ///
+    /// Injected at construction; the scout reads ONLY this, never the
+    /// per-OS tables in `config` directly. The tables were a guess, and
+    /// a wrong guess is expensive: an embedder whose detected system UI
+    /// font was not in the guessed priority list paid the first layout
+    /// in .notdef tofu while the builder pool chewed through every
+    /// other font on disk. [`FcFontRegistry::new`] fills this with
+    /// [`FcScanConfig::os_defaults`], the explicitly-chosen fallback;
+    /// [`FcFontRegistry::new_with_config`] lets the embedder decide.
+    pub scan_config: FcScanConfig,
+
     // ── Operating system (for font family expansion) ──
+    /// Still used for generic-family expansion and the iOS CoreText
+    /// enumeration branch. Since the [`FcScanConfig`] inversion it no
+    /// longer implies scan locations or parse priorities.
     pub os: OperatingSystem,
 }
 
@@ -268,8 +286,25 @@ impl std::fmt::Debug for FcFontRegistry {
 }
 
 impl FcFontRegistry {
-    /// Create a new empty registry.
+    /// Create a new empty registry with the built-in per-OS scan tables.
+    ///
+    /// Equivalent to `new_with_config(FcScanConfig::os_defaults(...))` for
+    /// the current OS: the crate's guessed font directories and priority
+    /// families, chosen explicitly on your behalf. Embedders that know
+    /// better (detected UI font, custom font locations) should use
+    /// [`FcFontRegistry::new_with_config`] instead.
     pub fn new() -> Arc<Self> {
+        Self::new_with_config(FcScanConfig::os_defaults(OperatingSystem::current()))
+    }
+
+    /// Create a new empty registry with injected scan configuration.
+    ///
+    /// The embedder decides where fonts live and which families the
+    /// scout parses first; this crate no longer invents either. Pass
+    /// [`FcScanConfig::os_defaults`] to opt into the old built-in
+    /// tables, or [`FcScanConfig::empty`] to scan nothing (memory
+    /// fonts only).
+    pub fn new_with_config(scan_config: FcScanConfig) -> Arc<Self> {
         Arc::new(Self {
             cache: FcFontCache::default(),
             known_paths: crate::StLock::new(BTreeMap::new()),
@@ -283,8 +318,16 @@ impl FcFontRegistry {
             shutdown: AtomicBool::new(false),
             cache_loaded: AtomicBool::new(false),
             lazy_scout: AtomicBool::new(false),
+            scan_config,
             os: OperatingSystem::current(),
         })
+    }
+
+    /// The directories the scout will walk, from the injected
+    /// [`FcScanConfig`]. Pure accessor (no locks, no threads), so tests
+    /// and embedders can verify what a registry is configured to scan.
+    pub fn scan_dirs(&self) -> &[PathBuf] {
+        &self.scan_config.font_dirs
     }
 
     /// Enable/disable lazy scout mode. See [`FcFontRegistry::lazy_scout`]
@@ -1102,6 +1145,55 @@ fn collect_face_style_order(
         (bold_mismatch, italic_mismatch)
     });
     styles.into_iter().map(|(fi, _, _)| fi).collect()
+}
+
+#[cfg(test)]
+mod scan_config_tests {
+    use super::*;
+
+    /// `new()` must keep its historical behavior by delegating to the
+    /// explicit OS defaults - same dirs, same priority families.
+    #[test]
+    fn new_delegates_to_os_defaults() {
+        let registry = FcFontRegistry::new();
+        assert_eq!(
+            registry.scan_config,
+            FcScanConfig::os_defaults(OperatingSystem::current()),
+        );
+        assert!(!registry.scan_dirs().is_empty());
+    }
+
+    /// A registry constructed with `FcScanConfig::empty()` scans nothing:
+    /// the scout completes without publishing a single path or queueing a
+    /// single job. Run the scout inline on this thread - no spawn, no
+    /// timing dependence - which also keeps the test valid under
+    /// `single-thread-unsafe-locks` (where `spawn_scout_and_builders` is
+    /// a no-op).
+    #[test]
+    fn empty_config_scout_scans_nothing() {
+        let registry = FcFontRegistry::new_with_config(FcScanConfig::empty());
+        assert!(registry.scan_dirs().is_empty());
+
+        registry.scout_thread();
+
+        assert!(registry.is_scan_complete());
+        let known = registry
+            .known_paths
+            .read()
+            .expect("known_paths lock poisoned");
+        assert!(
+            known.is_empty(),
+            "empty FcScanConfig must publish no paths, got families: {:?}",
+            known.keys().collect::<Vec<_>>(),
+        );
+        drop(known);
+        let queue = registry.build_queue.lock().expect("queue lock poisoned");
+        assert!(
+            queue.is_empty(),
+            "empty FcScanConfig must queue no build jobs, got {} jobs",
+            queue.len(),
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

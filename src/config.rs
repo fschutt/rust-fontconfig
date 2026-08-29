@@ -1,6 +1,13 @@
 //! OS-specific font configuration: directories, common families, and font file constants.
 //!
 //! All hardcoded data is returned as `&'static` references to avoid allocation.
+//!
+//! The per-OS tables ([`system_font_dirs`], [`font_directories`],
+//! [`common_font_families`]) remain public for direct callers, but the
+//! async registry no longer reads them on its own: it consumes host
+//! knowledge exclusively through an injected [`FcScanConfig`], and
+//! [`FcScanConfig::os_defaults`] is the single place where these tables
+//! become registry behavior.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -123,9 +130,12 @@ pub fn font_directories(os: OperatingSystem) -> Vec<PathBuf> {
 /// Common font families for priority boosting, as human-readable names.
 /// No allocation — returns a static slice.
 ///
-/// These are the most commonly needed system fonts per OS. The scout thread
-/// uses these to boost the build priority of likely-needed fonts so they're
-/// available sooner.
+/// These are the most commonly needed system fonts per OS. Wrapped into
+/// [`FcScanConfig::os_defaults`], they tell the scout thread which fonts
+/// to parse first so likely-needed families are available sooner. The
+/// scout itself only ever sees the injected [`FcScanConfig`]; this table
+/// is a guess, and embedders that know their actual UI font should
+/// inject that instead.
 ///
 /// The names here are the canonical human-readable forms. Use
 /// [`matches_common_family`] for token-based matching against filenames.
@@ -192,6 +202,66 @@ pub fn tokenize_common_families(os: OperatingSystem) -> Vec<Vec<String>> {
         .iter()
         .map(|family| tokenize_lowercase(family))
         .collect()
+}
+
+/// Host knowledge the registry needs but must not invent: where fonts live
+/// and which families deserve parse priority.
+///
+/// Injected by the embedder via `FcFontRegistry::new_with_config`. This
+/// crate used to decide both tables on its own (via [`font_directories`]
+/// and [`common_font_families`]), which gets it backwards: an embedder
+/// whose detected system UI font was not in the guessed list paid the
+/// first layout in .notdef tofu, because the scout parsed hundreds of
+/// other files before reaching the one family the UI was about to ask
+/// for. The host knows its font locations and its UI font; this crate
+/// does not.
+///
+/// The old tables survive in exactly one place:
+/// [`FcScanConfig::os_defaults`] is the explicitly-chosen fallback that
+/// carries them. `FcFontRegistry::new()` opts into it for you, so
+/// existing callers keep the old behavior unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FcScanConfig {
+    /// Directories to scan recursively. Empty = scan nothing.
+    pub font_dirs: Vec<PathBuf>,
+    /// Human-readable family names whose files the scout parses first
+    /// (they become token sets via [`tokenize_lowercase`]).
+    pub priority_families: Vec<String>,
+}
+
+impl FcScanConfig {
+    /// The tables this crate used to hard-code, as an explicit opt-in:
+    /// [`font_directories`] (system + env-var-resolved user dirs) plus
+    /// [`common_font_families`] for `os`.
+    pub fn os_defaults(os: OperatingSystem) -> Self {
+        Self {
+            font_dirs: font_directories(os),
+            priority_families: common_font_families(os)
+                .iter()
+                .map(|family| family.to_string())
+                .collect(),
+        }
+    }
+
+    /// Scan nothing, prioritize nothing. For embedders that supply every
+    /// directory themselves or work from memory fonts only.
+    pub fn empty() -> Self {
+        Self {
+            font_dirs: Vec::new(),
+            priority_families: Vec::new(),
+        }
+    }
+
+    /// Pre-tokenize [`FcScanConfig::priority_families`] for per-file
+    /// matching, mirroring [`tokenize_common_families`]. Pass the result
+    /// to [`matches_common_family_tokens`] or the scout's
+    /// `assign_scout_priority`.
+    pub fn priority_token_sets(&self) -> Vec<Vec<String>> {
+        self.priority_families
+            .iter()
+            .map(|family| tokenize_lowercase(family))
+            .collect()
+    }
 }
 
 /// Check if a set of filename tokens matches any pre-tokenized common family.
@@ -307,6 +377,46 @@ mod tests {
         assert!(!common_font_families(OperatingSystem::Linux).is_empty());
         assert!(!common_font_families(OperatingSystem::Windows).is_empty());
         assert!(common_font_families(OperatingSystem::Wasm).is_empty());
+    }
+
+    // ── FcScanConfig ────────────────────────────────────────────────────
+
+    #[test]
+    fn os_defaults_carry_the_legacy_tables() {
+        for os in [
+            OperatingSystem::Linux,
+            OperatingSystem::Windows,
+            OperatingSystem::MacOS,
+        ] {
+            let config = FcScanConfig::os_defaults(os);
+
+            assert!(!config.font_dirs.is_empty(), "no dirs for {:?}", os);
+            assert!(
+                !config.priority_families.is_empty(),
+                "no families for {:?}", os
+            );
+
+            // os_defaults must be exactly the old hard-coded behavior:
+            // same dirs, same families, same token sets.
+            assert_eq!(config.font_dirs, font_directories(os));
+            let legacy: Vec<String> = common_font_families(os)
+                .iter()
+                .map(|f| f.to_string())
+                .collect();
+            assert_eq!(config.priority_families, legacy);
+            assert_eq!(
+                config.priority_token_sets(),
+                tokenize_common_families(os)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_scan_config_scans_and_prioritizes_nothing() {
+        let config = FcScanConfig::empty();
+        assert!(config.font_dirs.is_empty());
+        assert!(config.priority_families.is_empty());
+        assert!(config.priority_token_sets().is_empty());
     }
 
     // ── guess_family_from_filename ──────────────────────────────────────

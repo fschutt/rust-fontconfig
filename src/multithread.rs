@@ -20,14 +20,22 @@ use crate::OperatingSystem;
 impl FcFontRegistry {
     /// Scout thread: enumerates font directories and populates the build queue.
     ///
-    /// 1. Walks all OS font directories recursively, collecting font file paths.
-    /// 2. Tokenizes each filename and assigns a priority (High for common
-    ///    OS fonts, Low for everything else).
+    /// 1. Walks the injected scan directories (`scan_config.font_dirs`)
+    ///    recursively, collecting font file paths.
+    /// 2. Tokenizes each filename and assigns a priority (High for the
+    ///    injected priority families, Low for everything else).
     /// 3. Populates `known_paths` (family → file paths) and `build_queue`.
     /// 4. Signals `scan_complete` when done.
+    ///
+    /// Both the directory list and the priority token sets come from the
+    /// [`crate::config::FcScanConfig`] injected at registry construction,
+    /// never from the per-OS tables in `config` directly - the host
+    /// decides where fonts live and which families matter, this thread
+    /// only executes that decision. `self.os` remains in play solely for
+    /// the iOS CoreText enumeration branch below.
     pub fn scout_thread(&self) {
-        let font_dirs = config::font_directories(self.os);
-        let common_token_sets = config::tokenize_common_families(self.os);
+        let font_dirs = self.scan_config.font_dirs.clone();
+        let common_token_sets = self.scan_config.priority_token_sets();
         let lazy = self.lazy_scout.load(Ordering::Acquire);
 
         // iOS: the app sandbox denies `read_dir` on `/System/Library/...`
