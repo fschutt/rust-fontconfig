@@ -18,11 +18,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         features:
-          - ""  # default = std + parsing + multithreading
+          - ""  # default = std
           - "--no-default-features --features std"
           - "--no-default-features --features parsing"  # parsing implies std
           - "--no-default-features --features std,multithreading"
           - "--no-default-features --features std,parsing,multithreading"
+          # The registry and the disk cache with real threads. `--all-features`
+          # turns on `single-thread-unsafe-locks`, under which no scout or
+          # builder is ever spawned, so the tests that need a completed scan
+          # are compiled out there and run on this row instead.
+          - "--no-default-features --features cache,async-registry,parsing"
           - "--all-features"
     runs-on: ${{ matrix.os }}
     steps:
