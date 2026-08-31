@@ -1,0 +1,77 @@
+# Tag `vX.Y.Z` (matching Cargo.toml) to publish a GitHub Release with the C
+# header and the built C library for Linux, macOS and Windows, and release
+# notes taken from that version's CHANGELOG section. crates.io publishing
+# stays manual: `cargo publish`.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches Cargo.toml
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$version\"" Cargo.toml || { echo "Cargo.toml is not $version"; exit 1; }
+          grep -q "^## \[$version\]" CHANGELOG.md || { echo "CHANGELOG.md has no $version section"; exit 1; }
+      - run: cargo test --no-default-features --features cache,async-registry,parsing
+      - run: cargo package
+
+  c-library:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            files: "target/release/librust_fontconfig.so target/release/librust_fontconfig.a"
+          - os: macos-latest
+            name: macos-arm64
+            files: "target/release/librust_fontconfig.dylib target/release/librust_fontconfig.a"
+          - os: windows-latest
+            name: windows-x86_64-msvc
+            files: "target/release/rust_fontconfig.dll target/release/rust_fontconfig.dll.lib target/release/rust_fontconfig.lib"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --features ffi
+      - name: Package
+        shell: bash
+        run: |
+          dir="rust-fontconfig-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p "dist/$dir"
+          cp ffi/rust_fontconfig.h ${{ matrix.files }} "dist/$dir/"
+          (cd dist && tar czf "$dir.tar.gz" "$dir")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.tar.gz
+
+  release:
+    needs: c-library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## \[/{p = index($0, "[" v "]") > 0} p' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md." > notes.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --title "$GITHUB_REF_NAME" --notes-file notes.md
