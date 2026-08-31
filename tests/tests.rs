@@ -1193,3 +1193,174 @@ fn a_family_lookup_finds_its_faces_and_misses_cheaply() {
          as an arbitrary one"
     );
 }
+
+/// fonts.conf handling, hermetic: a configuration tree in a temp directory.
+///
+/// The parser is not Linux-specific; only the default location is. What
+/// these pin down is the part that was wrong before 5.0: a relative
+/// `<include>` (the stock `conf.d`) resolved against the process's working
+/// directory, so on a stock distribution the whole `conf.d` tree — where
+/// every `<alias>` lives — was silently skipped unless the process happened
+/// to run from `/etc/fonts`; and includes were walked last-in-first-out over
+/// an unsorted directory listing, so which alias won depended on hash order.
+#[cfg(feature = "parsing")]
+mod fonts_conf_tree {
+    use rust_fontconfig::{FcFallbackConfig, FcSystemConfig, GenericFamily};
+    use std::path::{Path, PathBuf};
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            // Tests run concurrently and the clock is not unique enough to
+            // tell them apart; a counter is.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("rfc-fontsconf-{}-{nanos}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempTree(dir)
+        }
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn alias(family: &str, prefer: &[&str]) -> String {
+        let prefer: String = prefer.iter().map(|p| format!("<family>{p}</family>")).collect();
+        format!("<alias><family>{family}</family><prefer>{prefer}</prefer></alias>")
+    }
+
+    fn name_of(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn relative_includes_resolve_against_the_config_directory_in_document_order() {
+        let tree = TempTree::new();
+        let font_dir = tree.0.join("fonts");
+        std::fs::create_dir_all(&font_dir).unwrap();
+
+        // The stock shape: a bare `conf.d`, plus a `relative` include.
+        let root = tree.write(
+            "etc/fonts/fonts.conf",
+            &format!(
+                r#"<?xml version="1.0"?><fontconfig>
+                    <dir>{}</dir>
+                    <dir prefix="relative">local-fonts</dir>
+                    <include ignore_missing="yes">conf.d</include>
+                    <include prefix="relative">extra/more.conf</include>
+                    <include ignore_missing="yes">does-not-exist.conf</include>
+                </fontconfig>"#,
+                font_dir.display()
+            ),
+        );
+        tree.write(
+            "etc/fonts/conf.d/20-second.conf",
+            &format!(
+                r#"<fontconfig>{}<include>../fonts.conf</include></fontconfig>"#,
+                alias("sans-serif", &["Second Sans"])
+            ),
+        );
+        tree.write(
+            "etc/fonts/conf.d/10-first.conf",
+            &format!(
+                "<fontconfig>{}{}</fontconfig>",
+                alias("sans-serif", &["First Sans"]),
+                alias("Arial", &["First Arial"])
+            ),
+        );
+        tree.write("etc/fonts/conf.d/README", "not a configuration file");
+        tree.write(
+            "etc/fonts/extra/more.conf",
+            &format!("<fontconfig>{}</fontconfig>", alias("monospace", &["Rel Mono"])),
+        );
+
+        // Run from somewhere that is NOT the config directory: the old code
+        // would have looked for ./conf.d here and found nothing.
+        let config = FcSystemConfig::parse_tree(&root).expect("the root parses");
+
+        let read: Vec<String> = config.files.iter().map(|p| name_of(p)).collect();
+        assert_eq!(
+            read,
+            vec!["fonts.conf", "10-first.conf", "20-second.conf", "more.conf"],
+            "root, then the directory's numbered files in name order, then the \
+             relative include; the cycle back to fonts.conf is ignored"
+        );
+
+        assert_eq!(
+            config.aliases.get("sansserif").map(Vec::as_slice),
+            Some(&["First Sans".to_string(), "Second Sans".to_string()][..]),
+            "preferences append across files in include order: 10 before 20"
+        );
+        assert_eq!(
+            config.aliases.get("arial").map(Vec::as_slice),
+            Some(&["First Arial".to_string()][..])
+        );
+        assert_eq!(
+            config.aliases.get("monospace").map(Vec::as_slice),
+            Some(&["Rel Mono".to_string()][..]),
+            "prefix=\"relative\" resolves against the including file's directory"
+        );
+
+        assert_eq!(
+            config.font_dirs,
+            vec![font_dir.clone(), root.parent().unwrap().join("local-fonts")],
+            "<dir> entries resolve in order; prefix=\"relative\" against the config file"
+        );
+
+        // The parsed aliases are what the fallback configuration absorbs.
+        let mut fallback = FcFallbackConfig::default();
+        fallback.absorb_system_aliases(config.aliases);
+        assert_eq!(
+            fallback.generic_candidates(GenericFamily::SansSerif),
+            &["First Sans".to_string(), "Second Sans".to_string()][..]
+        );
+        assert_eq!(fallback.substitutions_for("Arial"), &["First Arial".to_string()][..]);
+    }
+
+    #[test]
+    fn an_include_cycle_terminates_and_reads_each_file_once() {
+        let tree = TempTree::new();
+        let a = tree.write(
+            "a.conf",
+            &format!("<fontconfig>{}<include>b.conf</include></fontconfig>", alias("serif", &["A Serif"])),
+        );
+        tree.write(
+            "b.conf",
+            &format!("<fontconfig>{}<include>a.conf</include></fontconfig>", alias("serif", &["B Serif"])),
+        );
+        let config = FcSystemConfig::parse_tree(&a).expect("parses");
+        let read: Vec<String> = config.files.iter().map(|p| name_of(p)).collect();
+        assert_eq!(read, vec!["a.conf", "b.conf"]);
+        assert_eq!(
+            config.aliases.get("serif").map(Vec::as_slice),
+            Some(&["A Serif".to_string(), "B Serif".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn a_missing_root_is_none_and_an_unreadable_include_is_skipped() {
+        let tree = TempTree::new();
+        assert!(FcSystemConfig::parse_tree(&tree.0.join("nope.conf")).is_none());
+        let root = tree.write(
+            "fonts.conf",
+            "<fontconfig><include ignore_missing=\"yes\">missing-dir</include></fontconfig>",
+        );
+        let config = FcSystemConfig::parse_tree(&root).expect("parses");
+        assert_eq!(config.files.len(), 1);
+        assert!(config.aliases.is_empty());
+    }
+}

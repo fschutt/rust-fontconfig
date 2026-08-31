@@ -2410,102 +2410,195 @@ impl FcFontCache {
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[allow(non_snake_case, dead_code)]
 fn FcScanDirectories() -> Option<(
     Vec<(FcPattern, FcFontPath)>,
     BTreeMap<String, FcFontRenderConfig>,
     BTreeMap<String, Vec<String>>,
 )> {
-    use std::fs;
-    use std::path::Path;
-
-    // Real fontconfig honors $FONTCONFIG_FILE as the root config; so do we
-    // (hermetic test setups and sandboxes depend on it).
-    let base_path = std::env::var("FONTCONFIG_FILE")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "/etc/fonts/fonts.conf".to_string());
-
-    if !Path::new(&base_path).exists() {
+    let config = FcSystemConfig::from_system()?;
+    if config.font_dirs.is_empty() {
         return None;
     }
+    let dirs: Vec<(Option<String>, String)> = config
+        .font_dirs
+        .iter()
+        .map(|dir| (None, dir.to_string_lossy().into_owned()))
+        .collect();
+    Some((FcScanDirectoriesInner(&dirs), config.render_configs, config.aliases))
+}
 
-    let mut font_paths = Vec::with_capacity(32);
-    let mut paths_to_visit = vec![(None, PathBuf::from(&base_path))];
-    let mut render_configs: BTreeMap<String, FcFontRenderConfig> = BTreeMap::new();
-    let mut system_aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
+/// Deepest chain of `<include>`s [`FcSystemConfig::parse_tree`] follows.
+/// Cycles are caught by the visited set; this bounds pathological trees.
+#[cfg(all(feature = "std", feature = "parsing"))]
+const MAX_INCLUDE_DEPTH: usize = 64;
 
-    while let Some((prefix, path_to_visit)) = paths_to_visit.pop() {
-        let path = match process_path(&prefix, path_to_visit, true) {
-            Some(path) => path,
-            None => continue,
-        };
+/// What a fontconfig configuration tree says, as far as this crate reads
+/// it: where fonts live, per-family rendering settings, and `<alias>`
+/// preferences. Produced by [`FcSystemConfig::parse_tree`] from a root
+/// file and everything it includes.
+///
+/// The parser has no OS dependency and is compiled and tested everywhere;
+/// only [`FcSystemConfig::from_system`]'s default location is a Linux
+/// convention. `FcFontCache::build` and `FcFontRegistry::new` consult it
+/// where it exists and fill the gaps from the built-in tables.
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FcSystemConfig {
+    /// `<dir>` entries, resolved (prefixes and `~` expanded), in order,
+    /// each once.
+    pub font_dirs: Vec<PathBuf>,
+    /// `<match target="font">` rendering settings keyed by family.
+    pub render_configs: BTreeMap<String, FcFontRenderConfig>,
+    /// `<alias><family>X</family><prefer>…</prefer></alias>` entries keyed by
+    /// the normalized family name (`"sansserif"`, `"arial"`), preferred
+    /// families in configured order, appended across files in include
+    /// order and deduplicated.
+    pub aliases: BTreeMap<String, Vec<String>>,
+    /// Every configuration file that was read, in the order it was read.
+    pub files: Vec<PathBuf>,
+}
 
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
+#[cfg(all(feature = "std", feature = "parsing"))]
+impl FcSystemConfig {
+    /// The platform configuration: `$FONTCONFIG_FILE` when set and
+    /// non-empty, else `/etc/fonts/fonts.conf`. `None` when that file does
+    /// not exist — the normal case on every OS but Linux.
+    pub fn from_system() -> Option<Self> {
+        let root = std::env::var("FONTCONFIG_FILE")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "/etc/fonts/fonts.conf".to_string());
+        let root = PathBuf::from(root);
+        if !root.is_file() {
+            return None;
+        }
+        Self::parse_tree(&root)
+    }
 
-        if metadata.is_file() {
-            let xml_utf8 = match fs::read_to_string(&path) {
-                Ok(xml_utf8) => xml_utf8,
-                Err(_) => continue,
-            };
+    /// Parse `root` and everything it includes, the way fontconfig does:
+    /// includes are followed in document order, depth first; an included
+    /// directory contributes its `[0-9]*.conf` files in name order; every
+    /// file is read at most once (a cycle is simply ignored); missing
+    /// includes are skipped.
+    ///
+    /// Relative `<include>` paths resolve like fontconfig's
+    /// `FcConfigGetFilename`: against each directory of `$FONTCONFIG_PATH`,
+    /// then against the directory of `root` — so the stock
+    /// `<include ignore_missing="yes">conf.d</include>` finds
+    /// `/etc/fonts/conf.d` no matter where the process runs. `prefix="xdg"`
+    /// resolves against `$XDG_CONFIG_HOME` (includes) or `$XDG_DATA_HOME`
+    /// (dirs), `prefix="relative"` against the including file's directory,
+    /// `prefix="cwd"` / `"default"` against the working directory.
+    ///
+    /// `None` if `root` cannot be read.
+    pub fn parse_tree(root: &std::path::Path) -> Option<Self> {
+        use std::collections::VecDeque;
 
-            if ParseFontsConf(&xml_utf8, &mut paths_to_visit, &mut font_paths).is_none() {
+        let root_dir = root.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        let search_dirs: Vec<PathBuf> = std::env::var_os("FONTCONFIG_PATH")
+            .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(core::iter::once(root_dir))
+            .collect();
+
+        let mut config = Self::default();
+        let mut visited: alloc::collections::BTreeSet<PathBuf> = alloc::collections::BTreeSet::new();
+        let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+        queue.push_back((root.to_path_buf(), 0));
+
+        while let Some((path, depth)) = queue.pop_front() {
+            if depth > MAX_INCLUDE_DEPTH {
+                continue;
+            }
+            let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !visited.insert(identity) {
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&path) else { continue };
+
+            if metadata.is_dir() {
+                // The directory's files come next, before anything queued
+                // after the include that named the directory.
+                let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
+                    .ok()?
+                    .filter_map(|entry| entry.ok().map(|e| e.path()))
+                    .filter(|p| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false))
+                    .filter(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy())
+                            .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()) && n.ends_with(".conf"))
+                    })
+                    .collect();
+                entries.sort();
+                for (i, entry) in entries.into_iter().enumerate() {
+                    queue.insert(i, (entry, depth));
+                }
+                continue;
+            }
+            if !metadata.is_file() {
                 continue;
             }
 
-            // Also parse render config blocks from this file
-            ParseFontsConfRenderConfig(&xml_utf8, &mut render_configs);
+            let Ok(xml) = std::fs::read_to_string(&path) else { continue };
+            let mut includes: Vec<(Option<String>, PathBuf)> = Vec::new();
+            let mut dirs: Vec<(Option<String>, String)> = Vec::new();
+            if ParseFontsConf(&xml, &mut includes, &mut dirs).is_none() {
+                continue;
+            }
+            ParseFontsConfRenderConfig(&xml, &mut config.render_configs);
+            ParseFontsConfAliases(&xml, &mut config.aliases);
+            config.files.push(path.clone());
 
-            // And <alias>/<prefer> preference blocks (generic families and
-            // named substitutions alike).
-            ParseFontsConfAliases(&xml_utf8, &mut system_aliases);
-        } else if metadata.is_dir() {
-            let dir_entries = match fs::read_dir(&path) {
-                Ok(dir_entries) => dir_entries,
-                Err(_) => continue,
-            };
-
-            for entry_result in dir_entries {
-                let entry = match entry_result {
-                    Ok(entry) => entry,
-                    Err(_) => continue,
+            let here = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            for (prefix, dir) in dirs {
+                let resolved = match prefix.as_deref() {
+                    Some("relative") => Some(here.join(dir)),
+                    _ => process_path(&prefix, PathBuf::from(dir), false),
                 };
-
-                let entry_path = entry.path();
-
-                // `fs::metadata` traverses symbolic links
-                let entry_metadata = match fs::metadata(&entry_path) {
-                    Ok(metadata) => metadata,
-                    Err(_) => continue,
-                };
-
-                if !entry_metadata.is_file() {
-                    continue;
+                if let Some(dir) = resolved {
+                    if !config.font_dirs.contains(&dir) {
+                        config.font_dirs.push(dir);
+                    }
                 }
+            }
 
-                let file_name = match entry_path.file_name() {
-                    Some(name) => name,
-                    None => continue,
+            // This file's includes come next, in document order, before
+            // whatever was queued by the file that included this one.
+            let mut position = 0;
+            for (prefix, include) in includes {
+                let resolved = match prefix.as_deref() {
+                    Some("relative") => Some(here.join(include)),
+                    Some(_) => process_path(&prefix, include, true),
+                    None => process_path(&None, include, true).map(|expanded| {
+                        if expanded.is_absolute() {
+                            expanded
+                        } else {
+                            search_dirs
+                                .iter()
+                                .map(|dir| dir.join(&expanded))
+                                .find(|candidate| candidate.exists())
+                                .unwrap_or_else(|| {
+                                    search_dirs.last().map(|dir| dir.join(&expanded)).unwrap_or(expanded)
+                                })
+                        }
+                    }),
                 };
-
-                let file_name_str = file_name.to_string_lossy();
-                if file_name_str.starts_with(|c: char| c.is_ascii_digit())
-                    && file_name_str.ends_with(".conf")
-                {
-                    paths_to_visit.push((None, entry_path));
+                if let Some(resolved) = resolved {
+                    queue.insert(position, (resolved, depth + 1));
+                    position += 1;
                 }
             }
         }
-    }
 
-    if font_paths.is_empty() {
-        return None;
+        // A root that could not be read (or parsed) yields no files at all.
+        if config.files.is_empty() {
+            return None;
+        }
+        Some(config)
     }
-
-    Some((FcScanDirectoriesInner(&font_paths), render_configs, system_aliases))
 }
 
 /// Parse `<alias><family>NAME</family><prefer><family>...</family>...</prefer></alias>`
@@ -2514,7 +2607,7 @@ fn FcScanDirectories() -> Option<(
 /// Keys are normalized with [`crate::utils::normalize_family_name`];
 /// preferred families keep their configured order, appended across files
 /// in include order (fontconfig semantics), deduplicated.
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn ParseFontsConfAliases(input: &str, aliases: &mut BTreeMap<String, Vec<String>>) {
     use xmlparser::Token::*;
     use xmlparser::Tokenizer;
@@ -2614,7 +2707,7 @@ fn ParseFontsConfAliases(input: &str, aliases: &mut BTreeMap<String, Vec<String>
 }
 
 // Parses the fonts.conf file
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn ParseFontsConf(
     input: &str,
     paths_to_visit: &mut Vec<(Option<String>, PathBuf)>,
@@ -2731,7 +2824,7 @@ fn ParseFontsConf(
 ///   <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
 /// </match>
 /// ```
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn ParseFontsConfRenderConfig(
     input: &str,
     configs: &mut BTreeMap<String, FcFontRenderConfig>,
@@ -2892,7 +2985,7 @@ fn ParseFontsConfRenderConfig(
 }
 
 /// Apply a parsed edit value to the render config.
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn apply_edit_value(
     config: &mut FcFontRenderConfig,
     edit_name: &str,
@@ -2943,7 +3036,7 @@ fn apply_edit_value(
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn parse_bool_value(value: &str) -> Option<bool> {
     match value {
         "true" => Some(true),
@@ -2952,7 +3045,7 @@ fn parse_bool_value(value: &str) -> Option<bool> {
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn parse_hintstyle_const(value: &str) -> Option<FcHintStyle> {
     match value {
         "hintnone" => Some(FcHintStyle::None),
@@ -2963,7 +3056,7 @@ fn parse_hintstyle_const(value: &str) -> Option<FcHintStyle> {
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn parse_rgba_const(value: &str) -> Option<FcRgba> {
     match value {
         "unknown" => Some(FcRgba::Unknown),
@@ -2976,7 +3069,7 @@ fn parse_rgba_const(value: &str) -> Option<FcRgba> {
     }
 }
 
-#[cfg(all(feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(feature = "std", feature = "parsing"))]
 fn parse_lcdfilter_const(value: &str) -> Option<FcLcdFilter> {
     match value {
         "lcdnone" => Some(FcLcdFilter::None),
@@ -4256,7 +4349,7 @@ fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
     })
 }
 
-#[cfg(all(test, feature = "std", feature = "parsing", target_os = "linux"))]
+#[cfg(all(test, feature = "std", feature = "parsing"))]
 mod system_alias_tests {
     use super::*;
 

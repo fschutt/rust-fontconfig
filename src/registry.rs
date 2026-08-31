@@ -307,7 +307,21 @@ impl FcFontRegistry {
     /// [`FcFontRegistry::new_with_config`] instead.
     pub fn new() -> Arc<Self> {
         let os = OperatingSystem::current();
-        Self::new_with_configs(FcScanConfig::os_defaults(os), FcFallbackConfig::os_defaults(os))
+        let mut scan = FcScanConfig::os_defaults(os);
+        let mut fallback = FcFallbackConfig::default();
+        // The platform configuration (fonts.conf, where there is one) is the
+        // authority for both where fonts live and what generic families
+        // prefer; the built-in tables only fill what it leaves unsaid.
+        if let Some(system) = crate::FcSystemConfig::from_system() {
+            for dir in system.font_dirs {
+                if !scan.font_dirs.contains(&dir) {
+                    scan.font_dirs.push(dir);
+                }
+            }
+            fallback.absorb_system_aliases(system.aliases);
+        }
+        fallback.merge_defaults(&FcFallbackConfig::os_defaults(os));
+        Self::new_with_configs(scan, fallback)
     }
 
     /// Create a new empty registry with injected scan configuration.

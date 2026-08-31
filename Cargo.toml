@@ -19,10 +19,10 @@ allsorts = { package = "allsorts-azul", version = "0.17.1", default-features = f
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }
 dirs = { version = "6", optional = true }
-
-# Linux-only: fonts.conf XML parsing
-[target.'cfg(target_os="linux")'.dependencies]
-xmlparser = { version = "0.13.6", default-features = false }
+# fonts.conf XML parsing. Not OS-specific: the parser runs (and is tested)
+# everywhere; only `FcSystemConfig::from_system`'s default location is a
+# Linux convention.
+xmlparser = { version = "0.13.6", default-features = false, optional = true }
 
 # Not available on WASM
 [target.'cfg(not(target_family="wasm"))'.dependencies]
@@ -39,7 +39,7 @@ rayon = { version = "1.11.0", default-features = false, optional = true }
 default = ["std"]
 std = ["mmapio"]
 multithreading = ["rayon"]
-parsing = ["allsorts", "std"]
+parsing = ["allsorts", "xmlparser", "std"]
 ffi = ["parsing", "std", "async-registry"]
 cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
