@@ -49,6 +49,42 @@ All notable changes to this project will be documented in this file.
   so the four maps and the index cannot drift apart again.
   `insert_fast_pattern` also invalidates memoized chains now.
 
+- **`build_complete` waits for in-flight parses.** The completion check
+  was "scout done and queue empty": a builder that had popped the last
+  job was still parsing it while another found the queue empty, won the
+  transition, woke every waiter and persisted the manifest — short by up
+  to N−1 fonts. The registry counts in-flight jobs under the queue lock
+  and completes only when that count is zero. New:
+  `FcFontRegistry::set_persist_on_complete(false)` for embedders that
+  persist on their own schedule (and for tests).
+
+- **Relative `fonts.conf` includes resolve like fontconfig.** The stock
+  `<include ignore_missing="yes">conf.d</include>` was resolved against
+  the process's working directory, so on an ordinary distribution the
+  whole `conf.d` tree — where every `<alias>` lives — was silently
+  skipped and the config-first expansion never saw it. `FcSystemConfig`
+  (`parse_tree`, `from_system`) follows includes depth-first in document
+  order, reads a directory's `[0-9]*.conf` files in name order, reads
+  each file once, and resolves relative names against `$FONTCONFIG_PATH`
+  and the root configuration directory; `prefix="relative"` is
+  supported. The parser is compiled and tested on every platform
+  (`xmlparser` is now pulled in by `parsing`), and
+  `FcFontRegistry::new()` consults the configuration too — its `<dir>`
+  entries join the scan and its aliases seed the fallback configuration.
+
+- **`PatternMatch` values match the C header again.** Reordering the Rust
+  variants had made `DontCare=0, True=1, False=2` while the header says
+  `TRUE=0, FALSE=1, DONT_CARE=2`; the enum crosses the boundary by value,
+  so every C caller's `FC_MATCH_FALSE` arrived as `True`. Discriminants
+  are explicit now and a test parses the header to hold them in place.
+
+- **The disk-cache tests run on a CI row where threads exist.**
+  `--all-features` enables `single-thread-unsafe-locks`, under which no
+  scout is ever spawned, and that was the only row running
+  `tests/disk_cache_persistence.rs` — so it timed out everywhere. The
+  file is compiled out under that feature and the matrix gains an
+  explicit `cache,async-registry,parsing` row.
+
 ### Added
 
 - **`FcFallbackConfig` — the resolution side of `FcScanConfig`.** Everything
@@ -86,6 +122,23 @@ All notable changes to this project will be documented in this file.
   compile unchanged. `CssFallbackGroup::script_fonts`.
 
 ### Changed
+
+- **Coverage is exact: every codepoint the cmap maps, read from its
+  segments.** It used to be a list of whole Unicode blocks, each marked
+  covered when at least half of two to six sampled codepoints mapped to
+  a glyph, from a fixed list of 50 BMP blocks, unioned with the OS/2
+  `ulUnicodeRange` bits decoded through a table misaligned with the
+  spec from bit 12 on. A face with three of six probed ideographs
+  "covered" all 20,992; anything outside the list — Tibetan, Braille,
+  CJK Extension A, every emoji, every astral script — was invisible.
+  Format 4 is now read segment by segment, format 12 group by group,
+  at a cost proportional to the segment count and no per-codepoint
+  work; OS/2 is not consulted for coverage (fontconfig never did). The
+  bit table and both probes are gone. Coverage is normalized on insert
+  and `covers`/`overlap_size` binary-search it; `has_*_ranges` test
+  overlap with the block. The manifest version is 3 — a v2 manifest is
+  block-rounded and gets rescanned. Expect more ranges per font in
+  `FcPattern::unicode_ranges` and a larger manifest.
 
 - **`resolve_char` is honest again.** It returns `None` when no font in the
   chain covers the character and no last resort is configured. The
