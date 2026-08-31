@@ -2,6 +2,11 @@
 //!
 //! This module provides C-compatible bindings for the rust-fontconfig library.
 
+// Every export dereferences raw pointers by contract of a C API, after a
+// null check; the lint wants them declared `unsafe fn`, which the C ABI does
+// not express.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use crate::*;
 #[cfg(feature = "async-registry")]
 use crate::registry::FcFontRegistry;
@@ -12,6 +17,14 @@ use std::ptr;
 use std::slice;
 #[cfg(feature = "async-registry")]
 use std::sync::Arc;
+
+/// Run an export's body with panics contained. A panic that reaches an
+/// `extern "C"` frame aborts the process (Rust 1.81+), so every export runs
+/// inside this and returns `on_panic` — null, false or zero — instead; the
+/// default panic hook still reports what happened on stderr.
+fn guard<T>(on_panic: T, body: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or(on_panic)
+}
 
 /// C-compatible font ID representation
 #[repr(C)]
@@ -531,145 +544,169 @@ fn trace_msgs_to_c(trace: &[TraceMsg]) -> (*mut FcTraceMsgC, usize) {
 /// Create a new font ID
 #[no_mangle]
 pub extern "C" fn fc_font_id_new() -> FcFontIdC {
-    FcFontIdC::from_fontid(&FontId::new())
+    guard(FcFontIdC::from_fontid(&FontId(0)), || {
+        FcFontIdC::from_fontid(&FontId::new())
+    })
 }
 
 /// Create a new font cache
 #[no_mangle]
 pub extern "C" fn fc_cache_build() -> *mut FcFontCache {
-    let cache = FcFontCache::build();
-    Box::into_raw(Box::new(cache))
+    guard(ptr::null_mut(), || {
+        let cache = FcFontCache::build();
+        Box::into_raw(Box::new(cache))
+    })
 }
 
 /// Free the font cache
 #[no_mangle]
 pub extern "C" fn fc_cache_free(cache: *mut FcFontCache) {
-    if !cache.is_null() {
-        unsafe {
-            let _ = Box::from_raw(cache);
+    guard((), || {
+        if !cache.is_null() {
+            unsafe {
+                let _ = Box::from_raw(cache);
+            }
         }
-    }
+    })
 }
 
 /// Create a new default pattern
 #[no_mangle]
 pub extern "C" fn fc_pattern_new() -> *mut FcPatternC {
-    let pattern = FcPattern::default();
-    let pattern_c = pattern_to_c(&pattern);
-    Box::into_raw(Box::new(pattern_c))
+    guard(ptr::null_mut(), || {
+        let pattern = FcPattern::default();
+        let pattern_c = pattern_to_c(&pattern);
+        Box::into_raw(Box::new(pattern_c))
+    })
 }
 
 /// Free a pattern
 #[no_mangle]
 pub extern "C" fn fc_pattern_free(pattern: *mut FcPatternC) {
-    if !pattern.is_null() {
-        unsafe {
-            free_pattern_c(pattern);
+    guard((), || {
+        if !pattern.is_null() {
+            unsafe {
+                free_pattern_c(pattern);
+            }
         }
-    }
+    })
 }
 
 /// Set pattern name
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_name(pattern: *mut FcPatternC, name: *const c_char) {
-    if pattern.is_null() || name.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() || name.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
+        unsafe {
+            let pattern = &mut *pattern;
 
-        // Free existing name if any
-        free_c_string(pattern.name);
+            // Free existing name if any
+            free_c_string(pattern.name);
 
-        // Set new name
-        let name_str = CStr::from_ptr(name).to_string_lossy().into_owned();
-        pattern.name = CString::new(name_str).unwrap_or_default().into_raw();
-    }
+            // Set new name
+            let name_str = CStr::from_ptr(name).to_string_lossy().into_owned();
+            pattern.name = CString::new(name_str).unwrap_or_default().into_raw();
+        }
+    })
 }
 
 /// Set pattern family
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_family(pattern: *mut FcPatternC, family: *const c_char) {
-    if pattern.is_null() || family.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() || family.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
+        unsafe {
+            let pattern = &mut *pattern;
 
-        // Free existing family if any
-        free_c_string(pattern.family);
+            // Free existing family if any
+            free_c_string(pattern.family);
 
-        // Set new family
-        let family_str = CStr::from_ptr(family).to_string_lossy().into_owned();
-        pattern.family = CString::new(family_str).unwrap_or_default().into_raw();
-    }
+            // Set new family
+            let family_str = CStr::from_ptr(family).to_string_lossy().into_owned();
+            pattern.family = CString::new(family_str).unwrap_or_default().into_raw();
+        }
+    })
 }
 
 /// Set pattern italic
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_italic(pattern: *mut FcPatternC, italic: PatternMatch) {
-    if pattern.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
-        pattern.italic = italic;
-    }
+        unsafe {
+            let pattern = &mut *pattern;
+            pattern.italic = italic;
+        }
+    })
 }
 
 /// Set pattern bold
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_bold(pattern: *mut FcPatternC, bold: PatternMatch) {
-    if pattern.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
-        pattern.bold = bold;
-    }
+        unsafe {
+            let pattern = &mut *pattern;
+            pattern.bold = bold;
+        }
+    })
 }
 
 /// Set pattern monospace
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_monospace(pattern: *mut FcPatternC, monospace: PatternMatch) {
-    if pattern.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
-        pattern.monospace = monospace;
-    }
+        unsafe {
+            let pattern = &mut *pattern;
+            pattern.monospace = monospace;
+        }
+    })
 }
 
 /// Set pattern weight
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_weight(pattern: *mut FcPatternC, weight: FcWeight) {
-    if pattern.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
-        pattern.weight = weight;
-    }
+        unsafe {
+            let pattern = &mut *pattern;
+            pattern.weight = weight;
+        }
+    })
 }
 
 /// Set pattern stretch
 #[no_mangle]
 pub extern "C" fn fc_pattern_set_stretch(pattern: *mut FcPatternC, stretch: FcStretch) {
-    if pattern.is_null() {
-        return;
-    }
+    guard((), || {
+        if pattern.is_null() {
+            return;
+        }
 
-    unsafe {
-        let pattern = &mut *pattern;
-        pattern.stretch = stretch;
-    }
+        unsafe {
+            let pattern = &mut *pattern;
+            pattern.stretch = stretch;
+        }
+    })
 }
 
 /// Add unicode range to pattern
@@ -679,148 +716,162 @@ pub extern "C" fn fc_pattern_add_unicode_range(
     start: c_uint,
     end: c_uint,
 ) {
-    if pattern.is_null() {
-        return;
-    }
-
-    unsafe {
-        let pattern = &mut *pattern;
-
-        let new_range = UnicodeRange { start, end };
-
-        // Create a new array with additional capacity
-        let mut new_ranges = Vec::with_capacity(pattern.unicode_ranges_count + 1);
-
-        // Copy existing ranges if any
-        if !pattern.unicode_ranges.is_null() && pattern.unicode_ranges_count > 0 {
-            new_ranges.extend_from_slice(slice::from_raw_parts(
-                pattern.unicode_ranges,
-                pattern.unicode_ranges_count,
-            ));
-
-            // Free the old array
-            free_raw_vec(pattern.unicode_ranges, pattern.unicode_ranges_count);
+    guard((), || {
+        if pattern.is_null() {
+            return;
         }
 
-        // Add the new range
-        new_ranges.push(new_range);
+        unsafe {
+            let pattern = &mut *pattern;
 
-        // Update the pattern
-        let (ptr, len) = vec_into_raw_parts(new_ranges);
-        pattern.unicode_ranges = ptr;
-        pattern.unicode_ranges_count = len;
-    }
+            let new_range = UnicodeRange { start, end };
+
+            // Create a new array with additional capacity
+            let mut new_ranges = Vec::with_capacity(pattern.unicode_ranges_count + 1);
+
+            // Copy existing ranges if any
+            if !pattern.unicode_ranges.is_null() && pattern.unicode_ranges_count > 0 {
+                new_ranges.extend_from_slice(slice::from_raw_parts(
+                    pattern.unicode_ranges,
+                    pattern.unicode_ranges_count,
+                ));
+
+                // Free the old array
+                free_raw_vec(pattern.unicode_ranges, pattern.unicode_ranges_count);
+            }
+
+            // Add the new range
+            new_ranges.push(new_range);
+
+            // Update the pattern
+            let (ptr, len) = vec_into_raw_parts(new_ranges);
+            pattern.unicode_ranges = ptr;
+            pattern.unicode_ranges_count = len;
+        }
+    })
 }
 
 /// Free a font match
 #[no_mangle]
 pub extern "C" fn fc_font_match_free(match_obj: *mut FcFontMatchC) {
-    if !match_obj.is_null() {
-        unsafe {
-            free_font_match_c(match_obj);
+    guard((), || {
+        if !match_obj.is_null() {
+            unsafe {
+                free_font_match_c(match_obj);
+            }
         }
-    }
+    })
 }
 
 /// Free an array of font matches
 #[no_mangle]
 pub extern "C" fn fc_font_matches_free(matches: *mut *mut FcFontMatchC, count: usize) {
-    if matches.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let matches_slice = slice::from_raw_parts_mut(matches, count);
-
-        for match_ptr in matches_slice {
-            if !match_ptr.is_null() {
-                free_font_match_c(*match_ptr);
-            }
+    guard((), || {
+        if matches.is_null() || count == 0 {
+            return;
         }
 
-        free_raw_vec(matches, count);
-    }
+        unsafe {
+            let matches_slice = slice::from_raw_parts_mut(matches, count);
+
+            for match_ptr in matches_slice {
+                if !match_ptr.is_null() {
+                    free_font_match_c(*match_ptr);
+                }
+            }
+
+            free_raw_vec(matches, count);
+        }
+    })
 }
 
 /// Free font path
 #[no_mangle]
 pub extern "C" fn fc_font_path_free(path: *mut FcFontPathC) {
-    if path.is_null() {
-        return;
-    }
+    guard((), || {
+        if path.is_null() {
+            return;
+        }
 
-    unsafe {
-        let path = &mut *path;
-        free_c_string(path.path);
-        let _ = Box::from_raw(path);
-    }
+        unsafe {
+            let path = &mut *path;
+            free_c_string(path.path);
+            let _ = Box::from_raw(path);
+        }
+    })
 }
 
 /// Free an in-memory font
 #[no_mangle]
 pub extern "C" fn fc_font_free(font: *mut FcFontC) {
-    if font.is_null() {
-        return;
-    }
+    guard((), || {
+        if font.is_null() {
+            return;
+        }
 
-    unsafe {
-        let font = &mut *font;
+        unsafe {
+            let font = &mut *font;
 
-        free_raw_vec(font.bytes, font.bytes_len);
+            free_raw_vec(font.bytes, font.bytes_len);
 
-        free_c_string(font.id);
-        let _ = Box::from_raw(font);
-    }
+            free_c_string(font.id);
+            let _ = Box::from_raw(font);
+        }
+    })
 }
 
 /// Get trace reason type
 #[no_mangle]
 pub extern "C" fn fc_trace_get_reason_type(trace: *const FcTraceMsgC) -> FcReasonTypeC {
-    if trace.is_null() {
-        return FcReasonTypeC::Success;
-    }
-
-    unsafe {
-        let trace = &*trace;
-
-        if trace.reason.is_null() {
+    guard(FcReasonTypeC::NameMismatch, || {
+        if trace.is_null() {
             return FcReasonTypeC::Success;
         }
 
-        let reason = &*(trace.reason as *const MatchReason);
+        unsafe {
+            let trace = &*trace;
 
-        match reason {
-            MatchReason::NameMismatch { .. } => FcReasonTypeC::NameMismatch,
-            MatchReason::FamilyMismatch { .. } => FcReasonTypeC::FamilyMismatch,
-            MatchReason::StyleMismatch { .. } => FcReasonTypeC::StyleMismatch,
-            MatchReason::WeightMismatch { .. } => FcReasonTypeC::WeightMismatch,
-            MatchReason::StretchMismatch { .. } => FcReasonTypeC::StretchMismatch,
-            MatchReason::UnicodeRangeMismatch { .. } => FcReasonTypeC::UnicodeRangeMismatch,
-            MatchReason::Success => FcReasonTypeC::Success,
+            if trace.reason.is_null() {
+                return FcReasonTypeC::Success;
+            }
+
+            let reason = &*(trace.reason as *const MatchReason);
+
+            match reason {
+                MatchReason::NameMismatch { .. } => FcReasonTypeC::NameMismatch,
+                MatchReason::FamilyMismatch { .. } => FcReasonTypeC::FamilyMismatch,
+                MatchReason::StyleMismatch { .. } => FcReasonTypeC::StyleMismatch,
+                MatchReason::WeightMismatch { .. } => FcReasonTypeC::WeightMismatch,
+                MatchReason::StretchMismatch { .. } => FcReasonTypeC::StretchMismatch,
+                MatchReason::UnicodeRangeMismatch { .. } => FcReasonTypeC::UnicodeRangeMismatch,
+                MatchReason::Success => FcReasonTypeC::Success,
+            }
         }
-    }
+    })
 }
 
 /// Free trace messages
 #[no_mangle]
 pub extern "C" fn fc_trace_free(trace: *mut FcTraceMsgC, count: usize) {
-    if trace.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let trace_slice = slice::from_raw_parts_mut(trace, count);
-
-        for msg in trace_slice {
-            free_c_string(msg.path);
-
-            if !msg.reason.is_null() {
-                let _ = Box::from_raw(msg.reason as *mut MatchReason);
-            }
+    guard((), || {
+        if trace.is_null() || count == 0 {
+            return;
         }
 
-        free_raw_vec(trace, count);
-    }
+        unsafe {
+            let trace_slice = slice::from_raw_parts_mut(trace, count);
+
+            for msg in trace_slice {
+                free_c_string(msg.path);
+
+                if !msg.reason.is_null() {
+                    let _ = Box::from_raw(msg.reason as *mut MatchReason);
+                }
+            }
+
+            free_raw_vec(trace, count);
+        }
+    })
 }
 
 /// Convert font ID to string
@@ -830,36 +881,38 @@ pub extern "C" fn fc_font_id_to_string(
     buffer: *mut c_char,
     buffer_size: usize,
 ) -> bool {
-    if id.is_null() || buffer.is_null() || buffer_size == 0 {
-        return false;
-    }
-
-    unsafe {
-        let id_rust = FontId::from_fontid_c(&*id);
-        let mut id_str = String::new();
-
-        if write!(id_str, "{}", id_rust).is_err() {
+    guard(false, || {
+        if id.is_null() || buffer.is_null() || buffer_size == 0 {
             return false;
         }
 
-        if id_str.len() >= buffer_size {
-            return false;
-        }
+        unsafe {
+            let id_rust = FontId::from_fontid_c(&*id);
+            let mut id_str = String::new();
 
-        let c_str = CString::new(id_str).unwrap_or_default();
-        let src = c_str.as_bytes_with_nul();
-        let dest = slice::from_raw_parts_mut(buffer as *mut u8, buffer_size);
-
-        for (i, &byte) in src.iter().enumerate() {
-            if i < buffer_size {
-                dest[i] = byte;
-            } else {
+            if write!(id_str, "{}", id_rust).is_err() {
                 return false;
             }
-        }
 
-        true
-    }
+            if id_str.len() >= buffer_size {
+                return false;
+            }
+
+            let c_str = CString::new(id_str).unwrap_or_default();
+            let src = c_str.as_bytes_with_nul();
+            let dest = slice::from_raw_parts_mut(buffer as *mut u8, buffer_size);
+
+            for (i, &byte) in src.iter().enumerate() {
+                if i < buffer_size {
+                    dest[i] = byte;
+                } else {
+                    return false;
+                }
+            }
+
+            true
+        }
+    })
 }
 
 /// Font info for listing fonts
@@ -873,34 +926,38 @@ pub struct FcFontInfoC {
 /// Free array of font info
 #[no_mangle]
 pub extern "C" fn fc_font_info_free(info: *mut FcFontInfoC, count: usize) {
-    if info.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let info_slice = slice::from_raw_parts_mut(info, count);
-
-        for item in info_slice {
-            free_c_string(item.name);
-            free_c_string(item.family);
+    guard((), || {
+        if info.is_null() || count == 0 {
+            return;
         }
 
-        free_raw_vec(info, count);
-    }
+        unsafe {
+            let info_slice = slice::from_raw_parts_mut(info, count);
+
+            for item in info_slice {
+                free_c_string(item.name);
+                free_c_string(item.family);
+            }
+
+            free_raw_vec(info, count);
+        }
+    })
 }
 
 /// Free font metadata
 #[no_mangle]
 pub extern "C" fn fc_font_metadata_free(metadata: *mut FcFontMetadataC) {
-    if metadata.is_null() {
-        return;
-    }
+    guard((), || {
+        if metadata.is_null() {
+            return;
+        }
 
-    unsafe {
-        let metadata = &mut *metadata;
-        free_metadata_c(metadata);
-        let _ = Box::from_raw(metadata);
-    }
+        unsafe {
+            let metadata = &mut *metadata;
+            free_metadata_c(metadata);
+            let _ = Box::from_raw(metadata);
+        }
+    })
 }
 
 /// Get font path by ID
@@ -909,39 +966,41 @@ pub extern "C" fn fc_cache_get_font_path(
     cache: *const FcFontCache,
     id: *const FcFontIdC,
 ) -> *mut FcFontPathC {
-    if cache.is_null() || id.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let cache = &*cache;
-        let id_rust = FontId::from_fontid_c(&*id);
-
-        match cache.get_font_by_id(&id_rust) {
-            Some(OwnedFontSource::Disk(path)) => {
-                let path_c = FcFontPathC {
-                    path: CString::new(path.path.clone())
-                        .unwrap_or_default()
-                        .into_raw(),
-                    font_index: path.font_index,
-                };
-
-                Box::into_raw(Box::new(path_c))
-            }
-            Some(OwnedFontSource::Memory(font)) => {
-                // For memory fonts, return a special path
-                let path_c = FcFontPathC {
-                    path: CString::new(format!("memory:{}", font.id))
-                        .unwrap_or_default()
-                        .into_raw(),
-                    font_index: font.font_index,
-                };
-
-                Box::into_raw(Box::new(path_c))
-            }
-            None => ptr::null_mut(),
+    guard(ptr::null_mut(), || {
+        if cache.is_null() || id.is_null() {
+            return ptr::null_mut();
         }
-    }
+
+        unsafe {
+            let cache = &*cache;
+            let id_rust = FontId::from_fontid_c(&*id);
+
+            match cache.get_font_by_id(&id_rust) {
+                Some(OwnedFontSource::Disk(path)) => {
+                    let path_c = FcFontPathC {
+                        path: CString::new(path.path.clone())
+                            .unwrap_or_default()
+                            .into_raw(),
+                        font_index: path.font_index,
+                    };
+
+                    Box::into_raw(Box::new(path_c))
+                }
+                Some(OwnedFontSource::Memory(font)) => {
+                    // For memory fonts, return a special path
+                    let path_c = FcFontPathC {
+                        path: CString::new(format!("memory:{}", font.id))
+                            .unwrap_or_default()
+                            .into_raw(),
+                        font_index: font.font_index,
+                    };
+
+                    Box::into_raw(Box::new(path_c))
+                }
+                None => ptr::null_mut(),
+            }
+        }
+    })
 }
 
 /// Query a font from the cache
@@ -952,30 +1011,32 @@ pub extern "C" fn fc_cache_query(
     trace: *mut *mut FcTraceMsgC,
     trace_count: *mut usize,
 ) -> *mut FcFontMatchC {
-    if cache.is_null() || pattern.is_null() || trace.is_null() || trace_count.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let cache = &*cache;
-        let pattern_rust = c_to_pattern(pattern);
-
-        let mut trace_msgs = Vec::new();
-        let result = cache.query(&pattern_rust, &mut trace_msgs);
-
-        // Convert trace messages
-        let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
-        *trace = trace_c;
-        *trace_count = count;
-
-        match result {
-            Some(match_obj) => {
-                let match_c = font_match_to_c(cache, &match_obj);
-                Box::into_raw(Box::new(match_c))
-            }
-            None => ptr::null_mut(),
+    guard(ptr::null_mut(), || {
+        if cache.is_null() || pattern.is_null() || trace.is_null() || trace_count.is_null() {
+            return ptr::null_mut();
         }
-    }
+
+        unsafe {
+            let cache = &*cache;
+            let pattern_rust = c_to_pattern(pattern);
+
+            let mut trace_msgs = Vec::new();
+            let result = cache.query(&pattern_rust, &mut trace_msgs);
+
+            // Convert trace messages
+            let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
+            *trace = trace_c;
+            *trace_count = count;
+
+            match result {
+                Some(match_obj) => {
+                    let match_c = font_match_to_c(cache, &match_obj);
+                    Box::into_raw(Box::new(match_c))
+                }
+                None => ptr::null_mut(),
+            }
+        }
+    })
 }
 
 /// Get metadata by font ID
@@ -984,23 +1045,25 @@ pub extern "C" fn fc_cache_get_font_metadata(
     cache: *const FcFontCache,
     id: *const FcFontIdC,
 ) -> *mut FcFontMetadataC {
-    if cache.is_null() || id.is_null() {
-        return ptr::null_mut();
-    }
+    guard(ptr::null_mut(), || {
+        if cache.is_null() || id.is_null() {
+            return ptr::null_mut();
+        }
 
-    unsafe {
-        let cache = &*cache;
-        let id_rust = FontId::from_fontid_c(&*id);
+        unsafe {
+            let cache = &*cache;
+            let id_rust = FontId::from_fontid_c(&*id);
 
-        // Get metadata directly from ID
-        let pattern = match cache.get_metadata_by_id(&id_rust) {
-            Some(pattern) => pattern,
-            None => return ptr::null_mut(),
-        };
+            // Get metadata directly from ID
+            let pattern = match cache.get_metadata_by_id(&id_rust) {
+                Some(pattern) => pattern,
+                None => return ptr::null_mut(),
+            };
 
-        // Create metadata from pattern
-        Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
-    }
+            // Create metadata from pattern
+            Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
+        }
+    })
 }
 
 /// Get per-font render config by font ID
@@ -1050,25 +1113,27 @@ pub extern "C" fn fc_font_new(
     font_index: usize,
     id: *const c_char,
 ) -> *mut FcFontC {
-    if bytes.is_null() || bytes_len == 0 || id.is_null() {
-        return ptr::null_mut();
-    }
+    guard(ptr::null_mut(), || {
+        if bytes.is_null() || bytes_len == 0 || id.is_null() {
+            return ptr::null_mut();
+        }
 
-    unsafe {
-        let id_rust = CStr::from_ptr(id).to_string_lossy().into_owned();
-        let bytes_vec = slice::from_raw_parts(bytes, bytes_len).to_vec();
+        unsafe {
+            let id_rust = CStr::from_ptr(id).to_string_lossy().into_owned();
+            let bytes_vec = slice::from_raw_parts(bytes, bytes_len).to_vec();
 
-        let bytes_ptr = Box::into_raw(bytes_vec.into_boxed_slice()) as *mut u8;
+            let bytes_ptr = Box::into_raw(bytes_vec.into_boxed_slice()) as *mut u8;
 
-        let font = FcFontC {
-            bytes: bytes_ptr,
-            bytes_len,
-            font_index,
-            id: CString::new(id_rust).unwrap_or_default().into_raw(),
-        };
+            let font = FcFontC {
+                bytes: bytes_ptr,
+                bytes_len,
+                font_index,
+                id: CString::new(id_rust).unwrap_or_default().into_raw(),
+            };
 
-        Box::into_raw(Box::new(font))
-    }
+            Box::into_raw(Box::new(font))
+        }
+    })
 }
 
 /// Get all available fonts in the cache
@@ -1077,37 +1142,39 @@ pub extern "C" fn fc_cache_list_fonts(
     cache: *const FcFontCache,
     count: *mut usize,
 ) -> *mut FcFontInfoC {
-    if cache.is_null() || count.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let cache = &*cache;
-        let font_list = cache.list();
-
-        if font_list.is_empty() {
-            *count = 0;
+    guard(ptr::null_mut(), || {
+        if cache.is_null() || count.is_null() {
             return ptr::null_mut();
         }
 
-        let mut font_info = Vec::with_capacity(font_list.len());
+        unsafe {
+            let cache = &*cache;
+            let font_list = cache.list();
 
-        for (pattern, id) in font_list {
-            let name = option_string_to_c_char(pattern.name.as_ref());
-            let family = option_string_to_c_char(pattern.family.as_ref());
+            if font_list.is_empty() {
+                *count = 0;
+                return ptr::null_mut();
+            }
 
-            font_info.push(FcFontInfoC {
-                id: FcFontIdC::from_fontid(&id),
-                name,
-                family,
-            });
+            let mut font_info = Vec::with_capacity(font_list.len());
+
+            for (pattern, id) in font_list {
+                let name = option_string_to_c_char(pattern.name.as_ref());
+                let family = option_string_to_c_char(pattern.family.as_ref());
+
+                font_info.push(FcFontInfoC {
+                    id: FcFontIdC::from_fontid(&id),
+                    name,
+                    family,
+                });
+            }
+
+            let (ptr, len) = vec_into_raw_parts(font_info);
+            *count = len;
+
+            ptr
         }
-
-        let (ptr, len) = vec_into_raw_parts(font_info);
-        *count = len;
-
-        ptr
-    }
+    })
 }
 
 /// Add in-memory fonts to the cache
@@ -1118,40 +1185,42 @@ pub extern "C" fn fc_cache_add_memory_fonts(
     fonts: *const FcFontC,
     count: usize,
 ) {
-    if cache.is_null() || patterns.is_null() || fonts.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let cache = &mut *cache;
-        let patterns_slice = slice::from_raw_parts(patterns, count);
-        let fonts_slice = slice::from_raw_parts(fonts, count);
-
-        let mut memory_fonts = Vec::with_capacity(count);
-
-        for i in 0..count {
-            let pattern = c_to_pattern(&patterns_slice[i]);
-            let font = &fonts_slice[i];
-
-            let font_id = c_char_to_option_string(font.id).unwrap_or_default();
-            let bytes = if font.bytes.is_null() || font.bytes_len == 0 {
-                Vec::new()
-            } else {
-                slice::from_raw_parts(font.bytes, font.bytes_len).to_vec()
-            };
-
-            memory_fonts.push((
-                pattern,
-                FcFont {
-                    bytes,
-                    font_index: font.font_index,
-                    id: font_id,
-                },
-            ));
+    guard((), || {
+        if cache.is_null() || patterns.is_null() || fonts.is_null() || count == 0 {
+            return;
         }
 
-        cache.with_memory_fonts(memory_fonts);
-    }
+        unsafe {
+            let cache = &mut *cache;
+            let patterns_slice = slice::from_raw_parts(patterns, count);
+            let fonts_slice = slice::from_raw_parts(fonts, count);
+
+            let mut memory_fonts = Vec::with_capacity(count);
+
+            for i in 0..count {
+                let pattern = c_to_pattern(&patterns_slice[i]);
+                let font = &fonts_slice[i];
+
+                let font_id = c_char_to_option_string(font.id).unwrap_or_default();
+                let bytes = if font.bytes.is_null() || font.bytes_len == 0 {
+                    Vec::new()
+                } else {
+                    slice::from_raw_parts(font.bytes, font.bytes_len).to_vec()
+                };
+
+                memory_fonts.push((
+                    pattern,
+                    FcFont {
+                        bytes,
+                        font_index: font.font_index,
+                        id: font_id,
+                    },
+                ));
+            }
+
+            cache.with_memory_fonts(memory_fonts);
+        }
+    })
 }
 
 /// C-compatible representation of a resolved font run
@@ -1211,36 +1280,40 @@ pub extern "C" fn fc_resolve_font_chain(
     trace: *mut *mut FcTraceMsgC,
     trace_count: *mut usize,
 ) -> *mut FcFontFallbackChainC {
-    if cache.is_null() || families.is_null() || trace.is_null() || trace_count.is_null() {
-        return ptr::null_mut();
-    }
+    guard(ptr::null_mut(), || {
+        if cache.is_null() || families.is_null() || trace.is_null() || trace_count.is_null() {
+            return ptr::null_mut();
+        }
 
-    unsafe {
-        let cache = &*cache;
+        unsafe {
+            let cache = &*cache;
         
-        // Convert C string array to Vec<String>
-        let families_rust = c_string_array_to_vec(families, families_count);
+            // Convert C string array to Vec<String>
+            let families_rust = c_string_array_to_vec(families, families_count);
 
-        let mut trace_msgs = Vec::new();
-        let chain = cache.resolve_font_chain(&families_rust, weight, italic, oblique, &mut trace_msgs);
+            let mut trace_msgs = Vec::new();
+            let chain = cache.resolve_font_chain(&families_rust, weight, italic, oblique, &mut trace_msgs);
 
-        // Convert trace messages
-        let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
-        *trace = trace_c;
-        *trace_count = count;
+            // Convert trace messages
+            let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
+            *trace = trace_c;
+            *trace_count = count;
 
-        Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
-    }
+            Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
+        }
+    })
 }
 
 /// Free a font fallback chain
 #[no_mangle]
 pub extern "C" fn fc_font_chain_free(chain: *mut FcFontFallbackChainC) {
-    if !chain.is_null() {
-        unsafe {
-            let _ = Box::from_raw(chain);
+    guard((), || {
+        if !chain.is_null() {
+            unsafe {
+                let _ = Box::from_raw(chain);
+            }
         }
-    }
+    })
 }
 
 /// Query which fonts should be used for a text string
@@ -1260,66 +1333,70 @@ pub extern "C" fn fc_chain_query_for_text(
     text: *const c_char,
     runs_count: *mut usize,
 ) -> *mut FcResolvedFontRunC {
-    if chain.is_null() || cache.is_null() || text.is_null() || runs_count.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let chain = &*chain;
-        let cache = &*cache;
-        let text_rust = CStr::from_ptr(text).to_string_lossy().into_owned();
-
-        let runs = chain.inner.query_for_text(cache, &text_rust);
-
-        if runs.is_empty() {
-            *runs_count = 0;
+    guard(ptr::null_mut(), || {
+        if chain.is_null() || cache.is_null() || text.is_null() || runs_count.is_null() {
             return ptr::null_mut();
         }
 
-        let mut runs_c = Vec::with_capacity(runs.len());
-        for run in &runs {
-            let text_c = CString::new(run.text.as_str()).unwrap_or_default().into_raw();
-            let css_source_c = CString::new(run.css_source.as_str()).unwrap_or_default().into_raw();
+        unsafe {
+            let chain = &*chain;
+            let cache = &*cache;
+            let text_rust = CStr::from_ptr(text).to_string_lossy().into_owned();
+
+            let runs = chain.inner.query_for_text(cache, &text_rust);
+
+            if runs.is_empty() {
+                *runs_count = 0;
+                return ptr::null_mut();
+            }
+
+            let mut runs_c = Vec::with_capacity(runs.len());
+            for run in &runs {
+                let text_c = CString::new(run.text.as_str()).unwrap_or_default().into_raw();
+                let css_source_c = CString::new(run.css_source.as_str()).unwrap_or_default().into_raw();
             
-            let (font_id, has_font) = match &run.font_id {
-                Some(id) => (FcFontIdC::from_fontid(id), true),
-                None => (FcFontIdC { high: 0, low: 0 }, false),
-            };
+                let (font_id, has_font) = match &run.font_id {
+                    Some(id) => (FcFontIdC::from_fontid(id), true),
+                    None => (FcFontIdC { high: 0, low: 0 }, false),
+                };
 
-            runs_c.push(FcResolvedFontRunC {
-                text: text_c,
-                start_byte: run.start_byte,
-                end_byte: run.end_byte,
-                font_id,
-                has_font,
-                css_source: css_source_c,
-            });
+                runs_c.push(FcResolvedFontRunC {
+                    text: text_c,
+                    start_byte: run.start_byte,
+                    end_byte: run.end_byte,
+                    font_id,
+                    has_font,
+                    css_source: css_source_c,
+                });
+            }
+
+            let (ptr, len) = vec_into_raw_parts(runs_c);
+            *runs_count = len;
+
+            ptr
         }
-
-        let (ptr, len) = vec_into_raw_parts(runs_c);
-        *runs_count = len;
-
-        ptr
-    }
+    })
 }
 
 /// Free an array of resolved font runs
 #[no_mangle]
 pub extern "C" fn fc_resolved_runs_free(runs: *mut FcResolvedFontRunC, count: usize) {
-    if runs.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let runs_slice = slice::from_raw_parts_mut(runs, count);
-
-        for run in runs_slice {
-            free_c_string(run.text);
-            free_c_string(run.css_source);
+    guard((), || {
+        if runs.is_null() || count == 0 {
+            return;
         }
 
-        free_raw_vec(runs, count);
-    }
+        unsafe {
+            let runs_slice = slice::from_raw_parts_mut(runs, count);
+
+            for run in runs_slice {
+                free_c_string(run.text);
+                free_c_string(run.css_source);
+            }
+
+            free_raw_vec(runs, count);
+        }
+    })
 }
 
 /// Get the original CSS font stack from a font chain
@@ -1328,46 +1405,50 @@ pub extern "C" fn fc_chain_get_original_stack(
     chain: *const FcFontFallbackChainC,
     stack_count: *mut usize,
 ) -> *mut *mut c_char {
-    if chain.is_null() || stack_count.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let chain = &*chain;
-        let stack = &chain.inner.original_stack;
-
-        if stack.is_empty() {
-            *stack_count = 0;
+    guard(ptr::null_mut(), || {
+        if chain.is_null() || stack_count.is_null() {
             return ptr::null_mut();
         }
 
-        let mut stack_c = Vec::with_capacity(stack.len());
-        for name in stack {
-            let name_c = CString::new(name.as_str()).unwrap_or_default().into_raw();
-            stack_c.push(name_c);
+        unsafe {
+            let chain = &*chain;
+            let stack = &chain.inner.original_stack;
+
+            if stack.is_empty() {
+                *stack_count = 0;
+                return ptr::null_mut();
+            }
+
+            let mut stack_c = Vec::with_capacity(stack.len());
+            for name in stack {
+                let name_c = CString::new(name.as_str()).unwrap_or_default().into_raw();
+                stack_c.push(name_c);
+            }
+
+            let (ptr, len) = vec_into_raw_parts(stack_c);
+            *stack_count = len;
+
+            ptr
         }
-
-        let (ptr, len) = vec_into_raw_parts(stack_c);
-        *stack_count = len;
-
-        ptr
-    }
+    })
 }
 
 /// Free a string array (from fc_chain_get_original_stack)
 #[no_mangle]
 pub extern "C" fn fc_string_array_free(arr: *mut *mut c_char, count: usize) {
-    if arr.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let arr_slice = slice::from_raw_parts_mut(arr, count);
-        for s in arr_slice {
-            free_c_string(*s);
+    guard((), || {
+        if arr.is_null() || count == 0 {
+            return;
         }
-        free_raw_vec(arr, count);
-    }
+
+        unsafe {
+            let arr_slice = slice::from_raw_parts_mut(arr, count);
+            for s in arr_slice {
+                free_c_string(*s);
+            }
+            free_raw_vec(arr, count);
+        }
+    })
 }
 
 /// Get CSS fallback groups from a font chain
@@ -1376,86 +1457,90 @@ pub extern "C" fn fc_chain_get_css_fallbacks(
     chain: *const FcFontFallbackChainC,
     groups_count: *mut usize,
 ) -> *mut FcCssFallbackGroupC {
-    if chain.is_null() || groups_count.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let chain = &*chain;
-        let fallbacks = &chain.inner.css_fallbacks;
-
-        if fallbacks.is_empty() {
-            *groups_count = 0;
+    guard(ptr::null_mut(), || {
+        if chain.is_null() || groups_count.is_null() {
             return ptr::null_mut();
         }
 
-        let mut groups_c = Vec::with_capacity(fallbacks.len());
-        for group in fallbacks {
-            let css_name = CString::new(group.css_name.as_str()).unwrap_or_default().into_raw();
+        unsafe {
+            let chain = &*chain;
+            let fallbacks = &chain.inner.css_fallbacks;
+
+            if fallbacks.is_empty() {
+                *groups_count = 0;
+                return ptr::null_mut();
+            }
+
+            let mut groups_c = Vec::with_capacity(fallbacks.len());
+            for group in fallbacks {
+                let css_name = CString::new(group.css_name.as_str()).unwrap_or_default().into_raw();
             
-            let fonts_count = group.fonts.len();
-            let fonts = if fonts_count > 0 {
-                let mut fonts_c = Vec::with_capacity(fonts_count);
-                for font in &group.fonts {
-                    let ranges_count = font.unicode_ranges.len();
-                    let ranges = if ranges_count > 0 {
-                        let ranges_vec: Vec<UnicodeRange> = font.unicode_ranges.clone();
-                        let (ptr, _) = vec_into_raw_parts(ranges_vec);
-                        ptr
-                    } else {
-                        ptr::null_mut()
-                    };
+                let fonts_count = group.fonts.len();
+                let fonts = if fonts_count > 0 {
+                    let mut fonts_c = Vec::with_capacity(fonts_count);
+                    for font in &group.fonts {
+                        let ranges_count = font.unicode_ranges.len();
+                        let ranges = if ranges_count > 0 {
+                            let ranges_vec: Vec<UnicodeRange> = font.unicode_ranges.clone();
+                            let (ptr, _) = vec_into_raw_parts(ranges_vec);
+                            ptr
+                        } else {
+                            ptr::null_mut()
+                        };
 
-                    fonts_c.push(FcFontMatchNoFallbackC {
-                        id: FcFontIdC::from_fontid(&font.id),
-                        unicode_ranges: ranges,
-                        unicode_ranges_count: ranges_count,
-                    });
-                }
-                let (ptr, _) = vec_into_raw_parts(fonts_c);
-                ptr
-            } else {
-                ptr::null_mut()
-            };
+                        fonts_c.push(FcFontMatchNoFallbackC {
+                            id: FcFontIdC::from_fontid(&font.id),
+                            unicode_ranges: ranges,
+                            unicode_ranges_count: ranges_count,
+                        });
+                    }
+                    let (ptr, _) = vec_into_raw_parts(fonts_c);
+                    ptr
+                } else {
+                    ptr::null_mut()
+                };
 
-            groups_c.push(FcCssFallbackGroupC {
-                css_name,
-                fonts,
-                fonts_count,
-            });
+                groups_c.push(FcCssFallbackGroupC {
+                    css_name,
+                    fonts,
+                    fonts_count,
+                });
+            }
+
+            let (ptr, len) = vec_into_raw_parts(groups_c);
+            *groups_count = len;
+
+            ptr
         }
-
-        let (ptr, len) = vec_into_raw_parts(groups_c);
-        *groups_count = len;
-
-        ptr
-    }
+    })
 }
 
 /// Free CSS fallback groups
 #[no_mangle]
 pub extern "C" fn fc_css_fallback_groups_free(groups: *mut FcCssFallbackGroupC, count: usize) {
-    if groups.is_null() || count == 0 {
-        return;
-    }
-
-    unsafe {
-        let groups_slice = slice::from_raw_parts_mut(groups, count);
-
-        for group in groups_slice {
-            free_c_string(group.css_name);
-
-            if !group.fonts.is_null() && group.fonts_count > 0 {
-                let fonts_slice = slice::from_raw_parts_mut(group.fonts, group.fonts_count);
-                for font in fonts_slice {
-                    free_raw_vec(font.unicode_ranges, font.unicode_ranges_count);
-                }
-                free_raw_vec(group.fonts, group.fonts_count);
-            }
+    guard((), || {
+        if groups.is_null() || count == 0 {
+            return;
         }
 
-        free_raw_vec(groups, count);
-    }
+        unsafe {
+            let groups_slice = slice::from_raw_parts_mut(groups, count);
+
+            for group in groups_slice {
+                free_c_string(group.css_name);
+
+                if !group.fonts.is_null() && group.fonts_count > 0 {
+                    let fonts_slice = slice::from_raw_parts_mut(group.fonts, group.fonts_count);
+                    for font in fonts_slice {
+                        free_raw_vec(font.unicode_ranges, font.unicode_ranges_count);
+                    }
+                    free_raw_vec(group.fonts, group.fonts_count);
+                }
+            }
+
+            free_raw_vec(groups, count);
+        }
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1466,8 +1551,10 @@ pub extern "C" fn fc_css_fallback_groups_free(groups: *mut FcCssFallbackGroupC, 
 #[cfg(feature = "async-registry")]
 #[no_mangle]
 pub extern "C" fn fc_registry_new() -> *mut Arc<FcFontRegistry> {
-    let registry = FcFontRegistry::new();
-    Box::into_raw(Box::new(registry))
+    guard(ptr::null_mut(), || {
+        let registry = FcFontRegistry::new();
+        Box::into_raw(Box::new(registry))
+    })
 }
 
 /// Spawn the Scout thread and Builder pool. Returns immediately.
@@ -1476,13 +1563,15 @@ pub extern "C" fn fc_registry_new() -> *mut Arc<FcFontRegistry> {
 #[cfg(feature = "async-registry")]
 #[no_mangle]
 pub extern "C" fn fc_registry_spawn(registry: *const Arc<FcFontRegistry>) {
-    if registry.is_null() {
-        return;
-    }
-    unsafe {
-        let registry = &*registry;
-        registry.spawn_scout_and_builders();
-    }
+    guard((), || {
+        if registry.is_null() {
+            return;
+        }
+        unsafe {
+            let registry = &*registry;
+            registry.spawn_scout_and_builders();
+        }
+    })
 }
 
 /// Block until the requested font families are loaded, then return
@@ -1503,45 +1592,47 @@ pub extern "C" fn fc_registry_request_fonts(
     num_stacks: usize,
     out_count: *mut usize,
 ) -> *mut *mut FcFontFallbackChainC {
-    if registry.is_null()
-        || family_stacks.is_null()
-        || stack_counts.is_null()
-        || out_count.is_null()
-        || num_stacks == 0
-    {
-        if !out_count.is_null() {
-            unsafe { *out_count = 0; }
-        }
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let registry = &*registry;
-        let stacks_slice = slice::from_raw_parts(family_stacks, num_stacks);
-        let counts_slice = slice::from_raw_parts(stack_counts, num_stacks);
-
-        let mut rust_stacks: Vec<Vec<String>> = Vec::with_capacity(num_stacks);
-        for i in 0..num_stacks {
-            let count = counts_slice[i];
-            let stack = c_string_array_to_vec(stacks_slice[i], count);
-            rust_stacks.push(stack);
+    guard(ptr::null_mut(), || {
+        if registry.is_null()
+            || family_stacks.is_null()
+            || stack_counts.is_null()
+            || out_count.is_null()
+            || num_stacks == 0
+        {
+            if !out_count.is_null() {
+                unsafe { *out_count = 0; }
+            }
+            return ptr::null_mut();
         }
 
-        let chains = registry.request_fonts(&rust_stacks);
+        unsafe {
+            let registry = &*registry;
+            let stacks_slice = slice::from_raw_parts(family_stacks, num_stacks);
+            let counts_slice = slice::from_raw_parts(stack_counts, num_stacks);
 
-        let mut chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
-            .into_iter()
-            .map(|chain| {
-                Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
-            })
-            .collect();
-        // shrink_to_fit guarantees capacity == len, which free_raw_vec requires
-        chain_ptrs.shrink_to_fit();
+            let mut rust_stacks: Vec<Vec<String>> = Vec::with_capacity(num_stacks);
+            for i in 0..num_stacks {
+                let count = counts_slice[i];
+                let stack = c_string_array_to_vec(stacks_slice[i], count);
+                rust_stacks.push(stack);
+            }
 
-        let (ptr, len) = vec_into_raw_parts(chain_ptrs);
-        *out_count = len;
-        ptr
-    }
+            let chains = registry.request_fonts(&rust_stacks);
+
+            let mut chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
+                .into_iter()
+                .map(|chain| {
+                    Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
+                })
+                .collect();
+            // shrink_to_fit guarantees capacity == len, which free_raw_vec requires
+            chain_ptrs.shrink_to_fit();
+
+            let (ptr, len) = vec_into_raw_parts(chain_ptrs);
+            *out_count = len;
+            ptr
+        }
+    })
 }
 
 /// Free the array returned by fc_registry_request_fonts.
@@ -1552,12 +1643,14 @@ pub extern "C" fn fc_registry_chains_free(
     chains: *mut *mut FcFontFallbackChainC,
     count: usize,
 ) {
-    if chains.is_null() || count == 0 {
-        return;
-    }
-    unsafe {
-        free_raw_vec(chains, count);
-    }
+    guard((), || {
+        if chains.is_null() || count == 0 {
+            return;
+        }
+        unsafe {
+            free_raw_vec(chains, count);
+        }
+    })
 }
 
 /// Check if the scout has finished enumerating all font directories.
@@ -1566,10 +1659,12 @@ pub extern "C" fn fc_registry_chains_free(
 pub extern "C" fn fc_registry_is_scan_complete(
     registry: *const Arc<FcFontRegistry>,
 ) -> bool {
-    if registry.is_null() {
-        return false;
-    }
-    unsafe { (*registry).is_scan_complete() }
+    guard(false, || {
+        if registry.is_null() {
+            return false;
+        }
+        unsafe { (*registry).is_scan_complete() }
+    })
 }
 
 /// Check if all queued font files have been parsed.
@@ -1578,35 +1673,41 @@ pub extern "C" fn fc_registry_is_scan_complete(
 pub extern "C" fn fc_registry_is_build_complete(
     registry: *const Arc<FcFontRegistry>,
 ) -> bool {
-    if registry.is_null() {
-        return false;
-    }
-    unsafe { (*registry).is_build_complete() }
+    guard(false, || {
+        if registry.is_null() {
+            return false;
+        }
+        unsafe { (*registry).is_build_complete() }
+    })
 }
 
 /// Signal all background threads to shut down.
 #[cfg(feature = "async-registry")]
 #[no_mangle]
 pub extern "C" fn fc_registry_shutdown(registry: *const Arc<FcFontRegistry>) {
-    if registry.is_null() {
-        return;
-    }
-    unsafe {
-        (*registry).shutdown();
-    }
+    guard((), || {
+        if registry.is_null() {
+            return;
+        }
+        unsafe {
+            (*registry).shutdown();
+        }
+    })
 }
 
 /// Free a font registry. Shuts down threads first if still running.
 #[cfg(feature = "async-registry")]
 #[no_mangle]
 pub extern "C" fn fc_registry_free(registry: *mut Arc<FcFontRegistry>) {
-    if !registry.is_null() {
-        unsafe {
-            let arc = Box::from_raw(registry);
-            arc.shutdown();
-            drop(arc);
+    guard((), || {
+        if !registry.is_null() {
+            unsafe {
+                let arc = Box::from_raw(registry);
+                arc.shutdown();
+                drop(arc);
+            }
         }
-    }
+    })
 }
 
 /// Query a single font from the registry (thread-safe).
@@ -1616,23 +1717,25 @@ pub extern "C" fn fc_registry_query(
     registry: *const Arc<FcFontRegistry>,
     pattern: *const FcPatternC,
 ) -> *mut FcFontMatchC {
-    if registry.is_null() || pattern.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let registry = &*registry;
-        let pattern_rust = c_to_pattern(pattern);
-
-        match registry.query(&pattern_rust) {
-            Some(match_obj) => {
-                let cache = registry.shared_cache();
-                let match_c = font_match_to_c(&cache, &match_obj);
-                Box::into_raw(Box::new(match_c))
-            }
-            None => ptr::null_mut(),
+    guard(ptr::null_mut(), || {
+        if registry.is_null() || pattern.is_null() {
+            return ptr::null_mut();
         }
-    }
+
+        unsafe {
+            let registry = &*registry;
+            let pattern_rust = c_to_pattern(pattern);
+
+            match registry.query(&pattern_rust) {
+                Some(match_obj) => {
+                    let cache = registry.shared_cache();
+                    let match_c = font_match_to_c(&cache, &match_obj);
+                    Box::into_raw(Box::new(match_c))
+                }
+                None => ptr::null_mut(),
+            }
+        }
+    })
 }
 
 /// List all fonts currently loaded in the registry.
@@ -1642,32 +1745,34 @@ pub extern "C" fn fc_registry_list_fonts(
     registry: *const Arc<FcFontRegistry>,
     count: *mut usize,
 ) -> *mut FcFontInfoC {
-    if registry.is_null() || count.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let registry = &*registry;
-        let font_list = registry.list();
-
-        if font_list.is_empty() {
-            *count = 0;
+    guard(ptr::null_mut(), || {
+        if registry.is_null() || count.is_null() {
             return ptr::null_mut();
         }
 
-        let mut font_info = Vec::with_capacity(font_list.len());
-        for (pattern, id) in &font_list {
-            font_info.push(FcFontInfoC {
-                id: FcFontIdC::from_fontid(id),
-                name: option_string_to_c_char(pattern.name.as_ref()),
-                family: option_string_to_c_char(pattern.family.as_ref()),
-            });
-        }
+        unsafe {
+            let registry = &*registry;
+            let font_list = registry.list();
 
-        let (ptr, len) = vec_into_raw_parts(font_info);
-        *count = len;
-        ptr
-    }
+            if font_list.is_empty() {
+                *count = 0;
+                return ptr::null_mut();
+            }
+
+            let mut font_info = Vec::with_capacity(font_list.len());
+            for (pattern, id) in &font_list {
+                font_info.push(FcFontInfoC {
+                    id: FcFontIdC::from_fontid(id),
+                    name: option_string_to_c_char(pattern.name.as_ref()),
+                    family: option_string_to_c_char(pattern.family.as_ref()),
+                });
+            }
+
+            let (ptr, len) = vec_into_raw_parts(font_info);
+            *count = len;
+            ptr
+        }
+    })
 }
 
 /// Resolve a font chain from the registry (thread-safe, uses current state).
@@ -1681,17 +1786,19 @@ pub extern "C" fn fc_registry_resolve_font_chain(
     italic: PatternMatch,
     oblique: PatternMatch,
 ) -> *mut FcFontFallbackChainC {
-    if registry.is_null() || families.is_null() {
-        return ptr::null_mut();
-    }
+    guard(ptr::null_mut(), || {
+        if registry.is_null() || families.is_null() {
+            return ptr::null_mut();
+        }
 
-    unsafe {
-        let registry = &*registry;
-        let families_rust = c_string_array_to_vec(families, families_count);
+        unsafe {
+            let registry = &*registry;
+            let families_rust = c_string_array_to_vec(families, families_count);
 
-        let chain = registry.resolve_font_chain(&families_rust, weight, italic, oblique);
-        Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
-    }
+            let chain = registry.resolve_font_chain(&families_rust, weight, italic, oblique);
+            Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
+        }
+    })
 }
 
 /// Get font path by ID from the registry.
@@ -1701,27 +1808,29 @@ pub extern "C" fn fc_registry_get_font_path(
     registry: *const Arc<FcFontRegistry>,
     id: *const FcFontIdC,
 ) -> *mut FcFontPathC {
-    if registry.is_null() || id.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let registry = &*registry;
-        let id_rust = FontId::from_fontid_c(&*id);
-
-        match registry.get_disk_font_path(&id_rust) {
-            Some(path) => {
-                let path_c = FcFontPathC {
-                    path: CString::new(path.path.clone())
-                        .unwrap_or_default()
-                        .into_raw(),
-                    font_index: path.font_index,
-                };
-                Box::into_raw(Box::new(path_c))
-            }
-            None => ptr::null_mut(),
+    guard(ptr::null_mut(), || {
+        if registry.is_null() || id.is_null() {
+            return ptr::null_mut();
         }
-    }
+
+        unsafe {
+            let registry = &*registry;
+            let id_rust = FontId::from_fontid_c(&*id);
+
+            match registry.get_disk_font_path(&id_rust) {
+                Some(path) => {
+                    let path_c = FcFontPathC {
+                        path: CString::new(path.path.clone())
+                            .unwrap_or_default()
+                            .into_raw(),
+                        font_index: path.font_index,
+                    };
+                    Box::into_raw(Box::new(path_c))
+                }
+                None => ptr::null_mut(),
+            }
+        }
+    })
 }
 
 /// Get font metadata by ID from the registry.
@@ -1731,21 +1840,23 @@ pub extern "C" fn fc_registry_get_metadata(
     registry: *const Arc<FcFontRegistry>,
     id: *const FcFontIdC,
 ) -> *mut FcFontMetadataC {
-    if registry.is_null() || id.is_null() {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        let registry = &*registry;
-        let id_rust = FontId::from_fontid_c(&*id);
-
-        match registry.get_metadata_by_id(&id_rust) {
-            Some(pattern) => {
-                Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
-            }
-            None => ptr::null_mut(),
+    guard(ptr::null_mut(), || {
+        if registry.is_null() || id.is_null() {
+            return ptr::null_mut();
         }
-    }
+
+        unsafe {
+            let registry = &*registry;
+            let id_rust = FontId::from_fontid_c(&*id);
+
+            match registry.get_metadata_by_id(&id_rust) {
+                Some(pattern) => {
+                    Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
+                }
+                None => ptr::null_mut(),
+            }
+        }
+    })
 }
 
 /// Take a snapshot of the registry as an immutable FcFontCache.
@@ -1755,12 +1866,14 @@ pub extern "C" fn fc_registry_get_metadata(
 pub extern "C" fn fc_registry_snapshot(
     registry: *const Arc<FcFontRegistry>,
 ) -> *mut FcFontCache {
-    if registry.is_null() {
-        return ptr::null_mut();
-    }
-    unsafe {
-        let registry = &*registry;
-        let cache = registry.shared_cache();
-        Box::into_raw(Box::new(cache))
-    }
+    guard(ptr::null_mut(), || {
+        if registry.is_null() {
+            return ptr::null_mut();
+        }
+        unsafe {
+            let registry = &*registry;
+            let cache = registry.shared_cache();
+            Box::into_raw(Box::new(cache))
+        }
+    })
 }
