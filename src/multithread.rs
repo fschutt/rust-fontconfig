@@ -212,10 +212,33 @@ impl FcFontRegistry {
     /// process in lazy mode.
     pub(crate) fn builder_thread(registry: std::sync::Weak<FcFontRegistry>) {
         while let Some(registry) = registry.upgrade() {
-            if registry.builder_step() == BuilderStep::Exit {
+            if !Self::enter_step(&registry) {
+                registry.leave_step();
+                return;
+            }
+            let step = registry.builder_step();
+            registry.leave_step();
+            if step == BuilderStep::Exit {
                 return;
             }
         }
+    }
+
+    /// Register this thread's handle and report whether anyone else still
+    /// holds the registry. Threads upgrade their `Weak` at different times,
+    /// so a plain upgrade would keep succeeding while another thread is
+    /// inside its step — the threads would keep each other alive forever.
+    /// Counting the threads' own handles tells them apart from an embedder's:
+    /// when every strong handle is a thread's, nobody outside holds the
+    /// registry and the thread exits. Pair with [`leave_step`](Self::leave_step).
+    pub(crate) fn enter_step(registry: &std::sync::Arc<Self>) -> bool {
+        let thread_handles = registry.thread_handles.fetch_add(1, Ordering::AcqRel) + 1;
+        std::sync::Arc::strong_count(registry) > thread_handles
+    }
+
+    /// Release the handle registered by [`enter_step`](Self::enter_step).
+    pub(crate) fn leave_step(&self) {
+        self.thread_handles.fetch_sub(1, Ordering::AcqRel);
     }
 
     /// One builder step: wait for a job (at most 100 ms) and process it.
