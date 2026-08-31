@@ -1,26 +1,9 @@
 /**
  * @file example_registry.c
- * @brief Demonstrates the async registry (background thread) API.
+ * @brief Demonstrates the async registry API.
  *
- * This mirrors how the "azul" GUI framework uses rust-fontconfig for
- * fast startup:
- *
- *   App startup (instant):
- *     1. fc_registry_new()    — create registry, returns immediately
- *     2. fc_registry_spawn()  — launch scout + builder threads, returns immediately
- *     → Window appears, user sees content
- *
- *   First layout pass (blocks only for what we need):
- *     3. fc_registry_request_fonts({"Arial","sans-serif"}, {"monospace"})
- *        — blocks until ONLY those font stacks are resolved
- *        — builder threads prioritize these over the other 800+ fonts
- *     4. fc_registry_snapshot() — take a cache snapshot for rendering
- *     → First frame renders with correct fonts
- *
- *   Subsequent frames:
- *     5. Background threads keep parsing remaining fonts
- *     6. If new CSS font-family appears, request_fonts() again
- *        — blocks only if that specific font isn't loaded yet
+ * Shows how to load fonts incrementally in background threads while
+ * unblocking the main thread for fast startup.
  *
  * Build:
  *   make
@@ -31,7 +14,7 @@
 #include <string.h>
 #include "rust_fontconfig.h"
 
-/* ── Helpers ─────────────────────────────────────────────────────────────── */
+/* Helpers */
 
 static void print_font_id(const FcFontId* id) {
     char buf[64];
@@ -73,7 +56,7 @@ static void print_render_config(const FcFontRenderConfig* rc) {
     if (rc->dpi >= 0.0)         { printf("      dpi:           %.1f\n", rc->dpi); any = 1; }
     if (rc->scale >= 0.0)       { printf("      scale:         %.2f\n", rc->scale); any = 1; }
     if (rc->minspace >= 0)      { printf("      minspace:      %s\n", rc->minspace ? "true" : "false"); any = 1; }
-    if (!any)                   { printf("      (all defaults — no per-font overrides from fonts.conf)\n"); }
+    if (!any)                   { printf("      (all defaults  -  no per-font overrides from fonts.conf)\n"); }
 }
 
 static void print_runs(FcFontChain chain, FcFontCache cache,
@@ -108,20 +91,16 @@ static void print_runs(FcFontChain chain, FcFontCache cache,
     fc_resolved_runs_free(runs, runs_count);
 }
 
-/* ── Demo 1: Azul-style fast startup ─────────────────────────────────── */
+/* Demo 1: Azul-style fast startup */
 
 static void demo_azul_pattern(void) {
-    printf("====================================================================\n");
-    printf("  Demo 1: Azul-Style Fast Startup\n");
-    printf("====================================================================\n");
-    printf("\n");
+    printf("Demo 1: Azul-style fast startup\n\n");
     printf("  This mirrors how the azul GUI framework uses rust-fontconfig.\n");
     printf("  The key insight: don't wait for all 800+ system fonts to load.\n");
-    printf("  Only block for the fonts the current frame actually needs.\n");
-    printf("\n");
+    printf("  Only block for the fonts the current frame actually needs.\n\n");
 
-    /* ── Phase 1: App startup (instant) ─────────────────────────────── */
-    printf("--- Phase 1: App Startup (instant) ---\n\n");
+    /* Phase 1: App startup (instant) */
+    printf("Phase 1: App startup (instant)\n\n");
 
     printf("  fc_registry_new() ...\n");
     FcFontRegistry registry = fc_registry_new();
@@ -131,31 +110,27 @@ static void demo_azul_pattern(void) {
     fc_registry_spawn(registry);
     printf("  Done. Scout + builder threads now running in background.\n\n");
 
-    /* Check immediate status — scout may or may not be done yet */
+    /* Check immediate status  -  scout may or may not be done yet */
     size_t count0 = 0;
     FcFontInfo* f0 = fc_registry_list_fonts(registry, &count0);
     fc_font_info_free(f0, count0);
     printf("  Status right after spawn:\n");
     printf("    Scout complete:  %s\n", fc_registry_is_scan_complete(registry) ? "yes" : "no");
     printf("    Build complete:  %s\n", fc_registry_is_build_complete(registry) ? "no" : "no");
-    printf("    Fonts loaded:    %zu  (background threads are still working)\n", count0);
-    printf("\n");
+    printf("    Fonts loaded:    %zu (background threads are still working)\n\n", count0);
     printf("  At this point, the window can appear and show a loading state,\n");
-    printf("  skeleton UI, or cached content. No blocking has occurred.\n");
-    printf("\n");
+    printf("  skeleton UI, or cached content. No blocking has occurred.\n\n");
 
-    /* ── Phase 2: First layout pass ─────────────────────────────────── */
-    printf("--- Phase 2: First Layout Pass (blocks only for needed fonts) ---\n\n");
+    /* Phase 2: First layout pass */
+    printf("Phase 2: First layout pass (blocks only for needed fonts)\n\n");
 
-    printf("  The layout engine needs these CSS font-family stacks:\n");
+    printf("  The layout engine needs these CSS font family stacks:\n");
     printf("    Stack 0: [\"Arial\", \"Helvetica\", \"sans-serif\"]\n");
     printf("    Stack 1: [\"Georgia\", \"Times New Roman\", \"serif\"]\n");
-    printf("    Stack 2: [\"Courier New\", \"monospace\"]\n");
-    printf("\n");
+    printf("    Stack 2: [\"Courier New\", \"monospace\"]\n\n");
     printf("  Calling fc_registry_request_fonts() ...\n");
-    printf("  This BLOCKS until exactly these fonts are parsed and ready.\n");
-    printf("  The builder threads re-prioritize: these stacks become CRITICAL.\n");
-    printf("\n");
+    printf("  This blocks until exactly these fonts are parsed and ready.\n");
+    printf("  The builder threads re-prioritize: these stacks become critical.\n\n");
 
     const char* stack0[] = {"Arial", "Helvetica", "sans-serif"};
     const char* stack1[] = {"Georgia", "Times New Roman", "serif"};
@@ -174,7 +149,7 @@ static void demo_azul_pattern(void) {
 
     printf("  request_fonts() returned.\n");
     printf("    Chains resolved:  %zu\n", num_chains);
-    printf("    Fonts loaded:     %zu  (NOT all system fonts — just what we need + common)\n", count1);
+    printf("    Fonts loaded:     %zu  (not all system fonts  -  just what we need + common)\n", count1);
     printf("    Scout complete:   %s\n", fc_registry_is_scan_complete(registry) ? "yes" : "no");
     printf("    Build complete:   %s\n", fc_registry_is_build_complete(registry) ? "yes" : "no");
     printf("\n");
@@ -211,8 +186,8 @@ static void demo_azul_pattern(void) {
         printf("\n");
     }
 
-    /* ── Phase 3: Render text with the resolved chains ──────────────── */
-    printf("--- Phase 3: Render Text ---\n\n");
+    /* Phase 3: Render text */
+    printf("Phase 3: Render text\n\n");
 
     printf("  Using the sans-serif chain for text layout:\n\n");
     print_runs(chains[0], cache, registry, "Hello, World!");
@@ -250,13 +225,13 @@ static void demo_azul_pattern(void) {
     fc_pattern_free(query);
     printf("\n");
 
-    /* ── Phase 4: Background loading continues ──────────────────────── */
-    printf("--- Phase 4: Background Status ---\n\n");
+    /* Phase 4: Background loading continues */
+    printf("Phase 4: Background status\n\n");
 
     size_t count2 = 0;
     FcFontInfo* f2 = fc_registry_list_fonts(registry, &count2);
     printf("  Fonts now loaded: %zu\n", count2);
-    printf("  Build complete:   %s\n", fc_registry_is_build_complete(registry) ? "yes" : "not yet — builders still parsing in background");
+    printf("  Build complete:   %s\n", fc_registry_is_build_complete(registry) ? "yes" : "not yet  -  builders still parsing in background");
     printf("\n");
     printf("  If a new CSS rule appears (e.g. @font-face or a new element with\n");
     printf("  font-family: \"Fira Code\"), we simply call request_fonts() again.\n");
@@ -273,22 +248,22 @@ static void demo_azul_pattern(void) {
     printf("\n  Registry freed (background threads shut down).\n\n");
 }
 
-/* ── Demo 2: Blocking on a second font stack mid-frame ───────────────── */
+/* Demo 2: Blocking on a second font stack mid-frame */
 
 static void demo_incremental_loading(void) {
-    printf("====================================================================\n");
-    printf("  Demo 2: Incremental Font Loading (block on demand)\n");
-    printf("====================================================================\n");
+
+    printf("\nDemo 2: Incremental font loading (block on demand)\n\n");
+
     printf("\n");
     printf("  Shows what happens when the app discovers it needs MORE fonts\n");
     printf("  after the first layout pass. request_fonts() blocks again, but\n");
-    printf("  only for the new fonts — previously loaded fonts are instant.\n");
+    printf("  only for the new fonts  -  previously loaded fonts are instant.\n");
     printf("\n");
 
     FcFontRegistry registry = fc_registry_new();
     fc_registry_spawn(registry);
 
-    /* --- First request: basic UI fonts --- */
+    /* First request */
     printf("  First request: [\"Arial\", \"sans-serif\"]\n");
 
     const char* stack0[] = {"Arial", "sans-serif"};
@@ -304,7 +279,7 @@ static void demo_incremental_loading(void) {
     printf("    Build complete: %s\n\n",
            fc_registry_is_build_complete(registry) ? "yes" : "no");
 
-    /* --- Second request: code editor opened, needs monospace --- */
+    /* Second request */
     printf("  User opens code editor. Now we also need monospace fonts.\n");
     printf("  Second request: [\"Menlo\", \"Consolas\", \"Courier New\", \"monospace\"]\n");
 
@@ -321,7 +296,7 @@ static void demo_incremental_loading(void) {
     printf("    Build complete: %s\n\n",
            fc_registry_is_build_complete(registry) ? "yes" : "no");
 
-    /* --- Third request: user pastes Japanese text --- */
+    /* Third request */
     printf("  User pastes Japanese text. We need CJK fonts.\n");
     printf("  Third request: [\"Hiragino Sans\", \"Noto Sans CJK JP\", \"sans-serif\"]\n");
 
@@ -363,22 +338,22 @@ static void demo_incremental_loading(void) {
     printf("  Done.\n\n");
 }
 
-/* ── Demo 3: Old blocking API vs new async API ───────────────────────── */
+/* Demo 3: Synchronous vs async API */
 
 static void demo_old_vs_new(void) {
-    printf("====================================================================\n");
-    printf("  Demo 3: Old API (blocking) vs New API (async)\n");
-    printf("====================================================================\n\n");
 
-    /* --- Old API --- */
-    printf("  OLD API: fc_cache_build()\n");
-    printf("    Scans and parses ALL system fonts before returning.\n");
+    printf("\nDemo 3: Synchronous API vs async API\n\n");
+    
+
+    /* Synchronous API */
+    printf("  Synchronous API: fc_cache_build()\n");
+    printf("    Scans and parses all system fonts before returning.\n");
     printf("    Building...\n");
     FcFontCache old_cache = fc_cache_build();
 
     size_t old_count = 0;
     FcFontInfo* old_fonts = fc_cache_list_fonts(old_cache, &old_count);
-    printf("    Loaded %zu fonts. App was BLOCKED until all finished.\n", old_count);
+    printf("    Loaded %zu fonts. App was blocked until all finished.\n", old_count);
     printf("\n");
 
     /* Show a few fonts from the old cache */
@@ -394,8 +369,8 @@ static void demo_old_vs_new(void) {
 
     printf("\n");
 
-    /* --- New API --- */
-    printf("  NEW API: fc_registry_new() + fc_registry_request_fonts()\n");
+    /* Async API */
+    printf("  Async API: fc_registry_new() + fc_registry_request_fonts()\n");
     printf("    Only blocks for the fonts the current frame needs.\n");
     printf("    Creating and spawning...\n");
     FcFontRegistry registry = fc_registry_new();
@@ -414,7 +389,7 @@ static void demo_old_vs_new(void) {
     printf("    Build complete: %s\n", fc_registry_is_build_complete(registry) ? "yes" : "no");
     printf("    The remaining %zu fonts are still loading in the background.\n",
            old_count > new_count ? old_count - new_count : 0);
-    printf("    The app can render its first frame NOW.\n");
+    printf("    The app can render its first frame now.\n");
     fc_font_info_free(new_fonts, new_count);
 
     for (size_t i = 0; i < n; i++) fc_font_chain_free(chains[i]);
@@ -423,7 +398,7 @@ static void demo_old_vs_new(void) {
     printf("\n  Done.\n\n");
 }
 
-/* ── Main ────────────────────────────────────────────────────────────── */
+/* Main */
 
 int main(int argc, char** argv) {
     const char* demo = (argc > 1) ? argv[1] : "all";

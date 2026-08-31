@@ -1,9 +1,6 @@
 /**
  * @file rust_fontconfig.h
  * @brief C API for rust-fontconfig
- * 
- * rust-fontconfig 5.0.0. Hand-maintained: keep in sync with src/ffi.rs
- * (tests/tests.rs pins the FcPatternMatch values against this file).
  *
  * Font resolution is two-step:
  * 1. Create a font chain with fc_resolve_font_chain()
@@ -12,15 +9,15 @@
 
  #ifndef RUST_FONTCONFIG_H
  #define RUST_FONTCONFIG_H
- 
+
  #include <stddef.h>
  #include <stdint.h>
  #include <stdbool.h>
- 
+
  #ifdef __cplusplus
  extern "C" {
  #endif
- 
+
  /**
   * Font ID type for identifying fonts
   */
@@ -28,7 +25,7 @@
      uint64_t high;
      uint64_t low;
  } FcFontId;
- 
+
  /**
   * Pattern match type
   */
@@ -37,7 +34,7 @@
      FC_MATCH_FALSE = 1,
      FC_MATCH_DONT_CARE = 2
  } FcPatternMatch;
- 
+
  /**
   * Font weight values as defined in CSS specification
   */
@@ -52,7 +49,7 @@
      FC_WEIGHT_EXTRA_BOLD = 800,
      FC_WEIGHT_BLACK = 900
  } FcWeight;
- 
+
  /**
   * CSS font-stretch values
   */
@@ -67,7 +64,7 @@
      FC_STRETCH_EXTRA_EXPANDED = 8,
      FC_STRETCH_ULTRA_EXPANDED = 9
  } FcStretch;
- 
+
  /**
   * Unicode range representation
   */
@@ -75,7 +72,7 @@
      uint32_t start;
      uint32_t end;
  } FcUnicodeRange;
- 
+
  /**
   * Font metadata structure
   */
@@ -172,7 +169,7 @@
      FcFontMetadata metadata;
      FcFontRenderConfig render_config;
  } FcPattern;
- 
+
  /**
   * Font match fallback (without nested fallbacks)
   */
@@ -181,7 +178,7 @@
      FcUnicodeRange* unicode_ranges;
      size_t unicode_ranges_count;
  } FcFontMatchNoFallback;
- 
+
  /**
   * Font match result
   */
@@ -192,23 +189,23 @@
      FcFontMatchNoFallback* fallbacks;
      size_t fallbacks_count;
  } FcFontMatch;
- 
+
  /**
   * Font cache opaque pointer
   */
  typedef struct FcFontCacheStruct* FcFontCache;
 
  /**
-  * Font fallback chain opaque pointer (new in 1.2.0)
-  * 
-  * Represents a resolved chain of fonts for a CSS font-family stack.
+  * Font fallback chain opaque pointer
+  *
+  * Represents a resolved chain of fonts for a CSS font family stack.
   * Create with fc_resolve_font_chain(), free with fc_font_chain_free().
   */
  typedef struct FcFontFallbackChainC* FcFontChain;
 
  /**
-  * Resolved font run for text (new in 1.2.0)
-  * 
+  * Resolved font run for text
+  *
   * Represents a run of text that should be rendered with a specific font.
   */
  typedef struct {
@@ -217,12 +214,12 @@
      size_t end_byte;      /**< End byte offset in original text */
      FcFontId font_id;     /**< Font ID for this run */
      bool has_font;        /**< Whether font_id is valid */
-     char* css_source;     /**< Which CSS font-family this came from */
+     char* css_source;     /**< Which CSS font family this came from */
  } FcResolvedFontRun;
 
  /**
-  * CSS fallback group (new in 1.2.0)
-  * 
+  * CSS fallback group
+  *
   * Groups fonts by their CSS source name.
   */
  typedef struct {
@@ -230,7 +227,7 @@
      FcFontMatchNoFallback* fonts;    /**< Array of font matches */
      size_t fonts_count;              /**< Number of fonts */
  } FcCssFallbackGroup;
- 
+
  /**
   * Trace message level
   */
@@ -240,7 +237,7 @@
      FC_TRACE_WARNING = 2,
      FC_TRACE_ERROR = 3
  } FcTraceLevel;
- 
+
  /**
   * Trace message struct for debugging font matching
   */
@@ -249,7 +246,7 @@
      char* path;
      void* reason; // Opaque reason pointer, use fc_trace_get_reason_* functions
  } FcTraceMsg;
- 
+
  /**
   * Reason type for trace messages
   */
@@ -262,7 +259,7 @@
      FC_REASON_UNICODE_RANGE_MISMATCH = 5,
      FC_REASON_SUCCESS = 6
  } FcReasonType;
- 
+
  /**
   * Path to a font file
   */
@@ -270,7 +267,7 @@
      char* path;
      size_t font_index;
  } FcFontPath;
- 
+
  /**
   * In-memory font data
   */
@@ -280,7 +277,7 @@
      size_t font_index;
      char* id;
  } FcFont;
- 
+
  /**
   * Font info entry with ID and name
   */
@@ -290,25 +287,25 @@
      char* family;
  } FcFontInfo;
 
- /* ============================================================================
+ /*
   * Cache Management
-  * ============================================================================ */
+ */
 
- /** 
+ /**
   * Create a new font ID
   */
  FcFontId fc_font_id_new(void);
- 
+
  /**
   * Create a new font cache
   */
  FcFontCache fc_cache_build(void);
- 
+
  /**
   * Free the font cache
   */
  void fc_cache_free(FcFontCache cache);
- 
+
  /**
   * Add in-memory fonts to the cache
   */
@@ -322,64 +319,64 @@
   */
  FcFontInfo* fc_cache_list_fonts(FcFontCache cache, size_t* count);
 
- /* ============================================================================
+ /*
   * Pattern Management
-  * ============================================================================ */
- 
+ */
+
  /**
   * Create a new default pattern
   */
  FcPattern* fc_pattern_new(void);
- 
+
  /**
   * Free a pattern
   */
  void fc_pattern_free(FcPattern* pattern);
- 
+
  /**
   * Set pattern name
   */
  void fc_pattern_set_name(FcPattern* pattern, const char* name);
- 
+
  /**
   * Set pattern family
   */
  void fc_pattern_set_family(FcPattern* pattern, const char* family);
- 
+
  /**
   * Set pattern italic
   */
  void fc_pattern_set_italic(FcPattern* pattern, FcPatternMatch italic);
- 
+
  /**
   * Set pattern bold
   */
  void fc_pattern_set_bold(FcPattern* pattern, FcPatternMatch bold);
- 
+
  /**
   * Set pattern monospace
   */
  void fc_pattern_set_monospace(FcPattern* pattern, FcPatternMatch monospace);
- 
+
  /**
   * Set pattern weight
   */
  void fc_pattern_set_weight(FcPattern* pattern, FcWeight weight);
- 
+
  /**
   * Set pattern stretch
   */
  void fc_pattern_set_stretch(FcPattern* pattern, FcStretch stretch);
- 
+
  /**
   * Add unicode range to pattern
   */
  void fc_pattern_add_unicode_range(FcPattern* pattern, uint32_t start, uint32_t end);
 
- /* ============================================================================
-  * Single Font Query (unchanged)
-  * ============================================================================ */
- 
+ /*
+  * Single Font Query 
+ */
+
  /**
   * Query a single font from the cache
   * @param cache The font cache
@@ -389,7 +386,7 @@
   * @return Font match or NULL if no match found
   */
  FcFontMatch* fc_cache_query(FcFontCache cache, const FcPattern* pattern, FcTraceMsg** trace, size_t* trace_count);
- 
+
  /**
   * Free a font match
   */
@@ -400,21 +397,21 @@
   */
  void fc_font_matches_free(FcFontMatch** matches, size_t count);
 
- /* ============================================================================
-  * Two-Step Font Resolution API (new in 1.2.0)
-  * 
+ /*
+  * Two-Step Font Resolution API
+  *
   * Use this API for CSS-style font resolution:
-  * 1. fc_resolve_font_chain() - resolve CSS font-family stack to a font chain
+  * 1. fc_resolve_font_chain() - resolve CSS font family stack to a font chain
   * 2. fc_chain_query_for_text() - query which fonts to use for specific text
-  * ============================================================================ */
+ */
 
  /**
-  * Resolve a font chain from CSS font families (new in 1.2.0)
-  * 
+  * Resolve a font chain from CSS font families
+  *
   * This is the first step in the two-step font resolution process.
   * The font chain is cached internally, so calling this multiple times
   * with the same parameters is efficient.
-  * 
+  *
   * @param cache The font cache
   * @param families Array of CSS font family names (e.g., ["Arial", "sans-serif"])
   * @param families_count Number of family names
@@ -424,19 +421,19 @@
   * @param trace Array to store trace messages
   * @param trace_count Pointer to trace count (will be updated)
   * @return Font fallback chain or NULL on error (must be freed with fc_font_chain_free)
-  * 
+  *
   * Example:
   * @code
   * const char* families[] = {"Arial", "Helvetica", "sans-serif"};
   * FcTraceMsg* trace = NULL;
   * size_t trace_count = 0;
-  * 
-  * FcFontChain chain = fc_resolve_font_chain(cache, families, 3, 
+  *
+  * FcFontChain chain = fc_resolve_font_chain(cache, families, 3,
   *     FC_WEIGHT_NORMAL, FC_MATCH_FALSE, FC_MATCH_FALSE,
   *     &trace, &trace_count);
-  * 
+  *
   * // Use chain with fc_chain_query_for_text()...
-  * 
+  *
   * fc_font_chain_free(chain);
   * fc_trace_free(trace, trace_count);
   * @endcode
@@ -453,34 +450,34 @@
  );
 
  /**
-  * Free a font fallback chain (new in 1.2.0)
+  * Free a font fallback chain
   */
  void fc_font_chain_free(FcFontChain chain);
 
  /**
-  * Query which fonts should be used for a text string (new in 1.2.0)
-  * 
+  * Query which fonts should be used for a text string
+  *
   * This is the second step in the two-step font resolution process.
   * Returns runs of consecutive characters that use the same font.
-  * 
+  *
   * @param chain The font fallback chain (from fc_resolve_font_chain)
   * @param cache The font cache
   * @param text The text to find fonts for
   * @param runs_count Pointer to store number of runs (will be updated)
   * @return Array of font runs or NULL on error (must be freed with fc_resolved_runs_free)
-  * 
+  *
   * Example:
   * @code
   * size_t runs_count = 0;
-  * FcResolvedFontRun* runs = fc_chain_query_for_text(chain, cache, 
+  * FcResolvedFontRun* runs = fc_chain_query_for_text(chain, cache,
   *     "Hello 世界!", &runs_count);
-  * 
+  *
   * for (size_t i = 0; i < runs_count; i++) {
   *     if (runs[i].has_font) {
   *         // Shape runs[i].text with font runs[i].font_id
   *     }
   * }
-  * 
+  *
   * fc_resolved_runs_free(runs, runs_count);
   * @endcode
   */
@@ -492,12 +489,12 @@
  );
 
  /**
-  * Free an array of resolved font runs (new in 1.2.0)
+  * Free an array of resolved font runs
   */
  void fc_resolved_runs_free(FcResolvedFontRun* runs, size_t count);
 
  /**
-  * Get the original CSS font stack from a font chain (new in 1.2.0)
+  * Get the original CSS font stack from a font chain
   * @param chain The font chain
   * @param stack_count Pointer to store number of family names
   * @return Array of font family names (must be freed with fc_string_array_free)
@@ -505,12 +502,12 @@
  char** fc_chain_get_original_stack(FcFontChain chain, size_t* stack_count);
 
  /**
-  * Free a string array (new in 1.2.0)
+  * Free a string array
   */
  void fc_string_array_free(char** arr, size_t count);
 
  /**
-  * Get CSS fallback groups from a font chain (new in 1.2.0)
+  * Get CSS fallback groups from a font chain
   * @param chain The font chain
   * @param groups_count Pointer to store number of groups
   * @return Array of CSS fallback groups (must be freed with fc_css_fallback_groups_free)
@@ -518,25 +515,25 @@
  FcCssFallbackGroup* fc_chain_get_css_fallbacks(FcFontChain chain, size_t* groups_count);
 
  /**
-  * Free CSS fallback groups (new in 1.2.0)
+  * Free CSS fallback groups
   */
  void fc_css_fallback_groups_free(FcCssFallbackGroup* groups, size_t count);
 
- /* ============================================================================
+ /*
   * Font Data Access
-  * ============================================================================ */
- 
+ */
+
  /**
   * Get font path by ID
   * @return NULL if not found
   */
  FcFontPath* fc_cache_get_font_path(FcFontCache cache, const FcFontId* id);
- 
+
  /**
   * Free font path
   */
  void fc_font_path_free(FcFontPath* path);
- 
+
  /**
   * Create a new in-memory font
   * @param bytes The font file data (will be copied)
@@ -546,7 +543,7 @@
   * @return A new font object or NULL on error
   */
  FcFont* fc_font_new(const uint8_t* bytes, size_t bytes_len, size_t font_index, const char* id);
- 
+
  /**
   * Free an in-memory font
   */
@@ -559,7 +556,7 @@
   * @return Metadata or NULL if not found (must be freed)
   */
  FcFontMetadata* fc_cache_get_font_metadata(FcFontCache cache, const FcFontId* id);
- 
+
  /**
   * Free font metadata
   */
@@ -572,20 +569,20 @@
   */
  FcFontRenderConfig fc_cache_get_render_config(FcFontCache cache, const FcFontId* id);
 
- /* ============================================================================
+ /*
   * Trace and Debug
-  * ============================================================================ */
- 
+ */
+
  /**
   * Get trace reason type
   */
  FcReasonType fc_trace_get_reason_type(const FcTraceMsg* trace);
- 
+
  /**
   * Free trace messages
   */
  void fc_trace_free(FcTraceMsg* trace, size_t count);
- 
+
  /**
   * Convert font ID to string
   * @param id Font ID
@@ -594,28 +591,20 @@
   * @return true if successful
   */
  bool fc_font_id_to_string(const FcFontId* id, char* buffer, size_t buffer_size);
- 
+
  /**
   * Free array of font info
   */
  void fc_font_info_free(FcFontInfo* info, size_t count);
 
- /* ============================================================================
+ /*
   * Async Registry API (background thread scanning)
   *
-  * The registry spawns background threads to scan and parse system fonts
-  * while your application does other work (window creation, DOM construction).
-  *
-  * Workflow:
-  *   1. fc_registry_new()    — create the registry (instant)
-  *   2. fc_registry_spawn()  — launch scout + builder threads (instant)
-  *   3. ... do other work ...
-  *   4. fc_registry_request_fonts()  — block until needed fonts are ready
-  *   5. Use chains with fc_chain_query_for_text()
-  *   6. fc_registry_free()   — shutdown threads + free
+  * Spawns background threads to scan and parse system fonts incrementally,
+  * allowing the main thread to remain unblocked during app startup.
   *
   * All fc_registry_* functions are thread-safe.
-  * ============================================================================ */
+  */
 
  /**
   * Font registry opaque pointer
@@ -686,7 +675,7 @@
 
  /**
   * Free the array returned by fc_registry_request_fonts().
-  * Does NOT free the individual chains — use fc_font_chain_free() for each.
+  * Does NOT free the individual chains - use fc_font_chain_free() for each.
   */
  void fc_registry_chains_free(FcFontChain* chains, size_t count);
 
@@ -727,7 +716,7 @@
 
  /**
   * Resolve a font chain from the registry (thread-safe).
-  * Uses whatever fonts are currently loaded — call after request_fonts()
+  * Uses whatever fonts are currently loaded - call after request_fonts()
   * for complete results.
   */
  FcFontChain fc_registry_resolve_font_chain(
