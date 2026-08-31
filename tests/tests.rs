@@ -1364,3 +1364,64 @@ mod fonts_conf_tree {
         assert!(config.aliases.is_empty());
     }
 }
+
+/// Coverage is what the cmap says, codepoint for codepoint — not a union of
+/// whole Unicode blocks decided by a handful of probes. Before 5.0 a face
+/// that mapped three of six sampled ideographs was recorded as covering all
+/// 20,992 of them, and a face whose script was not in the fixed 50-block probe
+/// list (Tibetan, Braille, every emoji) was recorded as covering nothing.
+#[cfg(feature = "parsing")]
+#[test]
+fn parsed_coverage_is_exact_not_block_rounded() {
+    let bytes = include_bytes!("fixtures/InstrumentSerif-Regular.ttf");
+    let faces = FcParseFontBytes(bytes, "fixture").expect("the fixture parses");
+    let ranges = &faces[0].0.unicode_ranges;
+
+    // Normalized: sorted, disjoint, no touching neighbours.
+    for pair in ranges.windows(2) {
+        assert!(pair[0].end + 1 < pair[1].start, "ranges are sorted, disjoint and coalesced: {ranges:?}");
+    }
+    let contains = |cp: u32| ranges.iter().any(|r| r.start <= cp && cp <= r.end);
+    assert!(contains('A' as u32) && contains('z' as u32));
+    assert!(!contains(0x4E00), "a Latin face does not claim CJK");
+
+    // Not block-rounded: Latin Extended-A (U+0100–U+017F) is partially covered.
+    let in_block = ranges
+        .iter()
+        .map(|r| {
+            let s = r.start.max(0x0100);
+            let e = r.end.min(0x017F);
+            if s <= e { e - s + 1 } else { 0 }
+        })
+        .sum::<u32>();
+    assert!(in_block > 0 && in_block < 128, "partial block coverage survives: {in_block}/128");
+}
+
+/// A pattern registered with unsorted, overlapping coverage is stored
+/// normalized, so every reader can rely on the invariant.
+#[test]
+fn registered_coverage_is_normalized_on_insert() {
+    let cache = FcFontCache::default();
+    cache.with_memory_fonts(vec![(
+        FcPattern {
+            name: Some("Messy".to_string()),
+            family: Some("Messy".to_string()),
+            unicode_ranges: vec![
+                UnicodeRange { start: 0x0400, end: 0x04FF },
+                UnicodeRange { start: 0x0020, end: 0x007E },
+                UnicodeRange { start: 0x0040, end: 0x00FF },
+                UnicodeRange { start: 0x0100, end: 0x017F },
+            ],
+            ..Default::default()
+        },
+        FcFont { bytes: vec![0], font_index: 0, id: "messy".to_string() },
+    )]);
+    let (pattern, _) = &cache.list()[0];
+    assert_eq!(
+        pattern.unicode_ranges,
+        vec![
+            UnicodeRange { start: 0x0020, end: 0x017F },
+            UnicodeRange { start: 0x0400, end: 0x04FF },
+        ]
+    );
+}

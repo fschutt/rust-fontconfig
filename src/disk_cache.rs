@@ -24,7 +24,9 @@ pub struct FontManifest {
 impl FontManifest {
     /// Bump on breaking changes. v2 adds `bytes_hash` per file entry
     /// for the Arc-shared-bytes deduplication added in rust-fontconfig 3.3.
-    pub const CURRENT_VERSION: u32 = 2;
+    /// v3: `unicode_ranges` is exact cmap coverage (5.0); a v2 manifest
+    /// carries block-rounded coverage and must be rescanned.
+    pub const CURRENT_VERSION: u32 = 3;
 }
 
 /// A single cached font file entry.
