@@ -1280,8 +1280,9 @@ pub(crate) struct FcFontCacheShared {
 /// `FcFontCache` methods which lock transparently.
 #[derive(Default, Debug)]
 pub(crate) struct FcFontCacheInner {
-    /// Pattern to FontId mapping (query index)
-    pub(crate) patterns: BTreeMap<FcPattern, FontId>,
+    /// Disk font path -> the ids of its faces. Duplicate detection on
+    /// insert and `lookup_paths_cached`.
+    pub(crate) by_path: BTreeMap<String, Vec<FontId>>,
     /// On-disk font paths
     pub(crate) disk_fonts: BTreeMap<FontId, FcFontPath>,
     /// In-memory fonts
@@ -1327,23 +1328,51 @@ impl FcFontCacheInner {
     /// Coverage is normalized (sorted, disjoint) on the way in; everything
     /// that reads it — `fallback::covers`, `fallback::overlap_size` — relies
     /// on that to binary-search.
-    pub(crate) fn insert_disk_font(&mut self, mut pattern: FcPattern, id: FontId, path: FcFontPath) {
+    ///
+    /// Returns the id the font is registered under: `id` when it was
+    /// inserted, or the existing id when the same face of the same file with
+    /// the same pattern is already registered — a directory scanned twice, a
+    /// manifest loaded on top of a scan — so a font is one record no matter
+    /// how many roads lead to it, and two different files that happen to
+    /// carry identical name tables stay two records.
+    pub(crate) fn insert_disk_font(&mut self, mut pattern: FcPattern, id: FontId, path: FcFontPath) -> FontId {
         pattern.unicode_ranges =
             FcFontCache::normalize_unicode_ranges(core::mem::take(&mut pattern.unicode_ranges));
+        if let Some(existing) = self.by_path.get(&path.path).and_then(|ids| {
+            ids.iter().copied().find(|existing| {
+                self.disk_fonts.get(existing).is_some_and(|p| p.font_index == path.font_index)
+                    && self.metadata.get(existing) == Some(&pattern)
+            })
+        }) {
+            return existing;
+        }
         self.index_pattern_family(&pattern, id);
-        self.patterns.insert(pattern.clone(), id);
+        self.by_path.entry(path.path.clone()).or_default().push(id);
         self.disk_fonts.insert(id, path);
         self.metadata.insert(id, pattern);
+        id
     }
 
     /// Register a font held in memory. See [`insert_disk_font`](Self::insert_disk_font).
-    pub(crate) fn insert_memory_font(&mut self, mut pattern: FcPattern, id: FontId, font: FcFont) {
+    /// Returns the id the font is registered under: `id`, or the existing id
+    /// when a memory font with the same pattern, face index and bytes (by
+    /// content hash) is already registered.
+    pub(crate) fn insert_memory_font(&mut self, mut pattern: FcPattern, id: FontId, font: FcFont) -> FontId {
         pattern.unicode_ranges =
             FcFontCache::normalize_unicode_ranges(core::mem::take(&mut pattern.unicode_ranges));
+        let hash = crate::utils::content_dedup_hash_u64(&font.bytes);
+        if let Some(existing) = self.memory_fonts.iter().find_map(|(existing, f)| {
+            (f.font_index == font.font_index
+                && self.metadata.get(existing) == Some(&pattern)
+                && crate::utils::content_dedup_hash_u64(&f.bytes) == hash)
+                .then_some(*existing)
+        }) {
+            return existing;
+        }
         self.index_pattern_family(&pattern, id);
-        self.patterns.insert(pattern.clone(), id);
         self.memory_fonts.insert(id, font);
         self.metadata.insert(id, pattern);
+        id
     }
 
 }
@@ -1366,7 +1395,7 @@ impl core::fmt::Debug for FcFontCache {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let state = self.state_read();
         f.debug_struct("FcFontCache")
-            .field("patterns_len", &state.patterns.len())
+            .field("fonts", &state.metadata.len())
             .field("metadata_len", &state.metadata.len())
             .field("disk_fonts_len", &state.disk_fonts.len())
             .field("memory_fonts_len", &state.memory_fonts.len())
@@ -1572,31 +1601,19 @@ impl FcFontCache {
     /// the requested codepoints. The pattern's `family` is guessed from
     /// the filename, so that guess is what the family index carries.
     pub fn insert_fast_pattern(&self, pattern: FcPattern, path: FcFontPath) -> FontId {
-        let id = FontId::new();
-        {
+        let id = {
             let mut state = self.state_write();
-            state.insert_disk_font(pattern, id, path);
-        }
+            state.insert_disk_font(pattern, FontId::new(), path)
+        };
         self.clear_chain_cache();
         id
     }
 
-    /// Look up all `FontId`s whose `FcFontPath` matches `path`.
-    /// Cheap way for `request_fonts_fast` to reuse fast-probed
-    /// entries across layout passes without re-reading the cmap.
-    ///
-    /// O(n) over the disk_fonts map; fine for the typical case of
-    /// <100 parsed fonts, and we skip the scan entirely when a
-    /// stack's first candidate covers.
+    /// Every `FontId` registered from the file at `path` (one per face and
+    /// name), or `None` if nothing is. A map probe; `request_fonts_fast` uses
+    /// it to reuse fast-probed faces across layout passes.
     pub fn lookup_paths_cached(&self, path: &str) -> Option<Vec<FontId>> {
-        let state = self.state_read();
-        let mut out = Vec::new();
-        for (id, font_path) in &state.disk_fonts {
-            if font_path.path == path {
-                out.push(*id);
-            }
-        }
-        if out.is_empty() { None } else { Some(out) }
+        self.state_read().by_path.get(path).cloned().filter(|ids| !ids.is_empty())
     }
 
     /// Get font data for a given font ID.
@@ -1914,38 +1931,31 @@ impl FcFontCache {
         self.state_read().memory_fonts.contains_key(id)
     }
 
-    /// Returns the list of fonts and font patterns.
-    ///
-    /// Returns owned `FcPattern` values (cloned out of the shared
-    /// state) — this is the v4.1 API change described on
-    /// [`FcFontCache`]. Callers that need to iterate without
-    /// cloning should use [`FcFontCache::for_each_pattern`].
+    /// Every registered font with its pattern, in registration order.
     pub fn list(&self) -> Vec<(FcPattern, FontId)> {
         self.state_read()
-            .patterns
+            .metadata
             .iter()
-            .map(|(pattern, id)| (pattern.clone(), *id))
+            .map(|(id, pattern)| (pattern.clone(), *id))
             .collect()
     }
 
-    /// Iterate over every `(pattern, id)` pair under a single read
-    /// guard. `f` is called once per entry — avoids the per-entry
-    /// clone that [`list`] incurs.
+    /// Visit every registered font without cloning. The read lock is held
+    /// for the duration, so `f` must not call back into this cache.
     pub fn for_each_pattern<F: FnMut(&FcPattern, &FontId)>(&self, mut f: F) {
         let state = self.state_read();
-        for (pattern, id) in &state.patterns {
+        for (id, pattern) in &state.metadata {
             f(pattern, id);
         }
     }
 
-    /// Returns true if the cache contains no font patterns
     pub fn is_empty(&self) -> bool {
-        self.state_read().patterns.is_empty()
+        self.state_read().metadata.is_empty()
     }
 
-    /// Returns the number of font patterns in the cache
+    /// Number of registered fonts (one per face and name record).
     pub fn len(&self) -> usize {
-        self.state_read().patterns.len()
+        self.state_read().metadata.len()
     }
 
     /// Like [`FcFontCache::query`], but **total**: it returns `None` only when the
@@ -2017,9 +2027,8 @@ impl FcFontCache {
         // Breadth of coverage is never a bonus.
         let mut matches: Vec<(bool, fallback::RankKey, FontId, &FcPattern)> = Vec::new();
 
-        for (stored_pattern, id) in &state.patterns {
-            if Self::query_matches_internal(stored_pattern, pattern, trace) {
-                let metadata = state.metadata.get(id).unwrap_or(stored_pattern);
+        for (id, metadata) in &state.metadata {
+            if Self::query_matches_internal(metadata, pattern, trace) {
                 let is_disk = !state.memory_fonts.contains_key(id);
                 matches.push((
                     is_disk,

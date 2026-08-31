@@ -1425,3 +1425,37 @@ fn registered_coverage_is_normalized_on_insert() {
         ]
     );
 }
+
+/// One record per font. The same face of the same file registered twice — a
+/// directory scanned twice, a manifest loaded on top of a scan — is one
+/// record; two different files that happen to carry identical name tables are
+/// two. (The cache used to key its pattern map by the pattern itself, so the
+/// second silently overwrote the first and orphaned its id.)
+#[test]
+fn fonts_are_one_record_each() {
+    let cache = FcFontCache::default();
+    let pattern = FcPattern {
+        name: Some("Twin".to_string()),
+        family: Some("Twin".to_string()),
+        unicode_ranges: vec![UnicodeRange { start: 0x20, end: 0x7E }],
+        ..Default::default()
+    };
+    let at = |path: &str, face: usize| FcFontPath { path: path.to_string(), font_index: face, bytes_hash: 0 };
+
+    cache.insert_builder_font(pattern.clone(), at("/fonts/a.ttf", 0));
+    cache.insert_builder_font(pattern.clone(), at("/fonts/a.ttf", 0));
+    assert_eq!(cache.len(), 1, "the same face registered twice is one record");
+    cache.insert_builder_font(pattern.clone(), at("/fonts/a.ttf", 1));
+    cache.insert_builder_font(pattern.clone(), at("/fonts/b.ttf", 0));
+    assert_eq!(cache.len(), 3, "another face, and another file, are records of their own");
+    assert_eq!(cache.list().iter().filter(|(p, _)| p.name.as_deref() == Some("Twin")).count(), 3);
+    assert_eq!(cache.lookup_paths_cached("/fonts/a.ttf").map(|ids| ids.len()), Some(2));
+    assert_eq!(cache.lookup_paths_cached("/fonts/none.ttf"), None);
+
+    let font = |bytes: &[u8]| FcFont { bytes: bytes.to_vec(), font_index: 0, id: "mem".to_string() };
+    cache.with_memory_fonts(vec![(pattern.clone(), font(&[1, 2, 3]))]);
+    cache.with_memory_fonts(vec![(pattern.clone(), font(&[1, 2, 3]))]);
+    assert_eq!(cache.len(), 4, "identical pattern and bytes: one memory record");
+    cache.with_memory_fonts(vec![(pattern, font(&[9, 9, 9]))]);
+    assert_eq!(cache.len(), 5, "different bytes under the same pattern: a record of its own");
+}
