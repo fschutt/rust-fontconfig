@@ -240,6 +240,11 @@ pub struct FcFontRegistry {
     /// zero: "complete" means every font is in the cache, not merely that
     /// every job was handed to a builder.
     pub in_flight: std::sync::atomic::AtomicUsize,
+    /// Strong handles currently held by the registry's own threads (the
+    /// scout for its scan, each builder for one step). A thread exits when
+    /// `Arc::strong_count` is no larger than this: every handle is a
+    /// thread's, so no embedder holds the registry any more.
+    pub thread_handles: std::sync::atomic::AtomicUsize,
     /// Whether the builder that completes the build persists the manifest
     /// (`cache` feature). Defaults to `true`. Embedders that manage caching
     /// themselves — and tests that must not touch the real cache — turn it
@@ -361,6 +366,7 @@ impl FcFontRegistry {
             scan_complete: AtomicBool::new(false),
             build_complete: AtomicBool::new(false),
             in_flight: std::sync::atomic::AtomicUsize::new(0),
+            thread_handles: std::sync::atomic::AtomicUsize::new(0),
             persist_on_complete: AtomicBool::new(true),
             shutdown: AtomicBool::new(false),
             cache_loaded: AtomicBool::new(false),
@@ -451,7 +457,10 @@ impl FcFontRegistry {
             .name("rfc-font-scout".to_string())
             .spawn(move || {
                 if let Some(registry) = scout.upgrade() {
-                    registry.scout_thread();
+                    if FcFontRegistry::enter_step(&registry) {
+                        registry.scout_thread();
+                    }
+                    registry.leave_step();
                 }
             })
             .expect("failed to spawn font scout thread");
