@@ -85,6 +85,42 @@ All notable changes to this project will be documented in this file.
   file is compiled out under that feature and the matrix gains an
   explicit `cache,async-registry,parsing` row.
 
+- **One record per font.** The cache kept a second copy of every pattern
+  in a map keyed by the whole `FcPattern`, and that copy was what
+  `list()`, `len()`, `query()` and the registry read. Two different files
+  with identical name tables collapsed into one entry (the last insert
+  won, the first id was orphaned), and every insert compared seventeen
+  metadata strings. `metadata` is the one record store; duplicates are
+  decided on insert — a disk font by (file, face, pattern), a memory font
+  by (pattern, face, bytes) — and both insert paths return the id the
+  font is registered under. `list()` is in registration order now.
+
+- **`FcFontRenderConfig` equality and ordering agree.** A derived
+  `PartialEq`/`PartialOrd` (floats) next to a hand-written `Ord` (bit
+  patterns) disagreed on NaN and failed clippy's
+  `derive_ord_xor_partial_ord`; all three go through one `cmp`.
+
+- **No lost wake-ups, no leaked threads.** `scan_complete` and
+  `build_complete` were stored and notified without the mutex the
+  waiters check them under, so a notify between a waiter's check and its
+  wait was lost and the waiter slept to its deadline (up to 5 s). Both
+  are published under `completed_paths` now. Builders held an
+  `Arc<FcFontRegistry>`, so `Drop` never ran and in lazy mode N threads
+  polled for the life of the process; they hold a `Weak` and exit within
+  one step of the last handle being dropped.
+
+- **The font-file walk is cycle-safe.** Both scanners recursed through
+  directory symlinks unguarded; a link cycle overflowed the thread's
+  stack, which aborts the process. `utils::collect_font_files` visits
+  each directory once by canonical path, bounds the depth, and keeps font
+  files by extension — the synchronous scan no longer opens and mmaps
+  every regular file under its roots.
+
+- **Panics never cross the C boundary.** Since Rust 1.81 an unwinding
+  panic in an `extern "C"` frame aborts the process; every export now
+  runs inside `catch_unwind` and returns null/false/zero on panic.
+  `cargo clippy --all-features` passes.
+
 ### Added
 
 - **`FcFallbackConfig` — the resolution side of `FcScanConfig`.** Everything
