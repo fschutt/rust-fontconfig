@@ -1,51 +1,14 @@
-//! Precomputed font fallback chains.
+//! Precomputed font fallback chains for resolving font stacks.
 //!
-//! fontconfig answers "which font?" per query: the application itemizes
-//! text into runs, asks `FcFontSort` for each run's language, and walks the
-//! sorted list. This crate is used by layout engines that do the opposite:
-//! they ask **once** per CSS font stack — possibly before the layout pass,
-//! possibly while the async registry is still parsing fonts — and then
-//! resolve every character of a mixed-script document against the result
-//! without touching the cache again. That changes the *shape* of the answer,
-//! not the rules behind it:
+//! A [`FontFallbackChain`] is a self-contained snapshot that maps a CSS font stack
+//! to the exact fonts that will be used for any character, without requiring
+//! further metadata lookups during layout.
 //!
-//! * A [`FontFallbackChain`] is a **self-contained snapshot**. Every
-//!   [`FontMatch`] carries the coverage it had when the chain was built, and
-//!   [`FontFallbackChain::resolve_char`] reads nothing else — no lock, no
-//!   metadata lookup, no allocation per character.
-//! * Because one chain serves every script in the document, the per-script
-//!   ordering that fontconfig gets from the query's `lang` has to live
-//!   **inside** the chain: generic families carry per-script preferred fonts
-//!   ([`CssFallbackGroup::script_fonts`]) and the coverage-gated fallbacks are
-//!   grouped per script block ([`FontFallbackChain::unicode_fallbacks`]).
-//! * The `scripts_hint` bounds the precomputation. A chain built for
-//!   `Some(&[])` carries no script tier at all; `None` uses
-//!   [`DEFAULT_UNICODE_FALLBACK_SCRIPTS`].
+//! Resolution order:
 //!
-//! Resolution order for a character, first hit wins:
-//!
-//! 1. The CSS stack in order. For a generic family, the preferred fonts of
-//!    the character's script come before the family's base fonts (this is
-//!    what browsers do: `sans-serif` is a per-script default, not one font).
-//! 2. The script fallback group whose block contains the character:
-//!    configured preferences first, then any registered font that covers the
-//!    block, ranked by [`RankKey`].
-//! 3. The configured last resort, **without** a coverage check — the font
-//!    whose `.notdef` the embedder wants drawn. Empty by default, in which
-//!    case the answer is `None`.
-//!
-//! Everything the chain builder knows about the host — which families stand
-//! behind `sans-serif`, which fonts to prefer for Hiragana, what to
-//! substitute for a missing `Arial`, what the last resort is — comes from the
-//! injected [`FcFallbackConfig`]. There is no built-in table on this path;
-//! [`FcFallbackConfig::os_defaults`] is the explicit opt-in.
-//!
-//! What is deliberately **not** a ranking signal anywhere in this module is
-//! the breadth of a font's coverage. Ranking by "covers the most blocks"
-//! selects the pan-Unicode bitmap font for every script it happens to cover
-//! (GitHub issue #26). Coverage gates; it does not score. Among fonts that
-//! cover a block equally well, the more *dedicated* font wins — the one whose
-//! coverage is mostly that block — and a narrower font beats a wider one.
+//! 1. The CSS stack in order.
+//! 2. The script fallback group whose block contains the character.
+//! 3. The configured last resort, without a coverage check.
 
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
@@ -54,7 +17,7 @@ use alloc::vec::Vec;
 use crate::config::{FcFallbackConfig, GenericFamily};
 use crate::{
     FcFontCache, FcFontCacheInner, FcPattern, FcWeight, FontId, FontMatch, FontMatchNoFallback,
-    OperatingSystem, PatternMatch, ResolvedFontRun, TraceMsg, UnicodeRange,
+    PatternMatch, ResolvedFontRun, TraceMsg, UnicodeRange,
     DEFAULT_UNICODE_FALLBACK_SCRIPTS,
 };
 
@@ -87,24 +50,15 @@ pub struct ScriptFallbackGroup {
 /// The fonts one entry of the CSS font stack resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CssFallbackGroup {
-    /// The CSS font-family entry as the caller wrote it (`"Arial"`,
-    /// `"sans-serif"`).
+    /// The CSS font-family entry as the caller wrote it.
     pub css_name: String,
-    /// Base candidates, best style match first. For a named family these are
-    /// its faces (or its configured substitutions when it is not installed);
-    /// for a generic family, the configured candidates for that generic.
+    /// Base candidates, best style match first.
     pub fonts: Vec<FontMatch>,
-    /// Per-script preferred fonts. Only generic families have these; they
-    /// are consulted before `fonts` for characters inside their block.
+    /// Per-script preferred fonts (used by generic families).
     pub script_fonts: Vec<ScriptFallbackGroup>,
 }
 
 /// A resolved font fallback chain for one CSS font stack and style.
-///
-/// See the [module documentation](self) for the resolution order. The chain
-/// is a snapshot: fonts registered after it was built are not in it. The
-/// cache invalidates its chain memo on every insert, so re-resolving the
-/// same stack after a registry scan picks them up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontFallbackChain {
     /// The CSS stack, entry by entry.
@@ -130,10 +84,7 @@ impl FontFallbackChain {
         }
     }
 
-    /// The font for `cp`, with the name of the tier it came from: a CSS
-    /// family name, [`UNICODE_FALLBACK_SOURCE`] or [`LAST_RESORT_SOURCE`].
-    ///
-    /// Pure and allocation-free; reads only the chain.
+    /// Returns the resolved font for a given codepoint and the CSS fallback tier it came from.
     pub fn resolve_codepoint(&self, cp: u32) -> Option<(FontId, &str)> {
         for group in &self.css_fallbacks {
             for script in &group.script_fonts {
@@ -157,11 +108,8 @@ impl FontFallbackChain {
         self.last_resort.first().map(|m| (m.id, LAST_RESORT_SOURCE))
     }
 
-    /// The font for `ch` and the tier it came from. `None` when no font in
-    /// the chain covers it and no last resort is configured.
-    ///
-    /// The `cache` argument is unused: the chain is self-contained. It is
-    /// kept so 4.x call sites compile unchanged.
+    /// Similar to `resolve_codepoint`, but takes a `char` and unused cache reference
+    /// for backward compatibility with 4.x.
     pub fn resolve_char(&self, _cache: &FcFontCache, ch: char) -> Option<(FontId, String)> {
         self.resolve_codepoint(ch as u32)
             .map(|(id, source)| (id, source.to_string()))
@@ -264,26 +212,20 @@ fn hash_scripts(ranges: &[UnicodeRange]) -> u64 {
     crate::utils::content_hash_u64(&buf)
 }
 
-/// The one ordering used wherever candidates compete. Smaller is better;
-/// fields compare in declaration order.
-///
-/// * `deficit` — codepoints of the requested block the font does **not**
-///   cover. Coverage of *this* block, never of everything.
-/// * `style` — [`FcFontCache::calculate_style_score`] against the request.
-/// * `italic` — upright before italic when everything else ties.
-/// * `dedication_inv` — how much of the font's total coverage lies outside
-///   the block, scaled. A font that is mostly this script beats a
-///   pan-Unicode font that merely includes it.
-/// * `breadth` — total coverage; narrower wins remaining ties (a text face
-///   over a symbol-and-everything face).
-/// * `name` — deterministic last word.
+/// The ordering used wherever font candidates compete. Smaller is better.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RankKey {
+    /// Number of requested codepoints the font does not cover.
     pub deficit: u32,
+    /// Style score against the request (smaller is closer).
     pub style: i32,
+    /// 0 for upright, 1 for italic (prefers upright on ties).
     pub italic: u8,
+    /// How much of the font's coverage lies outside the requested block (prefers dedicated fonts).
     pub dedication_inv: u64,
+    /// Total codepoint coverage (prefers narrower fonts on ties).
     pub breadth: u64,
+    /// Font name, for deterministic tie-breaking.
     pub name: String,
 }
 
@@ -310,9 +252,7 @@ impl RankKey {
         })
     }
 
-    /// Rank `candidate` on style alone, narrower fonts first among ties.
-    /// Used where no script is being asked for: faces of one family, and
-    /// the stand-in for a generic family nothing is configured for.
+    /// Rank `candidate` based only on style. Narrower fonts win ties.
     pub fn for_style(style: &FcPattern, candidate: &FcPattern) -> Self {
         Self {
             deficit: 0,
@@ -324,8 +264,7 @@ impl RankKey {
         }
     }
 
-    /// Rank `candidate` against a whole requested range set (the public
-    /// `query` path): style first, then how much of the request it misses.
+    /// Rank `candidate` against a requested range set by style and missing coverage.
     pub fn for_request(
         style: &FcPattern,
         candidate: &FcPattern,
@@ -348,13 +287,7 @@ impl RankKey {
     }
 }
 
-/// `true` when `ranges` contain `cp`. An empty list covers nothing — a font
-/// that reported no coverage is never assumed to draw everything.
-///
-/// `ranges` must be sorted and disjoint (every pattern in the cache is
-/// normalized on insert), so this is a binary search: exact cmap coverage
-/// runs to thousands of segments for a CJK face, and this is called once
-/// per chain font per character.
+/// Returns `true` if `ranges` contains `cp`. `ranges` must be sorted and disjoint.
 pub fn covers(ranges: &[UnicodeRange], cp: u32) -> bool {
     let i = ranges.partition_point(|r| r.end < cp);
     ranges.get(i).is_some_and(|r| r.start <= cp)
@@ -365,9 +298,7 @@ pub fn range_width(r: &UnicodeRange) -> u32 {
     r.end.saturating_sub(r.start).saturating_add(1)
 }
 
-/// Codepoints of `block` that `ranges` cover, capped at the block's width.
-/// `ranges` must be sorted and disjoint (see [`covers`]); the scan starts at
-/// the first range that can reach the block and stops at the first past it.
+/// Number of codepoints in `block` that `ranges` cover, capped at the block's width.
 pub fn overlap_size(ranges: &[UnicodeRange], block: &UnicodeRange) -> u32 {
     let mut total = 0u32;
     let first = ranges.partition_point(|r| r.end < block.start);
@@ -460,10 +391,7 @@ fn faces_for_families(
     out
 }
 
-/// The best faces in the whole cache for `style`, ignoring names — what a
-/// generic family resolves to when nothing configured for it is installed.
-/// Narrower fonts first among style ties: a text face over a
-/// symbol-and-everything face.
+/// Finds the best faces matching the requested style globally, ignoring names.
 fn faces_unconfigured(state: &FcFontCacheInner, style: &FcPattern) -> Vec<FontMatch> {
     let mut ranked: Vec<(RankKey, FontId, &FcPattern)> = state
         .metadata
@@ -503,13 +431,6 @@ fn ranked_coverage_candidates(
 
 /// Build the chain for `stack` from the cache state and `config`. Pure over
 /// its inputs; the caller holds the read guard.
-///
-/// Deduplication follows resolution order: a base list skips fonts already
-/// in an earlier base list; the script tier skips everything in the CSS
-/// tier (those fonts are tried first anyway, with the same coverage check);
-/// within one group every font appears once. A font may sit in several
-/// script groups — one per block it covers — and the last resort is never
-/// deduplicated, because it is consulted without a coverage check.
 pub(crate) fn build_chain(
     state: &FcFontCacheInner,
     config: &FcFallbackConfig,
@@ -572,10 +493,7 @@ pub(crate) fn build_chain(
         }
     }
 
-    // A generic family always resolves to *something* while any font is
-    // registered (CSS guarantees generics map to a font; fc-match never
-    // fails). Only when the whole stack matched nothing, so an installed
-    // named family or a configured generic is never shadowed by a guess.
+    // If the stack matched nothing, fallback to best unconfigured fonts.
     if css_all.is_empty() {
         for group in &mut css_fallbacks {
             if GenericFamily::from_css(&group.css_name).is_some() {
@@ -585,10 +503,7 @@ pub(crate) fn build_chain(
         }
     }
 
-    // Script tier. Preferences come from the stack's generics — already in
-    // the CSS tier, so this adds nothing for them — or, for a stack without
-    // a generic, from the configured default generic (fontconfig appends
-    // `sans-serif` to every pattern that names no generic; same idea).
+    // Script tier: Uses preferences from stack generics or the default generic.
     let preference_generics: Vec<GenericFamily> = if generics_in_stack.is_empty() {
         alloc::vec![config.default_generic]
     } else {
@@ -633,13 +548,7 @@ pub(crate) fn build_chain(
 }
 
 impl FcFontCache {
-    /// Resolve a fallback chain for a CSS font stack with the default script
-    /// set ([`DEFAULT_UNICODE_FALLBACK_SCRIPTS`]).
-    ///
-    /// Equivalent to [`resolve_font_chain_with_scripts`](Self::resolve_font_chain_with_scripts)
-    /// with `scripts_hint = None`. Chains are memoized per (stack, style,
-    /// scripts); the memo is cleared whenever a font is inserted or the
-    /// [`FcFallbackConfig`] changes.
+    /// Resolve a fallback chain for a CSS font stack with the default script set.
     pub fn resolve_font_chain(
         &self,
         font_families: &[String],
@@ -651,18 +560,7 @@ impl FcFontCache {
         self.resolve_font_chain_with_scripts(font_families, weight, italic, oblique, None, trace)
     }
 
-    /// Resolve a fallback chain, building script fallback groups for exactly
-    /// the blocks in `scripts_hint`.
-    ///
-    /// * `None` — [`DEFAULT_UNICODE_FALLBACK_SCRIPTS`].
-    /// * `Some(&[])` — no script tier: an ASCII-only document pulls no CJK or
-    ///   Arabic fonts into the chain.
-    /// * `Some(blocks)` — usually the blocks the document's text actually
-    ///   uses.
-    ///
-    /// Generic families resolve through the cache's [`FcFallbackConfig`]
-    /// (see [`FcFontCache::set_fallback_config`]); named families through
-    /// the family index, then their configured substitutions.
+    /// Resolve a fallback chain, building script fallback groups for the requested unicode blocks.
     pub fn resolve_font_chain_with_scripts(
         &self,
         font_families: &[String],
@@ -710,41 +608,7 @@ impl FcFontCache {
         chain
     }
 
-    /// Resolve a chain as if this cache were configured with
-    /// [`FcFallbackConfig::os_defaults(os)`], keeping the cache's own
-    /// substitutions and last resort. Bypasses the chain memo.
-    ///
-    /// Kept for 4.x callers; the operating system is no longer an input to
-    /// resolution. Inject the configuration instead:
-    /// `cache.set_fallback_config(FcFallbackConfig::os_defaults(os))`.
-    #[deprecated(
-        since = "5.0.0",
-        note = "inject the tables: `cache.set_fallback_config(FcFallbackConfig::os_defaults(os))`, then `resolve_font_chain`"
-    )]
-    pub fn resolve_font_chain_with_os(
-        &self,
-        font_families: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        _trace: &mut Vec<TraceMsg>,
-        os: OperatingSystem,
-    ) -> FontFallbackChain {
-        let state = self.state_read();
-        let mut config = FcFallbackConfig::os_defaults(os);
-        config.merge_defaults(&state.fallback_config);
-        build_chain(
-            &state,
-            &config,
-            font_families,
-            &style_request(weight, italic, oblique),
-            DEFAULT_UNICODE_FALLBACK_SCRIPTS,
-        )
-    }
-
-    /// Fonts that can stand in for `font_id`: every registered font covering
-    /// part of its coverage, ranked by [`RankKey::for_request`] over that
-    /// coverage. Used by the C API; not needed for chain resolution.
+    /// Finds all registered fonts covering part of `font_id`'s coverage, ranked by closeness.
     pub fn compute_fallbacks(
         &self,
         font_id: &FontId,
