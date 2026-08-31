@@ -735,7 +735,7 @@ pub enum FcLcdFilter {
 ///
 /// All fields are `Option<T>` -- `None` means "use system default".
 /// On non-Linux platforms, this is always all-None (no per-font overrides).
-#[derive(Debug, Default, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct FcFontRenderConfig {
     pub antialias: Option<bool>,
@@ -754,6 +754,22 @@ pub struct FcFontRenderConfig {
 /// Helper newtype to provide Eq/Ord for Option<f64> via total-order bit comparison.
 /// This allows FcFontRenderConfig to be used inside FcPattern which derives Eq + Ord.
 impl Eq for FcFontRenderConfig {}
+
+// Equality and ordering all go through `Ord::cmp`, which compares the `f64`
+// fields by bit pattern. One definition keeps the three consistent (a derived
+// `PartialEq`/`PartialOrd` next to a hand-written `Ord` disagreed on NaN and
+// tripped clippy's `derive_ord_xor_partial_ord`).
+impl PartialEq for FcFontRenderConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
+}
+
+impl PartialOrd for FcFontRenderConfig {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl Ord for FcFontRenderConfig {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
