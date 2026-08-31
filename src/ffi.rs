@@ -1072,17 +1072,19 @@ pub extern "C" fn fc_cache_get_render_config(
     cache: *const FcFontCache,
     id: *const FcFontIdC,
 ) -> FcFontRenderConfigC {
-    let default = render_config_to_c(&FcFontRenderConfig::default());
-    if cache.is_null() || id.is_null() {
-        return default;
-    }
-    unsafe {
-        let cache = &*cache;
-        let id_rust = FontId::from_fontid_c(&*id);
-        cache.get_metadata_by_id(&id_rust)
-            .map(|p| render_config_to_c(&p.render_config))
-            .unwrap_or(default)
-    }
+    guard(render_config_to_c(&FcFontRenderConfig::default()), || {
+        let default = render_config_to_c(&FcFontRenderConfig::default());
+        if cache.is_null() || id.is_null() {
+            return default;
+        }
+        unsafe {
+            let cache = &*cache;
+            let id_rust = FontId::from_fontid_c(&*id);
+            cache.get_metadata_by_id(&id_rust)
+                .map(|p| render_config_to_c(&p.render_config))
+                .unwrap_or(default)
+        }
+    })
 }
 
 /// Get per-font render config by font ID from the registry
@@ -1092,17 +1094,19 @@ pub extern "C" fn fc_registry_get_render_config(
     registry: *const Arc<FcFontRegistry>,
     id: *const FcFontIdC,
 ) -> FcFontRenderConfigC {
-    let default = render_config_to_c(&FcFontRenderConfig::default());
-    if registry.is_null() || id.is_null() {
-        return default;
-    }
-    unsafe {
-        let registry = &*registry;
-        let id_rust = FontId::from_fontid_c(&*id);
-        registry.get_metadata_by_id(&id_rust)
-            .map(|p| render_config_to_c(&p.render_config))
-            .unwrap_or(default)
-    }
+    guard(render_config_to_c(&FcFontRenderConfig::default()), || {
+        let default = render_config_to_c(&FcFontRenderConfig::default());
+        if registry.is_null() || id.is_null() {
+            return default;
+        }
+        unsafe {
+            let registry = &*registry;
+            let id_rust = FontId::from_fontid_c(&*id);
+            registry.get_metadata_by_id(&id_rust)
+                .map(|p| render_config_to_c(&p.render_config))
+                .unwrap_or(default)
+        }
+    })
 }
 
 /// Create a new in-memory font
