@@ -1,17 +1,14 @@
-//! Unicode-aware font resolution
-//!
 //! Shows how font chains handle multi-script text by automatically selecting
-//! the right font for each character (Latin, CJK, Arabic, Cyrillic, etc.).
+//! the right font for each character.
 //!
-//! Run with:
-//!   cargo run --example unicode_aware_fonts
+//! Run with: cargo run --example unicode_aware_fonts
 
 use rust_fontconfig::{FcFontCache, FcWeight, FontFallbackChain, PatternMatch};
 
 fn main() {
     let cache = FcFontCache::build();
 
-    println!("=== Unicode-Aware Font Selection ===\n");
+    println!("Unicode-Aware Font Selection\n");
 
     // Create a font chain for sans-serif
     let chain = cache.resolve_font_chain(
@@ -45,8 +42,8 @@ fn main() {
     }
 
     println!("Workflow:");
-    println!("  1. resolve_font_chain() — creates fallback chain from CSS font-family");
-    println!("  2. chain.resolve_text()  — maps each character to a font");
+    println!("  1. resolve_font_chain() creates fallback chain from CSS font family");
+    println!("  2. chain.resolve_text() maps each character to a font");
     println!("  3. Use font IDs to load and render glyphs");
 }
 
@@ -67,7 +64,7 @@ fn print_resolution(cache: &FcFontCache, chain: &FontFallbackChain, text: &str) 
                 println!(
                     "  '{}' -> {}",
                     segment,
-                    current_font.as_deref().unwrap_or("[NO FONT]")
+                    current_font.as_deref().unwrap_or("[No font]")
                 );
                 segment.clear();
             }
@@ -79,7 +76,7 @@ fn print_resolution(cache: &FcFontCache, chain: &FontFallbackChain, text: &str) 
         println!(
             "  '{}' -> {}",
             segment,
-            current_font.as_deref().unwrap_or("[NO FONT]")
+            current_font.as_deref().unwrap_or("[No font]")
         );
     }
 }
