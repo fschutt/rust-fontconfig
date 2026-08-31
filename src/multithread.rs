@@ -318,22 +318,12 @@ impl FcFontRegistry {
     }
 }
 
-/// Recursively collect font files from a directory.
+/// Font files under `dir`, appended to `results`. See
+/// [`crate::utils::collect_font_files`]: cycle-safe and depth-bounded, so a
+/// symlink loop in a font directory no longer overflows the scout's stack
+/// (which aborts the whole process — a stack overflow is not a panic).
 fn collect_font_files_recursive(dir: PathBuf, results: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_font_files_recursive(path, results);
-        } else if is_font_file(&path) {
-            results.push(path);
-        }
-    }
+    results.extend(crate::utils::collect_font_files(&dir));
 }
 
 impl FcFontRegistry {
