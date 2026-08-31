@@ -7,9 +7,9 @@
 // not express.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use crate::*;
 #[cfg(feature = "async-registry")]
 use crate::registry::FcFontRegistry;
+use crate::*;
 use std::ffi::{c_char, c_uint, c_void, CStr, CString};
 use std::fmt::Write;
 use std::mem;
@@ -109,22 +109,26 @@ pub struct FcFontMetadataC {
 /// C-compatible render config (uses -1 for "unset" instead of Option)
 #[repr(C)]
 pub struct FcFontRenderConfigC {
-    antialias: i32,      // -1=unset, 0=false, 1=true
+    antialias: i32, // -1=unset, 0=false, 1=true
     hinting: i32,
-    hintstyle: i32,      // -1=unset, or FcHintStyle value
+    hintstyle: i32, // -1=unset, or FcHintStyle value
     autohint: i32,
-    rgba: i32,           // -1=unset, or FcRgba value
-    lcdfilter: i32,      // -1=unset, or FcLcdFilter value
+    rgba: i32,      // -1=unset, or FcRgba value
+    lcdfilter: i32, // -1=unset, or FcLcdFilter value
     embeddedbitmap: i32,
     embolden: i32,
-    dpi: f64,            // -1.0=unset
-    scale: f64,          // -1.0=unset
+    dpi: f64,   // -1.0=unset
+    scale: f64, // -1.0=unset
     minspace: i32,
 }
 
 fn render_config_to_c(rc: &FcFontRenderConfig) -> FcFontRenderConfigC {
     fn bool_opt(v: Option<bool>) -> i32 {
-        match v { Some(true) => 1, Some(false) => 0, None => -1 }
+        match v {
+            Some(true) => 1,
+            Some(false) => 0,
+            None => -1,
+        }
     }
     FcFontRenderConfigC {
         antialias: bool_opt(rc.antialias),
@@ -143,25 +147,37 @@ fn render_config_to_c(rc: &FcFontRenderConfig) -> FcFontRenderConfigC {
 
 fn c_to_render_config(rc: &FcFontRenderConfigC) -> FcFontRenderConfig {
     fn int_bool(v: i32) -> Option<bool> {
-        match v { 0 => Some(false), 1 => Some(true), _ => None }
+        match v {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
     }
     FcFontRenderConfig {
         antialias: int_bool(rc.antialias),
         hinting: int_bool(rc.hinting),
         hintstyle: match rc.hintstyle {
-            0 => Some(FcHintStyle::None), 1 => Some(FcHintStyle::Slight),
-            2 => Some(FcHintStyle::Medium), 3 => Some(FcHintStyle::Full),
+            0 => Some(FcHintStyle::None),
+            1 => Some(FcHintStyle::Slight),
+            2 => Some(FcHintStyle::Medium),
+            3 => Some(FcHintStyle::Full),
             _ => None,
         },
         autohint: int_bool(rc.autohint),
         rgba: match rc.rgba {
-            0 => Some(FcRgba::Unknown), 1 => Some(FcRgba::Rgb), 2 => Some(FcRgba::Bgr),
-            3 => Some(FcRgba::Vrgb), 4 => Some(FcRgba::Vbgr), 5 => Some(FcRgba::None),
+            0 => Some(FcRgba::Unknown),
+            1 => Some(FcRgba::Rgb),
+            2 => Some(FcRgba::Bgr),
+            3 => Some(FcRgba::Vrgb),
+            4 => Some(FcRgba::Vbgr),
+            5 => Some(FcRgba::None),
             _ => None,
         },
         lcdfilter: match rc.lcdfilter {
-            0 => Some(FcLcdFilter::None), 1 => Some(FcLcdFilter::Default),
-            2 => Some(FcLcdFilter::Light), 3 => Some(FcLcdFilter::Legacy),
+            0 => Some(FcLcdFilter::None),
+            1 => Some(FcLcdFilter::Default),
+            2 => Some(FcLcdFilter::Light),
+            3 => Some(FcLcdFilter::Legacy),
             _ => None,
         },
         embeddedbitmap: int_bool(rc.embeddedbitmap),
@@ -1080,7 +1096,8 @@ pub extern "C" fn fc_cache_get_render_config(
         unsafe {
             let cache = &*cache;
             let id_rust = FontId::from_fontid_c(&*id);
-            cache.get_metadata_by_id(&id_rust)
+            cache
+                .get_metadata_by_id(&id_rust)
                 .map(|p| render_config_to_c(&p.render_config))
                 .unwrap_or(default)
         }
@@ -1102,7 +1119,8 @@ pub extern "C" fn fc_registry_get_render_config(
         unsafe {
             let registry = &*registry;
             let id_rust = FontId::from_fontid_c(&*id);
-            registry.get_metadata_by_id(&id_rust)
+            registry
+                .get_metadata_by_id(&id_rust)
                 .map(|p| render_config_to_c(&p.render_config))
                 .unwrap_or(default)
         }
@@ -1261,9 +1279,9 @@ pub struct FcFontFallbackChainC {
 }
 
 /// Resolve a font chain from CSS font families
-/// 
+///
 /// This is the first step in the two-step font resolution process.
-/// 
+///
 /// @param cache The font cache
 /// @param families Array of CSS font family names (e.g., ["Arial", "sans-serif"])
 /// @param families_count Number of family names
@@ -1291,12 +1309,13 @@ pub extern "C" fn fc_resolve_font_chain(
 
         unsafe {
             let cache = &*cache;
-        
+
             // Convert C string array to Vec<String>
             let families_rust = c_string_array_to_vec(families, families_count);
 
             let mut trace_msgs = Vec::new();
-            let chain = cache.resolve_font_chain(&families_rust, weight, italic, oblique, &mut trace_msgs);
+            let chain =
+                cache.resolve_font_chain(&families_rust, weight, italic, oblique, &mut trace_msgs);
 
             // Convert trace messages
             let (trace_c, count) = trace_msgs_to_c(&trace_msgs);
@@ -1321,10 +1340,10 @@ pub extern "C" fn fc_font_chain_free(chain: *mut FcFontFallbackChainC) {
 }
 
 /// Query which fonts should be used for a text string
-/// 
+///
 /// This is the second step in the two-step font resolution process.
 /// Returns runs of consecutive characters that use the same font.
-/// 
+///
 /// @param chain The font fallback chain (from fc_resolve_font_chain)
 /// @param cache The font cache
 /// @param text The text to find fonts for
@@ -1356,9 +1375,13 @@ pub extern "C" fn fc_chain_query_for_text(
 
             let mut runs_c = Vec::with_capacity(runs.len());
             for run in &runs {
-                let text_c = CString::new(run.text.as_str()).unwrap_or_default().into_raw();
-                let css_source_c = CString::new(run.css_source.as_str()).unwrap_or_default().into_raw();
-            
+                let text_c = CString::new(run.text.as_str())
+                    .unwrap_or_default()
+                    .into_raw();
+                let css_source_c = CString::new(run.css_source.as_str())
+                    .unwrap_or_default()
+                    .into_raw();
+
                 let (font_id, has_font) = match &run.font_id {
                     Some(id) => (FcFontIdC::from_fontid(id), true),
                     None => (FcFontIdC { high: 0, low: 0 }, false),
@@ -1477,8 +1500,10 @@ pub extern "C" fn fc_chain_get_css_fallbacks(
 
             let mut groups_c = Vec::with_capacity(fallbacks.len());
             for group in fallbacks {
-                let css_name = CString::new(group.css_name.as_str()).unwrap_or_default().into_raw();
-            
+                let css_name = CString::new(group.css_name.as_str())
+                    .unwrap_or_default()
+                    .into_raw();
+
                 let fonts_count = group.fonts.len();
                 let fonts = if fonts_count > 0 {
                     let mut fonts_c = Vec::with_capacity(fonts_count);
@@ -1604,7 +1629,9 @@ pub extern "C" fn fc_registry_request_fonts(
             || num_stacks == 0
         {
             if !out_count.is_null() {
-                unsafe { *out_count = 0; }
+                unsafe {
+                    *out_count = 0;
+                }
             }
             return ptr::null_mut();
         }
@@ -1625,9 +1652,7 @@ pub extern "C" fn fc_registry_request_fonts(
 
             let mut chain_ptrs: Vec<*mut FcFontFallbackChainC> = chains
                 .into_iter()
-                .map(|chain| {
-                    Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain }))
-                })
+                .map(|chain| Box::into_raw(Box::new(FcFontFallbackChainC { inner: chain })))
                 .collect();
             // shrink_to_fit guarantees capacity == len, which free_raw_vec requires
             chain_ptrs.shrink_to_fit();
@@ -1643,10 +1668,7 @@ pub extern "C" fn fc_registry_request_fonts(
 /// Does NOT free the individual chains (use fc_font_chain_free for each).
 #[cfg(feature = "async-registry")]
 #[no_mangle]
-pub extern "C" fn fc_registry_chains_free(
-    chains: *mut *mut FcFontFallbackChainC,
-    count: usize,
-) {
+pub extern "C" fn fc_registry_chains_free(chains: *mut *mut FcFontFallbackChainC, count: usize) {
     guard((), || {
         if chains.is_null() || count == 0 {
             return;
@@ -1660,9 +1682,7 @@ pub extern "C" fn fc_registry_chains_free(
 /// Check if the scout has finished enumerating all font directories.
 #[cfg(feature = "async-registry")]
 #[no_mangle]
-pub extern "C" fn fc_registry_is_scan_complete(
-    registry: *const Arc<FcFontRegistry>,
-) -> bool {
+pub extern "C" fn fc_registry_is_scan_complete(registry: *const Arc<FcFontRegistry>) -> bool {
     guard(false, || {
         if registry.is_null() {
             return false;
@@ -1674,9 +1694,7 @@ pub extern "C" fn fc_registry_is_scan_complete(
 /// Check if all queued font files have been parsed.
 #[cfg(feature = "async-registry")]
 #[no_mangle]
-pub extern "C" fn fc_registry_is_build_complete(
-    registry: *const Arc<FcFontRegistry>,
-) -> bool {
+pub extern "C" fn fc_registry_is_build_complete(registry: *const Arc<FcFontRegistry>) -> bool {
     guard(false, || {
         if registry.is_null() {
             return false;
@@ -1854,9 +1872,7 @@ pub extern "C" fn fc_registry_get_metadata(
             let id_rust = FontId::from_fontid_c(&*id);
 
             match registry.get_metadata_by_id(&id_rust) {
-                Some(pattern) => {
-                    Box::into_raw(Box::new(metadata_to_c(&pattern.metadata)))
-                }
+                Some(pattern) => Box::into_raw(Box::new(metadata_to_c(&pattern.metadata))),
                 None => ptr::null_mut(),
             }
         }
@@ -1867,9 +1883,7 @@ pub extern "C" fn fc_registry_get_metadata(
 /// Useful for passing to fc_chain_query_for_text().
 #[cfg(feature = "async-registry")]
 #[no_mangle]
-pub extern "C" fn fc_registry_snapshot(
-    registry: *const Arc<FcFontRegistry>,
-) -> *mut FcFontCache {
+pub extern "C" fn fc_registry_snapshot(registry: *const Arc<FcFontRegistry>) -> *mut FcFontCache {
     guard(ptr::null_mut(), || {
         if registry.is_null() {
             return ptr::null_mut();
