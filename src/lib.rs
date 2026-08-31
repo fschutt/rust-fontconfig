@@ -235,17 +235,26 @@ impl FontId {
 }
 
 /// Whether a field is required to match (yes / no / don't care)
+///
+/// The discriminants are ABI: they are the values of `FcPatternMatch` in
+/// `ffi/rust_fontconfig.h` (`FC_MATCH_TRUE = 0`, `FC_MATCH_FALSE = 1`,
+/// `FC_MATCH_DONT_CARE = 2`) and cross the C boundary by value. They are
+/// pinned explicitly because reordering the variants once silently swapped
+/// them, so every C caller asking for `FC_MATCH_FALSE` got `True`. The
+/// declaration order (which is what `serde` encodes) is unchanged, so
+/// persisted manifests are unaffected. `tests/tests.rs` parses the header
+/// and asserts the values agree.
 #[derive(Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub enum PatternMatch {
     /// Default: don't particularly care whether the requirement matches
     #[default]
-    DontCare,
+    DontCare = 2,
     /// Requirement has to be true for the selected font
-    True,
+    True = 0,
     /// Requirement has to be false for the selected font
-    False,
+    False = 1,
 }
 
 impl PatternMatch {
