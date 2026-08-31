@@ -207,7 +207,9 @@ impl FcFontRegistry {
 
             let lazy = self.lazy_scout.load(Ordering::Acquire);
 
-            // Pop the highest-priority job
+            // Pop the highest-priority job. `in_flight` is bumped while the
+            // queue lock is held, so a builder that finds the queue empty
+            // also sees the job that just left it.
             let job = {
                 let mut queue = match self.build_queue.lock() {
                     Ok(q) => q,
@@ -220,18 +222,23 @@ impl FcFontRegistry {
                     }
 
                     if let Some(job) = queue.pop() {
+                        self.in_flight.fetch_add(1, Ordering::AcqRel);
                         break job;
                     }
 
-                    // Eager mode: exit once the scout is done and
-                    // everything it queued has drained.
+                    // Eager mode: exit once the scout is done, everything it
+                    // queued has drained, AND no builder is still parsing.
+                    // Without the last condition "build complete" was
+                    // announced — and the manifest persisted — while up to
+                    // N-1 fonts were still on their way into the cache.
                     //
-                    // Lazy mode: keep waiting — `request_fonts` is
-                    // the sole source of jobs and can fire at any
-                    // time during the layout pass.
+                    // Lazy mode: keep waiting — `request_fonts` is the sole
+                    // source of jobs and can fire at any time during the
+                    // layout pass.
                     if !lazy
                         && self.scan_complete.load(Ordering::Acquire)
                         && queue.is_empty()
+                        && self.in_flight.load(Ordering::Acquire) == 0
                     {
                         // Exactly one builder thread wins this transition; the
                         // others observe `Err` and simply exit. Only the winner
@@ -253,13 +260,14 @@ impl FcFontRegistry {
                         // would both stall `request_fonts` and invert the
                         // queue-then-state lock order used elsewhere.
                         drop(queue);
-                        if is_winner {
+                        if is_winner && self.persist_on_complete.load(Ordering::Acquire) {
                             self.persist_cache_on_build_complete();
                         }
                         return;
                     }
 
-                    // Wait for new jobs
+                    // Wait for new jobs, or for an in-flight parse to finish
+                    // (`finish_job` notifies this condvar).
                     queue = match self
                         .queue_condvar
                         .wait_timeout(queue, Duration::from_millis(100))
@@ -270,33 +278,43 @@ impl FcFontRegistry {
                 }
             };
 
-            // Deduplication: skip if already processed
-            {
-                let mut processed = match self.processed_paths.lock() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if processed.contains(&job.path) {
-                    continue;
+            // Deduplication: the first builder to claim a path parses it.
+            // Whatever happens below, the job is balanced by `finish_job`.
+            let claimed = match self.processed_paths.lock() {
+                Ok(mut processed) => processed.insert(job.path.clone()),
+                Err(_) => false,
+            };
+
+            if claimed {
+                if let Some(results) = FcParseFont(&job.path) {
+                    for (pattern, font_path) in results {
+                        self.insert_font(pattern, font_path);
+                    }
                 }
-                processed.insert(job.path.clone());
-            }
 
-            // Parse the font file
-            if let Some(results) = FcParseFont(&job.path) {
-                for (pattern, font_path) in results {
-                    self.insert_font(pattern, font_path);
+                // Mark this file as fully completed (patterns inserted)
+                if let Ok(mut completed) = self.completed_paths.lock() {
+                    completed.insert(job.path.clone());
                 }
+
+                // Notify waiting threads that a font has been completed
+                self.progress.notify_all();
             }
 
-            // Mark this file as fully completed (patterns inserted)
-            if let Ok(mut completed) = self.completed_paths.lock() {
-                completed.insert(job.path.clone());
-            }
-
-            // Notify waiting threads that a font has been completed
-            self.progress.notify_all();
+            self.finish_job();
         }
+    }
+
+    /// Balance the `in_flight` bump of a popped job. The decrement happens
+    /// under the queue lock so it cannot interleave with another builder's
+    /// empty-queue check, and the queue condvar is notified so a builder
+    /// waiting for the last parse re-checks the completion condition at
+    /// once instead of on its next 100 ms tick.
+    fn finish_job(&self) {
+        let guard = self.build_queue.lock();
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        drop(guard);
+        self.queue_condvar.notify_all();
     }
 }
 

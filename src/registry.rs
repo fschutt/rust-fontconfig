@@ -233,6 +233,18 @@ pub struct FcFontRegistry {
     // ── Status ──
     pub scan_complete: AtomicBool,
     pub build_complete: AtomicBool,
+    /// Jobs popped from `build_queue` whose parse has not finished yet.
+    /// Bumped under the queue lock when a job is popped and released under
+    /// it again when the file's patterns are in the cache, so
+    /// `build_complete` can flip only when the queue is empty AND this is
+    /// zero: "complete" means every font is in the cache, not merely that
+    /// every job was handed to a builder.
+    pub in_flight: std::sync::atomic::AtomicUsize,
+    /// Whether the builder that completes the build persists the manifest
+    /// (`cache` feature). Defaults to `true`. Embedders that manage caching
+    /// themselves — and tests that must not touch the real cache — turn it
+    /// off with [`FcFontRegistry::set_persist_on_complete`].
+    pub persist_on_complete: AtomicBool,
     pub shutdown: AtomicBool,
     /// Whether a disk cache was successfully loaded (skip blocking in request_fonts)
     pub cache_loaded: AtomicBool,
@@ -334,6 +346,8 @@ impl FcFontRegistry {
             progress: Condvar::new(),
             scan_complete: AtomicBool::new(false),
             build_complete: AtomicBool::new(false),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            persist_on_complete: AtomicBool::new(true),
             shutdown: AtomicBool::new(false),
             cache_loaded: AtomicBool::new(false),
             lazy_scout: AtomicBool::new(false),
@@ -347,6 +361,14 @@ impl FcFontRegistry {
     /// and embedders can verify what a registry is configured to scan.
     pub fn scan_dirs(&self) -> &[PathBuf] {
         &self.scan_config.font_dirs
+    }
+
+    /// Whether the builder that completes the build writes the on-disk
+    /// manifest (`cache` feature). On by default; turn it off when the
+    /// embedder persists on its own schedule, or in tests that must not
+    /// touch the real cache directory.
+    pub fn set_persist_on_complete(&self, persist: bool) {
+        self.persist_on_complete.store(persist, Ordering::Release);
     }
 
     /// Enable/disable lazy scout mode. See [`FcFontRegistry::lazy_scout`]
