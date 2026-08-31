@@ -2,11 +2,12 @@
  * @file rust_fontconfig.h
  * @brief C API for rust-fontconfig
  * 
- * Version 1.2.0 introduces a two-step font resolution API:
+ * rust-fontconfig 5.0.0. Hand-maintained: keep in sync with src/ffi.rs
+ * (tests/tests.rs pins the FcPatternMatch values against this file).
+ *
+ * Font resolution is two-step:
  * 1. Create a font chain with fc_resolve_font_chain()
  * 2. Query fonts for text with fc_chain_query_for_text()
- * 
- * This replaces the old fc_cache_query_all() and fc_cache_query_for_text() functions.
  */
 
  #ifndef RUST_FONTCONFIG_H

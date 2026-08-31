@@ -4,218 +4,61 @@ All notable changes to this project will be documented in this file.
 
 ## [5.0.0] - 2026-08-31
 
-### Fixed
-
-- **Fallback fonts are chosen per script from configuration, never by
-  breadth of coverage (issue #26).** On Windows, `resolve_font_chain(["sans-serif"])`
-  rendered Japanese with GNU Unifont. Two things conspired: the scripts hint
-  never reached generic-family expansion (`expand_font_families(.., &[])`),
-  so the per-script OS tables were dead code and no Japanese font entered
-  the CSS chain; and `find_unicode_fallbacks` ranked every candidate by how
-  many requested blocks it covered, then greedily set-covered the document —
-  so the pan-Unicode font won every script it included, by construction.
-  Making coverage measurement more accurate (4.4.8's cmap-authoritative
-  coverage) made that worse, not better: Unifont's score became more
-  legitimately dominant. The reporter's "it worked until I added Arabic" was
-  a tie broken alphabetically.
-
-  The chain is now built in three tiers, in resolution order, and the
-  per-script structure lives *inside* the precomputed chain (this crate's
-  callers resolve once per stack, ahead of layout and possibly while the
-  async registry is still parsing, so there is no per-run query to carry a
-  language the way fontconfig's `FcFontSort` does):
-
-  1. The CSS stack. A generic family carries per-script preferred fonts
-     (`CssFallbackGroup::script_fonts`, consulted before its base fonts for
-     characters in that block — what browsers do with `sans-serif`).
-  2. A coverage-gated group per requested script block
-     (`FontFallbackChain::unicode_fallbacks: Vec<ScriptFallbackGroup>`):
-     configured preferences first, then any registered font covering the
-     block, ranked by one `fallback::RankKey` — coverage *of that block*,
-     style closeness, upright before italic, dedication (how much of the
-     font is this script), narrower before wider, name. Breadth is never a
-     bonus; the dedicated font beats the everything-font.
-  3. An explicit last resort (`FcFallbackConfig::last_resort`), used
-     without a coverage check for whatever nothing else covers — the font
-     whose `.notdef` the embedder wants drawn.
-
-  The scripts hint bounds the precomputation: `Some(&[])` builds no script
-  tier at all, `None` uses `DEFAULT_UNICODE_FALLBACK_SCRIPTS`.
-
-- **Fonts loaded from the disk manifest were invisible to named-family
-  lookup.** `load_from_disk_cache_at` never called `index_pattern_family`
-  (4.5.0's family index), only the no-op token indexer. Every insert now
-  goes through one function (`insert_disk_font` / `insert_memory_font`),
-  so the four maps and the index cannot drift apart again.
-  `insert_fast_pattern` also invalidates memoized chains now.
-
-- **`build_complete` waits for in-flight parses.** The completion check
-  was "scout done and queue empty": a builder that had popped the last
-  job was still parsing it while another found the queue empty, won the
-  transition, woke every waiter and persisted the manifest — short by up
-  to N−1 fonts. The registry counts in-flight jobs under the queue lock
-  and completes only when that count is zero. New:
-  `FcFontRegistry::set_persist_on_complete(false)` for embedders that
-  persist on their own schedule (and for tests).
-
-- **Relative `fonts.conf` includes resolve like fontconfig.** The stock
-  `<include ignore_missing="yes">conf.d</include>` was resolved against
-  the process's working directory, so on an ordinary distribution the
-  whole `conf.d` tree — where every `<alias>` lives — was silently
-  skipped and the config-first expansion never saw it. `FcSystemConfig`
-  (`parse_tree`, `from_system`) follows includes depth-first in document
-  order, reads a directory's `[0-9]*.conf` files in name order, reads
-  each file once, and resolves relative names against `$FONTCONFIG_PATH`
-  and the root configuration directory; `prefix="relative"` is
-  supported. The parser is compiled and tested on every platform
-  (`xmlparser` is now pulled in by `parsing`), and
-  `FcFontRegistry::new()` consults the configuration too — its `<dir>`
-  entries join the scan and its aliases seed the fallback configuration.
-
-- **`PatternMatch` values match the C header again.** Reordering the Rust
-  variants had made `DontCare=0, True=1, False=2` while the header says
-  `TRUE=0, FALSE=1, DONT_CARE=2`; the enum crosses the boundary by value,
-  so every C caller's `FC_MATCH_FALSE` arrived as `True`. Discriminants
-  are explicit now and a test parses the header to hold them in place.
-
-- **The disk-cache tests run on a CI row where threads exist.**
-  `--all-features` enables `single-thread-unsafe-locks`, under which no
-  scout is ever spawned, and that was the only row running
-  `tests/disk_cache_persistence.rs` — so it timed out everywhere. The
-  file is compiled out under that feature and the matrix gains an
-  explicit `cache,async-registry,parsing` row.
-
-- **One record per font.** The cache kept a second copy of every pattern
-  in a map keyed by the whole `FcPattern`, and that copy was what
-  `list()`, `len()`, `query()` and the registry read. Two different files
-  with identical name tables collapsed into one entry (the last insert
-  won, the first id was orphaned), and every insert compared seventeen
-  metadata strings. `metadata` is the one record store; duplicates are
-  decided on insert — a disk font by (file, face, pattern), a memory font
-  by (pattern, face, bytes) — and both insert paths return the id the
-  font is registered under. `list()` is in registration order now.
-
-- **`FcFontRenderConfig` equality and ordering agree.** A derived
-  `PartialEq`/`PartialOrd` (floats) next to a hand-written `Ord` (bit
-  patterns) disagreed on NaN and failed clippy's
-  `derive_ord_xor_partial_ord`; all three go through one `cmp`.
-
-- **No lost wake-ups, no leaked threads.** `scan_complete` and
-  `build_complete` were stored and notified without the mutex the
-  waiters check them under, so a notify between a waiter's check and its
-  wait was lost and the waiter slept to its deadline (up to 5 s). Both
-  are published under `completed_paths` now. Builders held an
-  `Arc<FcFontRegistry>`, so `Drop` never ran and in lazy mode N threads
-  polled for the life of the process; they hold a `Weak` and exit within
-  one step of the last handle being dropped.
-
-- **The font-file walk is cycle-safe.** Both scanners recursed through
-  directory symlinks unguarded; a link cycle overflowed the thread's
-  stack, which aborts the process. `utils::collect_font_files` visits
-  each directory once by canonical path, bounds the depth, and keeps font
-  files by extension — the synchronous scan no longer opens and mmaps
-  every regular file under its roots.
-
-- **Panics never cross the C boundary.** Since Rust 1.81 an unwinding
-  panic in an `extern "C"` frame aborts the process; every export now
-  runs inside `catch_unwind` and returns null/false/zero on panic.
-  `cargo clippy --all-features` passes.
+### Breaking
+- `FontFallbackChain::unicode_fallbacks` is `Vec<ScriptFallbackGroup>`; new `last_resort`; `CssFallbackGroup::script_fonts`.
+- `resolve_char` returns `None` when nothing covers the character; set `FcFallbackConfig::last_resort` for a `.notdef` font.
+- `query` ranks style before coverage and never prefers wider fonts.
+- `FcPattern::unicode_ranges` is exact cmap coverage; disk manifest v3 (a v2 manifest is rescanned).
+- `list()` is registration order; identical patterns from different files are separate records.
+- `PatternMatch` discriminants pinned to the C header (`True=0`, `False=1`, `DontCare=2`).
+- `scout_thread`/`builder_thread` are `pub(crate)`.
 
 ### Added
-
-- **`FcFallbackConfig` — the resolution side of `FcScanConfig`.** Everything
-  the chain builder knows about the host is injected: `generic_families`
-  (base candidates per `GenericFamily`), `substitutions` (missing named
-  family → replacements), `script_fallbacks` (`FcScriptFallback { range,
-  generic, families }`), `last_resort`, `default_generic`. There is no
-  built-in table on the resolve path; `FcFallbackConfig::os_defaults(os)`
-  is the explicit opt-in carrying the old tables (with kana preferring the
-  Japanese font and Hangul the Korean one, where the old single CJK list
-  could not distinguish). `FcFallbackConfig::empty()` configures nothing;
-  `merge_defaults` fills only what a configuration leaves unsaid;
-  `absorb_system_aliases` takes over parsed `fonts.conf` `<alias><prefer>`
-  entries; `candidate_families(stack, scripts)` lists exactly the families
-  a chain can contain, which is what the async registry now parses ahead
-  of resolving — the two agree by construction.
-
-  `FcFontCache::{fallback_config, set_fallback_config, with_fallback_config}`;
-  `FcFontCache::default()` carries an empty configuration; `build()` and
-  `build_with_families()` parse the platform aliases where there are any and
-  fill the gaps from `os_defaults`. `FcFontRegistry::new_with_configs(scan,
-  fallback)` injects both sides; `new_with_config(scan)` and `new()` keep
-  their behaviour by opting into `os_defaults`.
-
-- **`GenericFamily`**: the thirteen CSS Fonts 4 generics as a type, with
-  `from_css` (case and separators ignored), `as_css`, and `parent` — the
-  generic a less common one borrows configuration from. The three copies of
-  the keyword list are gone; `is_generic_family` is `from_css(..).is_some()`.
-
-- **`FontFallbackChain`**: `last_resort`, `empty(stack)`,
-  `resolve_codepoint(cp) -> Option<(FontId, &str)>` (allocation-free),
-  `fonts()` (every font once, in resolution order). `resolve_char`,
-  `resolve_text` and `query_for_text` read only the chain — no lock, no
-  metadata clone per character; the `cache` argument is kept so call sites
-  compile unchanged. `CssFallbackGroup::script_fonts`.
+- `FcFallbackConfig`: generic families, substitutions, per-script preferences, last resort, default generic. `os_defaults`, `empty`, `merge_defaults`, `absorb_system_aliases`, `candidate_families`.
+- `GenericFamily` (13 CSS generics: `from_css`, `as_css`, `parent`); `FcScriptFallback`.
+- `FcFontCache::{fallback_config, set_fallback_config, with_fallback_config}`; `FcFontRegistry::new_with_configs`.
+- `FcSystemConfig::{parse_tree, from_system}`: fonts.conf tree, on every platform.
+- `FontFallbackChain::{empty, resolve_codepoint, fonts}`; `fallback::RankKey`.
+- `FcFontRegistry::set_persist_on_complete`.
+- `utils::collect_font_files`.
+- CI row `cache,async-registry,parsing`; tag-triggered release workflow.
 
 ### Changed
+- Fallback chains are per script (#26): CSS tier (generics carry per-script preferred fonts) → per-block script tier → last resort. Ranked by coverage of the block, style, dedication, narrowness — never breadth.
+- `resolve_char`/`query_for_text` read only the chain: no lock, no clone per character.
+- Coverage comes from cmap segments (formats 4/12 exact); OS/2 `ulUnicodeRange` is not consulted; block probes removed.
+- Registry prefetch is `candidate_families(stack, scripts)` — what the chain can contain.
+- `FcFontRegistry::new()` reads fonts.conf dirs and aliases.
+- Both scanners use one cycle-safe, extension-filtered walk.
+- One record per font: `metadata` is the store; dedup on insert; `by_path` index.
 
-- **Coverage is exact: every codepoint the cmap maps, read from its
-  segments.** It used to be a list of whole Unicode blocks, each marked
-  covered when at least half of two to six sampled codepoints mapped to
-  a glyph, from a fixed list of 50 BMP blocks, unioned with the OS/2
-  `ulUnicodeRange` bits decoded through a table misaligned with the
-  spec from bit 12 on. A face with three of six probed ideographs
-  "covered" all 20,992; anything outside the list — Tibetan, Braille,
-  CJK Extension A, every emoji, every astral script — was invisible.
-  Format 4 is now read segment by segment, format 12 group by group,
-  at a cost proportional to the segment count and no per-codepoint
-  work; OS/2 is not consulted for coverage (fontconfig never did). The
-  bit table and both probes are gone. Coverage is normalized on insert
-  and `covers`/`overlap_size` binary-search it; `has_*_ranges` test
-  overlap with the block. The manifest version is 3 — a v2 manifest is
-  block-rounded and gets rescanned. Expect more ranges per font in
-  `FcPattern::unicode_ranges` and a larger manifest.
-
-- **`resolve_char` is honest again.** It returns `None` when no font in the
-  chain covers the character and no last resort is configured. The
-  "if exactly one font is registered, return it for everything" branch is
-  gone; an embedder that wants that configures `last_resort`.
-- **Public `query` uses the shared ranking**: memory fonts first, then
-  style, then how much of the requested coverage the font misses, narrower
-  before wider. It no longer prefers the widest font — `query(name: "Arial")`
-  picks "Arial", not "Arial Unicode MS". `compute_fallbacks` ranks the same
-  way over the font's own coverage.
-- The chain memo key hashes the effective script set, so `None` and an
-  explicit default set share a slot.
+### Fixed
+- Relative fonts.conf `<include>` resolved against the CWD; now `$FONTCONFIG_PATH`, then the config dir. Deterministic include order, cycle guard.
+- `build_complete` could flip while parses were in flight (`in_flight` counter).
+- Lost condvar wake-ups on `scan_complete`/`build_complete` (published under `completed_paths`).
+- Lazy-mode builder threads leaked; threads hold a `Weak` now.
+- Fonts loaded from the manifest were missing from the family index.
+- Duplicate registrations overwrote and orphaned ids.
+- `FcFontRenderConfig` `Eq`/`Ord` consistency (clippy `derive_ord_xor_partial_ord`).
+- OS/2 bit table was misaligned from bit 12 (table removed).
+- Panics no longer unwind into C: `catch_unwind` in every export; `clippy --all-features` passes.
+- Disk-cache tests are compiled out under `single-thread-unsafe-locks`; autosave test is Unix-only.
+- `has_*_ranges` test overlap with the block.
 
 ### Removed
-
-- The token-fuzzy path: `fuzzy_query_by_name`, `token_index`, `font_tokens`
-  and the no-op `index_pattern_tokens` (a no-op in every build since 4.4.3,
-  so the path could not execute). `find_unicode_fallbacks`,
-  `calculate_font_similarity_score`, `query_internal`, and the
-  `system_aliases` cache state (now part of the configuration).
-  `src/lib.rs` is 1,300 lines shorter; chain building lives in
-  `src/fallback.rs`.
+- Token-fuzzy path (`fuzzy_query_by_name`, token index), `find_unicode_fallbacks`, `calculate_font_similarity_score`, `query_internal*`, `system_aliases` state, OS/2 range table, cmap block probes, web-lift last-resort branches, the pattern-keyed map.
+- Workflows `c-bindings.yml` and `rust.yml` (duplicates of `ci.yml`).
 
 ### Deprecated
+- `OperatingSystem::{get_serif_fonts, get_sans_serif_fonts, get_monospace_fonts, expand_generic_family}`, `expand_font_families`, `FcFontCache::{expand_font_families_config_first, system_alias_prefs, resolve_font_chain_with_os}` — thin wrappers over `FcFallbackConfig::os_defaults`.
 
-Thin wrappers over `FcFallbackConfig::os_defaults`, removed in the next
-major: `OperatingSystem::{get_serif_fonts, get_sans_serif_fonts,
-get_monospace_fonts, expand_generic_family}`, `expand_font_families`,
-`FcFontCache::{expand_font_families_config_first, system_alias_prefs,
-resolve_font_chain_with_os}`.
+### Upgrade notes
+- Inject the tables: `FcFontRegistry::new_with_configs(FcScanConfig::os_defaults(os), FcFallbackConfig::os_defaults(os))` or `cache.set_fallback_config(..)`.
+- A font for uncovered characters: `FcFallbackConfig::last_resort`.
+- First run after upgrading rescans (manifest v3).
 
 ### Tests
-
-- `tests/issue_26_unicode_fallback_ranking.rs`: ten hermetic tests with
-  three mock fonts shaped like a Windows box (Segoe UI, MS Gothic, Unifont)
-  — the first tests in the crate where more than one font covers the same
-  script and the assertion is *which one wins*. They cover the reporter's
-  scenario, the unconfigured ranking, `Some(&[])`, configured preferences
-  over ranking, the default generic for generic-less stacks, the last
-  resort, substitutions, memo invalidation on config change, and that the
-  registry's prefetch list covers the chain.
+- `tests/issue_26_unicode_fallback_ranking.rs`, `tests/registry_completion.rs`, fonts.conf tree, coverage exactness, walk cycle, header parity, one-record-per-font.
 
 ## [4.6.0] - 2026-08-29
 
@@ -275,6 +118,14 @@ resolve_font_chain_with_os}`.
   No API change — the version is bumped to 4.5.0 rather than a patch because
   the internal state layout changed, and consumers pinning `<4.5` should
   bump deliberately.
+
+## [4.4.11] - 2026-08-04
+
+- Parse fonts.conf `<alias><prefer>`; generic families resolve config-first (`expand_font_families_config_first`, `system_alias_prefs`).
+
+## [4.4.10] - 2026-07-29
+
+- `single-thread-unsafe-locks`: `spawn_scout_and_builders` is a no-op; spawning threads under the feature is UB.
 
 ## [4.4.9] - 2026-07-29
 
@@ -365,33 +216,35 @@ resolve_font_chain_with_os}`.
   Full scan of 431 system fonts: ~108ms → ~94ms, against ~67ms for the
   OS/2-bounded scan this replaces.
 
+## [4.4.7] - 2026-07-23
+
+- Concrete family names resolve by normalized exact family match; no more substring leaks ("Noto Sans" → "Noto Sans JP").
+
+## [4.4.6] - 2026-07-17
+
+- Registry waits are wasm-safe (`Instant::now` aborts on browser wasm; deadlines are born expired there).
+
+## [4.4.5] - 2026-07-14
+
+- Depend on `allsorts-azul` 0.17 so consumers link one copy.
+
+## [4.4.4] - 2026-06-11
+
+- In-memory fonts registered with empty `unicode_ranges` get coverage from their cmap and resolve on caches without system fonts.
+
 ## [4.4.3] - 2026-06-06
 
-### Fixed
+- ASCII-lowercase font-name matching.
+- `single-thread-unsafe-locks` feature: `StLock` no-atomic lock bypass for single-threaded (azul web) builds.
 
-- **Bundled in-memory fonts were unusable on caches with no system fonts**
-  (headless / wasm / embedder-bundled-font setups). A font registered via
-  `FcFontCache::with_memory_fonts` with a naive pattern (the font bytes plus
-  a name, but an empty `unicode_ranges`) could never be selected to shape
-  any character. Two independent root causes, both fixed:
+## [4.4.2] - 2026-05-30
 
-  1. `with_memory_fonts` / `with_memory_font_with_id` stored the empty
-     `unicode_ranges` verbatim, and `FontFallbackChain::resolve_char`
-     deliberately skips any font that reports no coverage. They now
-     auto-populate `unicode_ranges` from the font's cmap/OS2 tables when the
-     caller leaves them empty, reusing the exact pipeline the on-disk
-     builder uses (`FcParseFontBytes` → `parse_font_faces`). This requires
-     the `parsing` feature; without it the caller-supplied pattern is stored
-     unchanged and the caller must populate `unicode_ranges` themselves.
+- iOS: enumerate fonts via `CTFontCollection` (iOS 7+), not the macOS-only API.
 
-  2. Generic CSS families (`serif` / `sans-serif` / `monospace`) were
-     expanded to a hardcoded list of real per-OS font names and the generic
-     name itself was dropped, so a registered memory font (whatever its
-     family name) was never reached. The chain builder now falls back to a
-     generic `name: None` query for the originally-requested generic
-     family **only when the expanded OS-specific stack matched nothing**, so
-     systems with real fonts are unaffected and any fallback match comes
-     after real matches.
+## [4.4.1] - 2026-05-26
+
+- No rayon on wasm (target-gated off).
+- README and crate docs updated for the 4.x API.
 
 ## [4.4.0] - 2026-05-23
 
@@ -417,6 +270,10 @@ resolve_font_chain_with_os}`.
   (`std` + `not(parsing)`).
 - `test_operating_system_font_expansion` assertions updated to match the
   macOS/iOS serif + sans-serif expansion lists shipped in 4.3.0.
+
+## [4.3.0] - 2026-05-23
+
+- iOS and Android system-font discovery.
 
 ## [4.2.1] - 2026-04-18
 
@@ -445,6 +302,23 @@ resolve_font_chain_with_os}`.
 
 - `FcFontCache::chain_cache_len()` — cheap accessor returning the
   current number of cached resolved chains.
+
+## [4.2.0] - 2026-04-16
+
+- cmap-probe fast path (`request_fonts_fast`, `FcParseFontFaceFast`).
+- Scout publishes per directory.
+
+## [4.1.0] - 2026-04-16
+
+- `FcFontCache` is shared state behind `Arc`; `shared_cache()` replaces `into_fc_font_cache`.
+- Lazy-scout builder fix.
+- `std` is always on.
+
+## [4.0.0] - 2026-04-15
+
+- Breaking: `allsorts-azul` dependency.
+- Scripts-hint chain: `resolve_font_chain_with_scripts`, `DEFAULT_UNICODE_FALLBACK_SCRIPTS`.
+- `FcFontRegistry::wait_for_scout`.
 
 ## [3.3.0] - 2026-04-14
 
@@ -497,6 +371,27 @@ resolve_font_chain_with_os}`.
   signatures and their "default 7 scripts" behaviour.
 - `get_font_bytes` keeps its `Option<Vec<u8>>` signature; it now
   just clones from `get_font_bytes_arc` internally.
+
+## [3.2.1] - 2026-04-11
+
+- `process_path` gated to `std`+`parsing` (used cross-platform).
+
+## [3.2.0] - 2026-04-11
+
+- `parsing`, `multithreading`, `cache` are opt-in features, not defaults.
+
+## [3.1.0] - 2026-04-07
+
+- Populate `unicode_fallbacks` for CJK, Arabic, Cyrillic, Devanagari.
+- `parsing` implies `std`; `xmlparser` Linux-only; CI fixes for MSVC/Windows.
+
+## [3.0.0] - 2026-04-02
+
+- Per-font DPI/rendering config from fonts.conf (#16).
+- FFI: `#[repr(C)]` on `UnicodeRange`; Vec capacity UB fixed.
+- Dedup of lib.rs/ffi.rs/multithread.rs (-1057 lines); `scoring.rs`, `utils.rs` extracted.
+- Single `progress` condvar replaces the FontRequest system.
+- C registry example built and run in CI on all platforms.
 
 ## [2.0.0] - 2026-02-14
 
@@ -639,6 +534,10 @@ This separation enables:
 
 - Better font resolution algorithms
 - Performance improvements for font matching
+
+## [1.0.4] - 2025-11-24
+
+- Update to regular allsorts.
 
 ## [1.0.3] - Previous
 
