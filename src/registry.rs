@@ -443,22 +443,25 @@ impl FcFontRegistry {
             .max(1);
 
         // Spawn Scout thread
-        let registry = Arc::clone(self);
+        // Threads hold only a Weak handle: dropping the last Arc frees the
+        // registry and ends its builders within one step, so `shutdown()`
+        // is a courtesy, not a requirement.
+        let scout = Arc::downgrade(self);
         std::thread::Builder::new()
             .name("rfc-font-scout".to_string())
             .spawn(move || {
-                registry.scout_thread();
+                if let Some(registry) = scout.upgrade() {
+                    registry.scout_thread();
+                }
             })
             .expect("failed to spawn font scout thread");
 
         // Spawn Builder threads
         for i in 0..num_threads {
-            let registry = Arc::clone(self);
+            let registry = Arc::downgrade(self);
             std::thread::Builder::new()
                 .name(format!("rfc-font-builder-{}", i))
-                .spawn(move || {
-                    registry.builder_thread();
-                })
+                .spawn(move || FcFontRegistry::builder_thread(registry))
                 .expect("failed to spawn font builder thread");
         }
         }

@@ -17,6 +17,15 @@ use crate::FcParseFont;
 #[cfg(target_os = "ios")]
 use crate::OperatingSystem;
 
+/// What a builder does after one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuilderStep {
+    /// Re-check that the registry still exists, then take another step.
+    Continue,
+    /// The build is complete or the registry is shutting down.
+    Exit,
+}
+
 impl FcFontRegistry {
     /// Scout thread: enumerates font directories and populates the build queue.
     ///
@@ -33,7 +42,7 @@ impl FcFontRegistry {
     /// decides where fonts live and which families matter, this thread
     /// only executes that decision. `self.os` remains in play solely for
     /// the iOS CoreText enumeration branch below.
-    pub fn scout_thread(&self) {
+    pub(crate) fn scout_thread(&self) {
         let font_dirs = self.scan_config.font_dirs.clone();
         let common_token_sets = self.scan_config.priority_token_sets();
         let lazy = self.lazy_scout.load(Ordering::Acquire);
@@ -48,9 +57,7 @@ impl FcFontRegistry {
             if self.os == OperatingSystem::IOS {
                 let ios_paths = crate::mobile_ios::copy_available_font_urls();
                 self.publish_ios_font_urls(ios_paths, &common_token_sets, lazy);
-                self.scan_complete.store(true, Ordering::Release);
-                self.queue_condvar.notify_all();
-                self.progress.notify_all();
+                self.mark_scan_complete();
                 return;
             }
         }
@@ -120,9 +127,7 @@ impl FcFontRegistry {
             self.progress.notify_all();
         }
 
-        self.scan_complete.store(true, Ordering::Release);
-        self.queue_condvar.notify_all();
-        self.progress.notify_all();
+        self.mark_scan_complete();
     }
 
     /// Merge a batch of CoreText-discovered font URLs into the registry,
@@ -199,110 +204,144 @@ impl FcFontRegistry {
     ///   "queue empty + scan complete" condition (as the eager
     ///   path does) would race the Critical job push and cause the
     ///   request to hang forever.
-    pub fn builder_thread(&self) {
-        loop {
-            if self.shutdown.load(Ordering::Relaxed) {
+     /// Body of a builder thread. The registry is held only for the duration
+    /// of one step, so a registry whose last `Arc` was dropped is freed — and
+    /// its builders exit — within one step (at most one 100 ms wait or one
+    /// font parse). Builders used to hold an `Arc` themselves, which made
+    /// `Drop` unreachable and left N threads polling for the life of the
+    /// process in lazy mode.
+    pub(crate) fn builder_thread(registry: std::sync::Weak<FcFontRegistry>) {
+        while let Some(registry) = registry.upgrade() {
+            if registry.builder_step() == BuilderStep::Exit {
                 return;
             }
+        }
+    }
 
-            let lazy = self.lazy_scout.load(Ordering::Acquire);
+    /// One builder step: wait for a job (at most 100 ms) and process it.
+    fn builder_step(&self) -> BuilderStep {
+        if self.shutdown.load(Ordering::Relaxed) {
+            return BuilderStep::Exit;
+        }
 
-            // Pop the highest-priority job. `in_flight` is bumped while the
-            // queue lock is held, so a builder that finds the queue empty
-            // also sees the job that just left it.
-            let job = {
-                let mut queue = match self.build_queue.lock() {
-                    Ok(q) => q,
-                    Err(_) => return,
-                };
+        let lazy = self.lazy_scout.load(Ordering::Acquire);
 
-                loop {
-                    if self.shutdown.load(Ordering::Relaxed) {
-                        return;
+        // Pop the highest-priority job. `in_flight` is bumped while the
+        // queue lock is held, so a builder that finds the queue empty
+        // also sees the job that just left it.
+        let job = {
+            let mut queue = match self.build_queue.lock() {
+                Ok(q) => q,
+                Err(_) => return BuilderStep::Exit,
+            };
+
+            loop {
+                if self.shutdown.load(Ordering::Relaxed) {
+                    return BuilderStep::Exit;
+                }
+
+                if let Some(job) = queue.pop() {
+                    self.in_flight.fetch_add(1, Ordering::AcqRel);
+                    break job;
+                }
+
+                // Eager mode: exit once the scout is done, everything it
+                // queued has drained, AND no builder is still parsing.
+                //
+                // Lazy mode: keep waiting — `request_fonts` is the sole
+                // source of jobs and can fire at any time during the
+                // layout pass.
+                if !lazy
+                    && self.scan_complete.load(Ordering::Acquire)
+                    && queue.is_empty()
+                    && self.in_flight.load(Ordering::Acquire) == 0
+                {
+                    // Exactly one builder wins this transition; the others
+                    // simply exit. Only the winner persists, so N builders
+                    // cannot write the same manifest concurrently.
+                    let is_winner = self.try_complete_build();
+                    // Release the build-queue lock BEFORE touching the
+                    // filesystem: persisting takes the cache state lock and
+                    // does real I/O, and holding the queue lock across that
+                    // would both stall `request_fonts` and invert the
+                    // queue-then-state lock order used elsewhere.
+                    drop(queue);
+                    if is_winner && self.persist_on_complete.load(Ordering::Acquire) {
+                        self.persist_cache_on_build_complete();
                     }
+                    return BuilderStep::Exit;
+                }
 
-                    if let Some(job) = queue.pop() {
-                        self.in_flight.fetch_add(1, Ordering::AcqRel);
-                        break job;
-                    }
-
-                    // Eager mode: exit once the scout is done, everything it
-                    // queued has drained, AND no builder is still parsing.
-                    // Without the last condition "build complete" was
-                    // announced — and the manifest persisted — while up to
-                    // N-1 fonts were still on their way into the cache.
-                    //
-                    // Lazy mode: keep waiting — `request_fonts` is the sole
-                    // source of jobs and can fire at any time during the
-                    // layout pass.
-                    if !lazy
-                        && self.scan_complete.load(Ordering::Acquire)
-                        && queue.is_empty()
-                        && self.in_flight.load(Ordering::Acquire) == 0
-                    {
-                        // Exactly one builder thread wins this transition; the
-                        // others observe `Err` and simply exit. Only the winner
-                        // persists, so N builders cannot produce N concurrent
-                        // writes of the same manifest.
-                        let is_winner = self
-                            .build_complete
-                            .compare_exchange(
-                                false,
-                                true,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
-                            .is_ok();
-                        self.progress.notify_all();
-                        // Release the build-queue lock BEFORE touching the
-                        // filesystem: persisting takes the cache state lock and
-                        // does real I/O, and holding the queue lock across that
-                        // would both stall `request_fonts` and invert the
-                        // queue-then-state lock order used elsewhere.
+                // Wait for a job, or for an in-flight parse to finish
+                // (`finish_job` notifies this condvar). A timed-out wait
+                // ends the step so the thread re-checks whether the registry
+                // still exists.
+                queue = match self
+                    .queue_condvar
+                    .wait_timeout(queue, Duration::from_millis(100))
+                {
+                    Ok((queue, timeout)) if timeout.timed_out() => {
                         drop(queue);
-                        if is_winner && self.persist_on_complete.load(Ordering::Acquire) {
-                            self.persist_cache_on_build_complete();
-                        }
-                        return;
+                        return BuilderStep::Continue;
                     }
+                    Ok((queue, _)) => queue,
+                    Err(_) => return BuilderStep::Exit,
+                };
+            }
+        };
 
-                    // Wait for new jobs, or for an in-flight parse to finish
-                    // (`finish_job` notifies this condvar).
-                    queue = match self
-                        .queue_condvar
-                        .wait_timeout(queue, Duration::from_millis(100))
-                    {
-                        Ok(result) => result.0,
-                        Err(_) => return,
-                    };
+        // Deduplication: the first builder to claim a path parses it.
+        // Whatever happens below, the job is balanced by `finish_job`.
+        let claimed = match self.processed_paths.lock() {
+            Ok(mut processed) => processed.insert(job.path.clone()),
+            Err(_) => false,
+        };
+
+        if claimed {
+            if let Some(results) = FcParseFont(&job.path) {
+                for (pattern, font_path) in results {
+                    self.insert_font(pattern, font_path);
                 }
-            };
-
-            // Deduplication: the first builder to claim a path parses it.
-            // Whatever happens below, the job is balanced by `finish_job`.
-            let claimed = match self.processed_paths.lock() {
-                Ok(mut processed) => processed.insert(job.path.clone()),
-                Err(_) => false,
-            };
-
-            if claimed {
-                if let Some(results) = FcParseFont(&job.path) {
-                    for (pattern, font_path) in results {
-                        self.insert_font(pattern, font_path);
-                    }
-                }
-
-                // Mark this file as fully completed (patterns inserted)
-                if let Ok(mut completed) = self.completed_paths.lock() {
-                    completed.insert(job.path.clone());
-                }
-
-                // Notify waiting threads that a font has been completed
-                self.progress.notify_all();
             }
 
-            self.finish_job();
+            // Mark this file as fully completed (patterns inserted)
+            if let Ok(mut completed) = self.completed_paths.lock() {
+                completed.insert(job.path.clone());
+            }
+
+            // Notify waiting threads that a font has been completed
+            self.progress.notify_all();
         }
+
+        self.finish_job();
+        BuilderStep::Continue
+    }
+
+    /// Publish "the scout is done". The flag is a predicate that `progress`
+    /// waiters read under `completed_paths`, so it is stored and the waiters
+    /// notified under that same lock: a notify that lands between a waiter's
+    /// check and its wait is otherwise lost, and the waiter sleeps to its
+    /// deadline — up to 5 s for `wait_for_scout`.
+    fn mark_scan_complete(&self) {
+        {
+            let _waiters = self.completed_paths.lock();
+            self.scan_complete.store(true, Ordering::Release);
+            self.progress.notify_all();
+        }
+        self.queue_condvar.notify_all();
+    }
+
+    /// Try to be the builder that completes the build; same locking argument
+    /// as `mark_scan_complete`. Called with the queue lock held — queue then
+    /// `completed_paths` is the order every other path keeps to.
+    fn try_complete_build(&self) -> bool {
+        let _waiters = self.completed_paths.lock();
+        let won = self
+            .build_complete
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        self.progress.notify_all();
+        won
     }
 
     /// Balance the `in_flight` bump of a popped job. The decrement happens
