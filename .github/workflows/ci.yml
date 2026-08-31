@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Test all feature combinations on desktop platforms
+  # Test feature combinations on desktop platforms
   feature-matrix:
     name: Feature Matrix (${{ matrix.os }})
     strategy:
@@ -23,10 +23,7 @@ jobs:
           - "--no-default-features --features parsing"  # parsing implies std
           - "--no-default-features --features std,multithreading"
           - "--no-default-features --features std,parsing,multithreading"
-          # The registry and the disk cache with real threads. `--all-features`
-          # turns on `single-thread-unsafe-locks`, under which no scout or
-          # builder is ever spawned, so the tests that need a completed scan
-          # are compiled out there and run on this row instead.
+          # Tests requiring a completed scan run here, since --all-features enables single-thread-unsafe-locks (which prevents spawning scout/builder threads).
           - "--no-default-features --features cache,async-registry,parsing"
           - "--all-features"
     runs-on: ${{ matrix.os }}
@@ -41,14 +38,14 @@ jobs:
     - name: Test
       run: cargo test ${{ matrix.features }}
 
-  # Cross-compilation checks (no_std / mobile / WASM)
+  # Cross-compilation checks (no_std, mobile, WASM)
   cross-check:
     name: Cross (${{ matrix.target }}, ${{ matrix.features }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          # WASM (parsing implies std; mmapio/rayon excluded via cfg)
+          # WASM (parsing implies std, mmapio/rayon excluded via cfg)
           - target: wasm32-unknown-unknown
             features: "--no-default-features --features parsing"
           # WASM with WASI
@@ -75,7 +72,7 @@ jobs:
     - name: Check
       run: cargo check --lib --target ${{ matrix.target }} ${{ matrix.features }}
 
-  # C bindings build + test
+  # C bindings build and test
   c-bindings:
     strategy:
       matrix:
@@ -137,7 +134,7 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: sudo apt-get update && sudo apt-get install -y build-essential
 
-    # ── Build C examples ──────────────────────────────────────────────
+    # Build C examples
 
     - name: Build C examples (Unix-like)
       if: matrix.os != 'windows-latest'
@@ -169,7 +166,7 @@ jobs:
         cp target/x86_64-pc-windows-gnu/release/rust_fontconfig.dll .
         ls -la *.exe *.dll
 
-    # ── Run C examples ────────────────────────────────────────────────
+    # Run C examples
 
     - name: Set LD_LIBRARY_PATH (Linux)
       if: matrix.os == 'ubuntu-latest'
@@ -189,17 +186,17 @@ jobs:
       shell: bash
       run: |
         set -e
-        echo "=== Old API example ==="
+        echo "Old API example"
         ./example list | head -20
         echo "..."
         echo ""
-        echo "=== Registry example: Demo 1 (Azul-style fast startup) ==="
+        echo "Registry example: Demo 1 (Azul-style fast startup)"
         ./example_registry 1
         echo ""
-        echo "=== Registry example: Demo 2 (Incremental loading) ==="
+        echo "Registry example: Demo 2 (Incremental loading)"
         ./example_registry 2
         echo ""
-        echo "=== Registry example: Demo 3 (Old vs New API) ==="
+        echo "Registry example: Demo 3 (Old vs New API)"
         ./example_registry 3
 
     - name: Run C examples (Windows MSVC)
@@ -219,20 +216,20 @@ jobs:
       shell: bash
       run: |
         set -e
-        echo "=== Old API example ==="
+        echo "Old API example"
         ./example.exe list | head -20
         echo "..."
         echo ""
-        echo "=== Registry example: Demo 1 ==="
+        echo "Registry example: Demo 1"
         ./example_registry.exe 1
         echo ""
-        echo "=== Registry example: Demo 2 ==="
+        echo "Registry example: Demo 2"
         ./example_registry.exe 2
         echo ""
-        echo "=== Registry example: Demo 3 ==="
+        echo "Registry example: Demo 3"
         ./example_registry.exe 3
 
-    # ── Upload artifacts ──────────────────────────────────────────────
+    # Upload artifacts
 
     - name: Upload static library
       uses: actions/upload-artifact@v4

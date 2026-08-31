@@ -1,7 +1,5 @@
-# Tag `vX.Y.Z` (matching Cargo.toml) to publish a GitHub Release with the C
-# header and the built C library for Linux, macOS and Windows, and release
-# notes taken from that version's CHANGELOG section. crates.io publishing
-# stays manual: `cargo publish`.
+# Creates a GitHub release (C header, built C libraries, changelog notes) when a version tag is pushed.
+# Publishing to crates.io is done manually via `cargo publish`.
 name: Release
 
 on:
