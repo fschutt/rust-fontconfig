@@ -19,8 +19,18 @@
 //!
 //! Requires the `cache` and `async-registry` features:
 //!   cargo test --features cache,async-registry,parsing --test disk_cache_persistence
+//!
+//! Not compiled under `single-thread-unsafe-locks`: that feature makes
+//! `spawn_scout_and_builders` a no-op by design, so a scan can never
+//! complete and every test here would time out. `--all-features` enables it,
+//! which is why CI runs these on an explicit `cache,async-registry,parsing`
+//! row instead.
 
-#![cfg(all(feature = "cache", feature = "async-registry"))]
+#![cfg(all(
+    feature = "cache",
+    feature = "async-registry",
+    not(feature = "single-thread-unsafe-locks")
+))]
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -227,6 +237,12 @@ fn save_leaves_no_temp_files_and_replaces_atomically() {
 /// temp directory, both so it cannot clobber the developer's real font cache
 /// and so "the manifest exists" cannot be satisfied by a manifest that was
 /// already there.
+///
+/// Unix only: on Windows `dirs::cache_dir()` comes from the known-folder API
+/// (`%LOCALAPPDATA%` as the shell sees it), which no environment variable
+/// redirects, so the child would write into the real cache and the parent's
+/// assertion would fail for the wrong reason.
+#[cfg(unix)]
 #[test]
 fn build_completion_writes_the_real_manifest_without_any_explicit_save() {
     const CHILD_ENV: &str = "RFC_DISK_CACHE_AUTOSAVE_CHILD";
