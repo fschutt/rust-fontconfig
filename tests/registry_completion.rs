@@ -115,3 +115,37 @@ fn build_complete_means_every_font_is_in_the_cache() {
 
     registry.shutdown();
 }
+
+/// Dropping the last handle frees the registry: builders hold only a `Weak`,
+/// so they exit within one step instead of polling for the life of the
+/// process. Lazy mode is the case that used to leak — nothing ever completed
+/// the build, so the threads never exited and `Drop` never ran.
+#[test]
+fn dropping_the_registry_ends_its_threads() {
+    let registry = FcFontRegistry::new_with_config(FcScanConfig::empty());
+    registry.set_scout_lazy(true);
+    registry.set_persist_on_complete(false);
+    registry.spawn_scout_and_builders();
+    let weak = std::sync::Arc::downgrade(&registry);
+    drop(registry);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while weak.upgrade().is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(weak.upgrade().is_none(), "a builder thread still holds the registry alive");
+}
+
+/// With nothing to scan, the only wake-up `wait_for_scout` can get is the
+/// final one; it must not be lost (a lost one meant sleeping to the 5 s
+/// deadline).
+#[test]
+fn wait_for_scout_returns_promptly_when_the_build_completes() {
+    let registry = FcFontRegistry::new_with_config(FcScanConfig::empty());
+    registry.set_persist_on_complete(false);
+    registry.spawn_scout_and_builders();
+    let started = Instant::now();
+    registry.wait_for_scout();
+    assert!(registry.is_build_complete());
+    assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+}
