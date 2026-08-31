@@ -100,15 +100,15 @@ impl FcFontRegistry {
                 entry.font_indices.iter().map(move |idx_entry| (path_str, hash, idx_entry))
             })
             .for_each(|(path_str, bytes_hash, idx_entry)| {
-                let id = FontId::new();
-                state.index_pattern_tokens(&idx_entry.pattern, id);
-                state.patterns.insert(idx_entry.pattern.clone(), id);
-                state.disk_fonts.insert(id, FcFontPath {
-                    path: path_str.clone(),
-                    font_index: idx_entry.font_index,
-                    bytes_hash,
-                });
-                state.metadata.insert(id, idx_entry.pattern.clone());
+                state.insert_disk_font(
+                    idx_entry.pattern.clone(),
+                    FontId::new(),
+                    FcFontPath {
+                        path: path_str.clone(),
+                        font_index: idx_entry.font_index,
+                        bytes_hash,
+                    },
+                );
             });
 
         drop(state);

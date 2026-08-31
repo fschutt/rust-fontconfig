@@ -94,6 +94,14 @@ use std::path::PathBuf;
 pub mod utils;
 #[cfg(feature = "std")]
 pub mod config;
+#[cfg(feature = "std")]
+pub mod fallback;
+#[cfg(feature = "std")]
+pub use config::{FcFallbackConfig, FcScriptFallback, GenericFamily};
+#[cfg(feature = "std")]
+pub use fallback::{CssFallbackGroup, FontFallbackChain, ScriptFallbackGroup};
+#[cfg(feature = "std")]
+use fallback::FontChainCacheKey;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -146,240 +154,48 @@ impl OperatingSystem {
         return OperatingSystem::Linux; // Default fallback
     }
     
-    /// Get system-specific fonts for the "serif" generic family
-    /// Prioritizes fonts based on Unicode range coverage
+    /// Built-in `serif` candidates for this OS, script-specific entries for
+    /// `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
+    #[cfg(feature = "std")]
+    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::Serif, ranges)`")]
     pub fn get_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        let has_cjk = has_cjk_ranges(unicode_ranges);
-        let has_arabic = has_arabic_ranges(unicode_ranges);
-        let _has_cyrillic = has_cyrillic_ranges(unicode_ranges);
-        
-        match self {
-            OperatingSystem::Windows => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["MS Mincho", "SimSun", "MingLiU"]);
-                }
-                if has_arabic {
-                    fonts.push("Traditional Arabic");
-                }
-                fonts.push("Times New Roman");
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Linux => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Noto Serif CJK SC", "Noto Serif CJK JP", "Noto Serif CJK KR"]);
-                }
-                if has_arabic {
-                    fonts.push("Noto Serif Arabic");
-                }
-                fonts.extend_from_slice(&[
-                    "Times", "Times New Roman", "DejaVu Serif", "Free Serif", 
-                    "Noto Serif", "Bitstream Vera Serif", "Roman", "Regular"
-                ]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::MacOS | OperatingSystem::IOS => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Hiragino Mincho ProN", "STSong", "AppleMyungjo"]);
-                }
-                if has_arabic {
-                    fonts.push("Geeza Pro");
-                }
-                fonts.extend_from_slice(&["Times New Roman", "Times", "New York", "Palatino"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Android => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Noto Serif CJK SC", "Noto Serif CJK JP", "Noto Serif CJK KR"]);
-                }
-                if has_arabic {
-                    fonts.push("Noto Naskh Arabic");
-                }
-                fonts.extend_from_slice(&["Noto Serif", "Roboto Serif", "Droid Serif"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Wasm => Vec::new(),
-        }
+        FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::Serif, unicode_ranges)
     }
 
-    /// Get system-specific fonts for the "sans-serif" generic family
-    /// Prioritizes fonts based on Unicode range coverage
+    /// Built-in `sans-serif` candidates for this OS, script-specific entries
+    /// for `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
+    #[cfg(feature = "std")]
+    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::SansSerif, ranges)`")]
     pub fn get_sans_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        let has_cjk = has_cjk_ranges(unicode_ranges);
-        let has_arabic = has_arabic_ranges(unicode_ranges);
-        let _has_cyrillic = has_cyrillic_ranges(unicode_ranges);
-        let has_hebrew = has_hebrew_ranges(unicode_ranges);
-        let has_thai = has_thai_ranges(unicode_ranges);
-        
-        match self {
-            OperatingSystem::Windows => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "SimHei"]);
-                }
-                if has_arabic {
-                    fonts.push("Segoe UI Arabic");
-                }
-                if has_hebrew {
-                    fonts.push("Segoe UI Hebrew");
-                }
-                if has_thai {
-                    fonts.push("Leelawadee UI");
-                }
-                fonts.extend_from_slice(&["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Linux => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&[
-                        "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR",
-                        "WenQuanYi Micro Hei", "Droid Sans Fallback"
-                    ]);
-                }
-                if has_arabic {
-                    fonts.push("Noto Sans Arabic");
-                }
-                if has_hebrew {
-                    fonts.push("Noto Sans Hebrew");
-                }
-                if has_thai {
-                    fonts.push("Noto Sans Thai");
-                }
-                fonts.extend_from_slice(&["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::MacOS | OperatingSystem::IOS => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&[
-                        "Hiragino Sans", "Hiragino Kaku Gothic ProN",
-                        "PingFang SC", "PingFang TC", "Apple SD Gothic Neo"
-                    ]);
-                }
-                if has_arabic {
-                    fonts.push("Geeza Pro");
-                }
-                if has_hebrew {
-                    fonts.push("Arial Hebrew");
-                }
-                if has_thai {
-                    fonts.push("Thonburi");
-                }
-                fonts.extend_from_slice(&[
-                    "San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular",
-                    "Helvetica Neue", "Helvetica", "Lucida Grande",
-                ]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Android => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&[
-                        "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR",
-                        "Droid Sans Fallback",
-                    ]);
-                }
-                if has_arabic {
-                    fonts.push("Noto Sans Arabic");
-                }
-                if has_hebrew {
-                    fonts.push("Noto Sans Hebrew");
-                }
-                if has_thai {
-                    fonts.push("Noto Sans Thai");
-                }
-                fonts.extend_from_slice(&[
-                    "Roboto", "Roboto-Regular", "Noto Sans", "Droid Sans",
-                ]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Wasm => Vec::new(),
-        }
+        FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::SansSerif, unicode_ranges)
     }
 
-    /// Get system-specific fonts for the "monospace" generic family
-    /// Prioritizes fonts based on Unicode range coverage
+    /// Built-in `monospace` candidates for this OS, script-specific entries
+    /// for `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
+    #[cfg(feature = "std")]
+    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::Monospace, ranges)`")]
     pub fn get_monospace_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        let has_cjk = has_cjk_ranges(unicode_ranges);
-        
-        match self {
-            OperatingSystem::Windows => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["MS Gothic", "SimHei"]);
-                }
-                fonts.extend_from_slice(&["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Linux => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Noto Sans Mono CJK SC", "Noto Sans Mono CJK JP", "WenQuanYi Zen Hei Mono"]);
-                }
-                fonts.extend_from_slice(&[
-                    "Source Code Pro", "Cantarell", "DejaVu Sans Mono", 
-                    "Roboto Mono", "Ubuntu Monospace", "Droid Sans Mono"
-                ]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::MacOS | OperatingSystem::IOS => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Hiragino Sans", "PingFang SC"]);
-                }
-                fonts.extend_from_slice(&["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Android => {
-                let mut fonts = Vec::new();
-                if has_cjk {
-                    fonts.extend_from_slice(&["Noto Sans Mono CJK SC", "Noto Sans Mono CJK JP"]);
-                }
-                fonts.extend_from_slice(&["Roboto Mono", "Droid Sans Mono", "Noto Sans Mono", "DejaVu Sans Mono"]);
-                fonts.iter().map(|s| s.to_string()).collect()
-            }
-            OperatingSystem::Wasm => Vec::new(),
-        }
+        FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::Monospace, unicode_ranges)
     }
-    
-    /// Expand a generic CSS font family to system-specific font names
-    /// Returns the original name if not a generic family
-    /// Prioritizes fonts based on Unicode range coverage
+
+    /// Expand one CSS family entry against the built-in tables for this OS.
+    /// A named family expands to itself.
+    #[cfg(feature = "std")]
+    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_family(family, ranges)`")]
     pub fn expand_generic_family(&self, family: &str, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        match family.to_ascii_lowercase().as_str() {
-            "serif" => self.get_serif_fonts(unicode_ranges),
-            "sans-serif" => self.get_sans_serif_fonts(unicode_ranges),
-            "monospace" => self.get_monospace_fonts(unicode_ranges),
-            "cursive" | "fantasy" | "system-ui" => {
-                // Use sans-serif as fallback for these
-                self.get_sans_serif_fonts(unicode_ranges)
-            }
-            _ => vec![family.to_string()],
-        }
+        FcFallbackConfig::os_defaults(*self).expand_family(family, unicode_ranges)
     }
 }
 
-/// Expand a CSS font-family stack with generic families resolved to OS-specific fonts
-/// Prioritizes fonts based on Unicode range coverage
-/// Example: ["Arial", "sans-serif"] on macOS with CJK ranges -> ["Arial", "PingFang SC", "Hiragino Sans", ...]
+/// Expand a CSS font stack against the built-in per-OS tables.
 ///
-/// NOTE: this free function only sees the per-OS LAST-RESORT lists. When a
-/// system font configuration is available, prefer
-/// [`FcFontCache::expand_font_families_config_first`], which consults the
-/// parsed `<alias>`/`<prefer>` preferences (the machine's ACTUAL
-/// configuration) before any built-in list.
+/// Kept for 4.x callers. Resolution no longer goes through this: the cache
+/// resolves with its injected [`FcFallbackConfig`], and
+/// [`FcFallbackConfig::os_defaults`] is the explicit opt-in to these tables.
+#[cfg(feature = "std")]
+#[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).candidate_families(families, ranges)`")]
 pub fn expand_font_families(families: &[String], os: OperatingSystem, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-    let mut expanded = Vec::new();
-    
-    for family in families {
-        expanded.extend(os.expand_generic_family(family, unicode_ranges));
-    }
-    
-    expanded
+    FcFallbackConfig::os_defaults(os).candidate_families(families, unicode_ranges)
 }
 
 /// UUID to identify a font (collections are broken up into separate fonts)
@@ -1118,184 +934,6 @@ pub struct ResolvedFontRun {
     pub css_source: String,
 }
 
-/// Resolved font fallback chain for a CSS font-family stack
-/// This represents the complete chain of fonts to use for rendering text
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FontFallbackChain {
-    /// CSS-based fallbacks: Each CSS font expanded to its system fallbacks
-    /// Example: ["NotoSansJP" -> [Hiragino Sans, PingFang SC], "sans-serif" -> [Helvetica]]
-    pub css_fallbacks: Vec<CssFallbackGroup>,
-    
-    /// Unicode-based fallbacks: Fonts added to cover missing Unicode ranges
-    /// Only populated if css_fallbacks don't cover all requested characters
-    pub unicode_fallbacks: Vec<FontMatch>,
-    
-    /// The original CSS font-family stack that was requested
-    pub original_stack: Vec<String>,
-}
-
-impl FontFallbackChain {
-    /// Resolve which font should be used for a specific character
-    /// Returns (FontId, css_source_name) where css_source_name indicates which CSS font matched
-    /// Returns None if no font in the chain can render this character
-    pub fn resolve_char(&self, cache: &FcFontCache, ch: char) -> Option<(FontId, String)> {
-        let codepoint = ch as u32;
-
-        // Check CSS fallbacks in order
-        for group in &self.css_fallbacks {
-            for font in &group.fonts {
-                let Some(meta) = cache.get_metadata_by_id(&font.id) else { continue };
-                if meta.unicode_ranges.is_empty() {
-                    continue; // No range info — don't assume it covers everything
-                }
-                if meta.unicode_ranges.iter().any(|r| codepoint >= r.start && codepoint <= r.end) {
-                    return Some((font.id, group.css_name.clone()));
-                }
-            }
-        }
-
-        // Check Unicode fallbacks
-        for font in &self.unicode_fallbacks {
-            let Some(meta) = cache.get_metadata_by_id(&font.id) else { continue };
-            if meta.unicode_ranges.iter().any(|r| codepoint >= r.start && codepoint <= r.end) {
-                return Some((font.id, "(unicode-fallback)".to_string()));
-            }
-        }
-
-        // WEB-LIFT LAST-RESORT (re-added 2026-06-03; the `with_memory_fonts` trap that
-        // previously made touching this file fatal is now fixed by the byte-atomic remill
-        // fork support). The lifted web path fails coverage-based resolution above for TWO
-        // reasons that both mis-lift: the chain mis-builds to empty AND/OR `get_metadata_by_id`
-        // (a HashMap<FontId,_> lookup) returns None in the lift. So instead of gating on the
-        // chain being empty, fire whenever NOTHING matched above AND the cache holds exactly
-        // the single registered fallback font — the headless/web case. This bypasses BOTH the
-        // chain and the metadata HashMap, returning the only font's id directly. Native caches
-        // hold many system fonts, so `len()==1` is false there → native is unaffected.
-        let registered = cache.list();
-        if registered.len() == 1 {
-            return Some((registered[0].1, "(web-last-resort)".to_string()));
-        }
-
-        None
-    }
-    
-    /// Resolve all characters in a text string to their fonts
-    /// Returns a vector of (character, FontId, css_source) tuples
-    pub fn resolve_text(&self, cache: &FcFontCache, text: &str) -> Vec<(char, Option<(FontId, String)>)> {
-        text.chars()
-            .map(|ch| (ch, self.resolve_char(cache, ch)))
-            .collect()
-    }
-    
-    /// Query which fonts should be used for a text string, grouped by font
-    /// Returns runs of consecutive characters that use the same font
-    /// This is the main API for text shaping - call this to get font runs, then shape each run
-    pub fn query_for_text(&self, cache: &FcFontCache, text: &str) -> Vec<ResolvedFontRun> {
-        if text.is_empty() {
-            return Vec::new();
-        }
-        
-        let mut runs: Vec<ResolvedFontRun> = Vec::new();
-        let mut current_font: Option<FontId> = None;
-        let mut current_css_source: Option<String> = None;
-        let mut current_start_byte: usize = 0;
-        
-        for (byte_idx, ch) in text.char_indices() {
-            let resolved = self.resolve_char(cache, ch);
-            let (font_id, css_source) = match &resolved {
-                Some((id, source)) => (Some(*id), Some(source.clone())),
-                None => (None, None),
-            };
-            
-            // Check if we need to start a new run
-            let font_changed = font_id != current_font;
-            
-            if font_changed && byte_idx > 0 {
-                // Finalize the current run
-                let run_text = &text[current_start_byte..byte_idx];
-                runs.push(ResolvedFontRun {
-                    text: run_text.to_string(),
-                    start_byte: current_start_byte,
-                    end_byte: byte_idx,
-                    font_id: current_font,
-                    css_source: current_css_source.clone().unwrap_or_default(),
-                });
-                current_start_byte = byte_idx;
-            }
-            
-            current_font = font_id;
-            current_css_source = css_source;
-        }
-        
-        // Finalize the last run
-        if current_start_byte < text.len() {
-            let run_text = &text[current_start_byte..];
-            runs.push(ResolvedFontRun {
-                text: run_text.to_string(),
-                start_byte: current_start_byte,
-                end_byte: text.len(),
-                font_id: current_font,
-                css_source: current_css_source.unwrap_or_default(),
-            });
-        }
-        
-        runs
-    }
-}
-
-/// A group of fonts that are fallbacks for a single CSS font-family name
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CssFallbackGroup {
-    /// The CSS font name (e.g., "NotoSansJP", "sans-serif")
-    pub css_name: String,
-    
-    /// System fonts that match this CSS name
-    /// First font in list is the best match
-    pub fonts: Vec<FontMatch>,
-}
-
-/// Cache key for font fallback chain queries
-///
-/// IMPORTANT: This key intentionally does NOT include per-text unicode
-/// ranges — fallback chains are cached by CSS properties only. Different
-/// texts with the same CSS font-stack share the same chain.
-///
-/// `scripts_hint_hash` distinguishes *which set of Unicode-fallback
-/// scripts* the caller asked for. `None` means "the default set of 7
-/// major scripts" (Cyrillic/Arabic/Devanagari/Hiragana/Katakana/CJK/Hangul,
-/// back-compat behaviour of `resolve_font_chain`). `Some(h)` is a
-/// stable hash of a caller-supplied script list so an ASCII-only
-/// query doesn't collide with a CJK-aware one.
-#[cfg(feature = "std")]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct FontChainCacheKey {
-    /// CSS font stack (expanded to OS-specific fonts)
-    pub(crate) font_families: Vec<String>,
-    /// Font weight
-    pub(crate) weight: FcWeight,
-    /// Font style flags
-    pub(crate) italic: PatternMatch,
-    pub(crate) oblique: PatternMatch,
-    /// Hash of the caller-supplied script hint (or `None` for the default set).
-    pub(crate) scripts_hint_hash: Option<u64>,
-}
-
-/// Hash a `scripts_hint` slice into a stable u64 for use as a
-/// [`FontChainCacheKey`] component. Order-insensitive: we sort a
-/// local copy before hashing so `[CJK, Arabic]` and `[Arabic, CJK]`
-/// key into the same cache slot.
-#[cfg(feature = "std")]
-fn hash_scripts_hint(ranges: &[UnicodeRange]) -> u64 {
-    let mut sorted: Vec<UnicodeRange> = ranges.to_vec();
-    sorted.sort();
-    let mut buf = Vec::with_capacity(sorted.len() * 8);
-    for r in &sorted {
-        buf.extend_from_slice(&r.start.to_le_bytes());
-        buf.extend_from_slice(&r.end.to_le_bytes());
-    }
-    crate::utils::content_hash_u64(&buf)
-}
-
 /// Path to a font file
 ///
 /// `bytes_hash` is a deterministic 64-bit hash of the file's full
@@ -1624,48 +1262,24 @@ pub(crate) struct FcFontCacheInner {
     pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
     /// Metadata cache (patterns stored by ID for quick lookup)
     pub(crate) metadata: BTreeMap<FontId, FcPattern>,
-    /// Token index: maps lowercase tokens ("noto", "sans", "jp") to sets of FontIds.
-    /// Enables fast fuzzy search by intersecting token sets.
-    pub(crate) token_index: BTreeMap<String, alloc::collections::BTreeSet<FontId>>,
-    /// Pre-tokenized font names (lowercase): FontId -> Vec<lowercase tokens>.
-    /// Avoids re-tokenization during fuzzy search.
-    pub(crate) font_tokens: BTreeMap<FontId, Vec<String>>,
     /// Normalized family/name -> the fonts that carry it.
     ///
-    /// `query_by_family_normalized` used to answer "which fonts are called
-    /// X?" by walking EVERY registered pattern and allocating a normalized
-    /// `String` per face per call. That is O(fonts) with two allocations
-    /// each, and it is the ONLY path a specific family name can take,
-    /// because `index_pattern_tokens` is a no-op on the azul web fork so
-    /// `fuzzy_query_by_name` always comes back empty. Measured from azul:
-    /// ~0.52 ms per lookup, and a CSS stack with generic expansion asks
-    /// ~150 times.
-    ///
-    /// Built once at insertion instead, so a lookup is a single map probe
-    /// and a MISS costs nothing.
+    /// The one way a specific family name is looked up (see
+    /// `fallback::faces_for_family`). Built at insertion, so a lookup is a
+    /// single map probe and a miss costs nothing; the linear scan it
+    /// replaced measured ~0.52 ms per lookup from azul, ~150 lookups per
+    /// CSS stack.
     pub(crate) family_index: BTreeMap<String, alloc::vec::Vec<FontId>>,
-    /// System-configured family alias preferences, parsed from the
-    /// platform font configuration (Linux: `$FONTCONFIG_FILE` or
-    /// `/etc/fonts/fonts.conf` + included conf.d files, `<alias>` /
-    /// `<prefer>` blocks). Keyed by the normalized alias family
-    /// ("sans-serif", "arial", ...), values are the preferred concrete
-    /// families in configuration order. THE authority for generic-family
-    /// resolution: the hard-coded per-OS lists are only consulted when
-    /// this map has no entry (e.g. no fontconfig installed).
-    pub(crate) system_aliases: BTreeMap<String, Vec<String>>,
+    /// What generic families, missing named families, script blocks and
+    /// uncovered characters resolve to. Injected; see [`FcFallbackConfig`].
+    pub(crate) fallback_config: FcFallbackConfig,
 }
 
 impl FcFontCacheInner {
-    /// Add a font pattern to the token index. Called under the
-    /// write lock by insertion paths.
     /// Record `id` under the normalized spellings of its family and name.
-    ///
-    /// Deliberately NOT part of `index_pattern_tokens`: that one is a no-op
-    /// on the azul web fork (its unicode tokenizer traps under the lift),
-    /// and the family index must exist everywhere or every specific family
-    /// name silently stops resolving. This only calls
-    /// `normalize_family_name`, which the linear scan it replaces already
-    /// ran once per font per lookup.
+    /// Called by the `insert_*` paths under the write lock. Only
+    /// `normalize_family_name` runs here — no Unicode tables — so it is
+    /// safe on every target, including the azul web lift.
     pub(crate) fn index_pattern_family(&mut self, pattern: &FcPattern, id: FontId) {
         for key in [pattern.family.as_deref(), pattern.name.as_deref()]
             .into_iter()
@@ -1680,15 +1294,24 @@ impl FcFontCacheInner {
         }
     }
 
-    pub(crate) fn index_pattern_tokens(&mut self, _pattern: &FcPattern, _id: FontId) {
-        // WEB-LIFT (2026-06-02): no-op on the azul web fork. The tokenizer
-        // (`extract_font_name_tokens` char-classification + lowercasing) pulls unicode tables
-        // whose jump-tables the remill/web lift leaves un-devirt'd → MISSING_BLOCK trap inside
-        // `with_memory_fonts`. `token_index`/`font_tokens` feed ONLY the separate token-fuzzy
-        // search path (query_fuzzy); the main `query`→`query_internal_locked` scores by
-        // unicode-compatibility + style over the registered patterns/metadata (populated before
-        // this call), so leaving the token index empty does not affect normal font matching.
+    /// Register a font backed by a file. The one place a pattern enters the
+    /// state: `patterns`, `metadata`, the family index and the file map
+    /// stay consistent by construction.
+    pub(crate) fn insert_disk_font(&mut self, pattern: FcPattern, id: FontId, path: FcFontPath) {
+        self.index_pattern_family(&pattern, id);
+        self.patterns.insert(pattern.clone(), id);
+        self.disk_fonts.insert(id, path);
+        self.metadata.insert(id, pattern);
     }
+
+    /// Register a font held in memory. See [`insert_disk_font`](Self::insert_disk_font).
+    pub(crate) fn insert_memory_font(&mut self, pattern: FcPattern, id: FontId, font: FcFont) {
+        self.index_pattern_family(&pattern, id);
+        self.patterns.insert(pattern.clone(), id);
+        self.memory_fonts.insert(id, font);
+        self.metadata.insert(id, pattern);
+    }
+
 }
 
 impl Clone for FcFontCache {
@@ -1730,67 +1353,56 @@ impl Default for FcFontCache {
 }
 
 impl FcFontCache {
-    /// The system-configured preferred families for `family` (normalized
-    /// lookup), parsed from the platform font configuration at build time.
-    /// Empty when the platform has no such configuration.
-    pub fn system_alias_prefs(&self, family: &str) -> Vec<String> {
-        let norm = crate::utils::normalize_family_name(family);
-        self.state_read()
-            .system_aliases
-            .get(&norm)
-            .cloned()
-            .unwrap_or_default()
+    /// The fallback configuration this cache resolves with (a copy).
+    pub fn fallback_config(&self) -> FcFallbackConfig {
+        self.state_read().fallback_config.clone()
     }
 
-    /// Expand a CSS font-family stack, resolving each entry through the
-    /// SYSTEM configuration first and only falling back to the built-in
-    /// per-OS lists when the configuration is silent.
-    ///
-    /// Resolution per family, in order:
-    /// 1. `<alias>`/`<prefer>` preferences parsed from the platform font
-    ///    configuration (generic families like `sans-serif` AND named
-    ///    substitutions like `Arial` -> `Liberation Sans`). The machine's
-    ///    actual configuration is the authority — this is what real
-    ///    fontconfig does, and what makes azul agree with every other
-    ///    application on the box.
-    /// 2. For generic families with no configured preference: the built-in
-    ///    per-OS candidates ([`OperatingSystem::expand_generic_family`]) as
-    ///    a LAST resort (containers without any fontconfig installed).
-    /// 3. Named families always keep themselves FIRST, before any
-    ///    configured substitution (CSS: exact match wins when present;
-    ///    the alias only helps when the named family is missing).
+    /// Replace the fallback configuration. Every memoized chain is dropped,
+    /// so the next `resolve_font_chain` reflects it.
+    pub fn set_fallback_config(&self, config: FcFallbackConfig) -> &Self {
+        self.state_write().fallback_config = config;
+        self.clear_chain_cache();
+        self
+    }
+
+    /// Builder-style [`set_fallback_config`](Self::set_fallback_config).
+    pub fn with_fallback_config(self, config: FcFallbackConfig) -> Self {
+        self.set_fallback_config(config);
+        self
+    }
+
+    /// Drop every memoized chain. Called on every insert and config change.
+    pub(crate) fn clear_chain_cache(&self) {
+        match self.shared.chain_cache.lock() {
+            Ok(mut memo) => memo.clear(),
+            Err(e) => match e {},
+        }
+    }
+
+    /// The configured candidates for `family`: a generic keyword's base
+    /// candidates, or a named family's substitutions.
+    #[deprecated(since = "5.0.0", note = "read `fallback_config().generic_candidates(..)` / `substitutions_for(..)`")]
+    pub fn system_alias_prefs(&self, family: &str) -> Vec<String> {
+        let state = self.state_read();
+        match GenericFamily::from_css(family) {
+            Some(generic) => state.fallback_config.generic_candidates(generic).to_vec(),
+            None => state.fallback_config.substitutions_for(family).to_vec(),
+        }
+    }
+
+    /// Expand a CSS stack through this cache's configuration, filling gaps
+    /// from the built-in tables for `os`.
+    #[deprecated(since = "5.0.0", note = "use `fallback_config().candidate_families(families, ranges)`")]
     pub fn expand_font_families_config_first(
         &self,
         families: &[String],
         os: OperatingSystem,
         unicode_ranges: &[UnicodeRange],
     ) -> Vec<String> {
-        let mut expanded: Vec<String> = Vec::new();
-        let mut push_unique = |v: &mut Vec<String>, f: String| {
-            if !v.iter().any(|e| e.eq_ignore_ascii_case(&f)) {
-                v.push(f);
-            }
-        };
-        for family in families {
-            let is_generic = matches!(
-                family.to_ascii_lowercase().as_str(),
-                "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui"
-            );
-            if !is_generic {
-                push_unique(&mut expanded, family.clone());
-            }
-            let prefs = self.system_alias_prefs(family);
-            if !prefs.is_empty() {
-                for pref in prefs {
-                    push_unique(&mut expanded, pref);
-                }
-            } else if is_generic {
-                for fallback in os.expand_generic_family(family, unicode_ranges) {
-                    push_unique(&mut expanded, fallback);
-                }
-            }
-        }
-        expanded
+        let mut config = self.fallback_config();
+        config.merge_defaults(&FcFallbackConfig::os_defaults(os));
+        config.candidate_families(families, unicode_ranges)
     }
 
     /// Acquire a read guard on the cache's state. Panics if the lock
@@ -1835,11 +1447,7 @@ impl FcFontCache {
         let mut state = self.state_write();
         for (pattern, font) in fonts {
             let id = FontId::new();
-            state.patterns.insert(pattern.clone(), id);
-            state.metadata.insert(id, pattern.clone());
-            state.memory_fonts.insert(id, font);
-            state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+            state.insert_memory_font(pattern, id, font);
         }
         self
     }
@@ -1853,11 +1461,7 @@ impl FcFontCache {
     ) -> &Self {
         let pattern = Self::populate_memory_font_ranges(pattern, &font);
         let mut state = self.state_write();
-        state.patterns.insert(pattern.clone(), id);
-        state.metadata.insert(id, pattern.clone());
-        state.memory_fonts.insert(id, font);
-        state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+        state.insert_memory_font(pattern, id, font);
         self
     }
 
@@ -1914,18 +1518,12 @@ impl FcFontCache {
         let id = FontId::new();
         {
             let mut state = self.state_write();
-            state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
-            state.patterns.insert(pattern.clone(), id);
-            state.disk_fonts.insert(id, path);
-            state.metadata.insert(id, pattern);
+            state.insert_disk_font(pattern, id, path);
         }
         // Invalidate chain cache so callers see the new font on the
         // next resolve. Scoped after the state write to keep lock
         // nesting shallow.
-        if let Ok(mut cc) = self.shared.chain_cache.lock() {
-            cc.clear();
-        }
+        self.clear_chain_cache();
     }
 
     #[cfg(feature = "std")]
@@ -1937,16 +1535,15 @@ impl FcFontCache {
     /// Insert a *fast-probed* pattern into the cache and return its
     /// fresh `FontId`. Used by [`FcFontRegistry::request_fonts_fast`]
     /// when a cmap probe discovers a font that covers some subset of
-    /// the requested codepoints. Unlike [`insert_builder_font`] this
-    /// does **not** populate the token index (we don't have NAME
-    /// table data), so fuzzy-name lookups on fast-probed fonts fall
-    /// through to the filename-guess in `known_paths`.
+    /// the requested codepoints. The pattern's `family` is guessed from
+    /// the filename, so that guess is what the family index carries.
     pub fn insert_fast_pattern(&self, pattern: FcPattern, path: FcFontPath) -> FontId {
         let id = FontId::new();
-        let mut state = self.state_write();
-        state.patterns.insert(pattern.clone(), id);
-        state.disk_fonts.insert(id, path);
-        state.metadata.insert(id, pattern);
+        {
+            let mut state = self.state_write();
+            state.insert_disk_font(pattern, id, path);
+        }
+        self.clear_chain_cache();
         id
     }
 
@@ -2069,24 +1666,20 @@ impl FcFontCache {
         let cache = Self::default();
         {
             let mut state = cache.state_write();
+            state.fallback_config = FcFallbackConfig::os_defaults(OperatingSystem::current());
             for dir in crate::config::font_directories(OperatingSystem::current()) {
                 for path in FcCollectFontFilesRecursive(dir) {
                     let pattern = match pattern_from_filename(&path) {
                         Some(p) => p,
                         None => continue,
                     };
-                    let id = FontId::new();
-                    state.disk_fonts.insert(id, FcFontPath {
+                    state.insert_disk_font(pattern, FontId::new(), FcFontPath {
                         path: path.to_string_lossy().to_string(),
                         font_index: 0,
                         // Filename-only scan — we never read the bytes,
                         // so there's no dedup key. Leave as 0.
                         bytes_hash: 0,
                     });
-                    state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
-                    state.metadata.insert(id, pattern.clone());
-                    state.patterns.insert(pattern, id);
                 }
             }
         }
@@ -2128,7 +1721,7 @@ impl FcFontCache {
         
         for family in families {
             let family_str = family.as_ref();
-            let expanded = os.expand_generic_family(family_str, &[]);
+            let expanded = FcFallbackConfig::os_defaults(os).expand_family(family_str, DEFAULT_UNICODE_FALLBACK_SCRIPTS);
             if expanded.is_empty() || (expanded.len() == 1 && expanded[0] == family_str) {
                 target_families.push(family_str.to_string());
             } else {
@@ -2173,11 +1766,17 @@ impl FcFontCache {
         };
 
         let mut state = cache.state_write();
+        state.fallback_config = FcFallbackConfig::os_defaults(OperatingSystem::current());
 
         #[cfg(target_os = "linux")]
         {
             if let Some((font_entries, render_configs, system_aliases)) = FcScanDirectories() {
-                state.system_aliases = system_aliases;
+                // The platform configuration is the authority; the built-in
+                // tables only fill what it leaves unsaid.
+                let mut config = FcFallbackConfig::default();
+                config.absorb_system_aliases(system_aliases);
+                config.merge_defaults(&state.fallback_config);
+                state.fallback_config = config;
                 for (mut pattern, path) in font_entries {
                     if matches_filter(&pattern) {
                         // Apply per-font render config if a matching family rule exists
@@ -2187,11 +1786,7 @@ impl FcFontCache {
                             }
                         }
                         let id = FontId::new();
-                        state.patterns.insert(pattern.clone(), id);
-                        state.metadata.insert(id, pattern.clone());
-                        state.disk_fonts.insert(id, path);
-                        state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+                        state.insert_disk_font(pattern, id, path);
                     }
                 }
             }
@@ -2215,11 +1810,7 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 if matches_filter(&pattern) {
                     let id = FontId::new();
-                    state.patterns.insert(pattern.clone(), id);
-                    state.metadata.insert(id, pattern.clone());
-                    state.disk_fonts.insert(id, path);
-                    state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+                    state.insert_disk_font(pattern, id, path);
                 }
             }
         }
@@ -2237,11 +1828,7 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 if matches_filter(&pattern) {
                     let id = FontId::new();
-                    state.patterns.insert(pattern.clone(), id);
-                    state.metadata.insert(id, pattern.clone());
-                    state.disk_fonts.insert(id, path);
-                    state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+                    state.insert_disk_font(pattern, id, path);
                 }
             }
         }
@@ -2257,11 +1844,7 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 if matches_filter(&pattern) {
                     let id = FontId::new();
-                    state.patterns.insert(pattern.clone(), id);
-                    state.metadata.insert(id, pattern.clone());
-                    state.disk_fonts.insert(id, path);
-                    state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+                    state.insert_disk_font(pattern, id, path);
                 }
             }
         }
@@ -2283,11 +1866,7 @@ impl FcFontCache {
             for (pattern, path) in font_entries {
                 if matches_filter(&pattern) {
                     let id = FontId::new();
-                    state.patterns.insert(pattern.clone(), id);
-                    state.metadata.insert(id, pattern.clone());
-                    state.disk_fonts.insert(id, path);
-                    state.index_pattern_tokens(&pattern, id);
-                    state.index_pattern_family(&pattern, id);
+                    state.insert_disk_font(pattern, id, path);
                 }
             }
         }
@@ -2397,203 +1976,33 @@ impl FcFontCache {
     /// `fc-match`-style total variant that a renderer should use.
     pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
         let state = self.state_read();
-        let mut matches = Vec::new();
+
+        // Memory fonts first, then the one ranking every path shares
+        // (`fallback::RankKey`): style closeness, then how much of the
+        // requested coverage the font misses, narrower before wider, name.
+        // Breadth of coverage is never a bonus.
+        let mut matches: Vec<(bool, fallback::RankKey, FontId, &FcPattern)> = Vec::new();
 
         for (stored_pattern, id) in &state.patterns {
             if Self::query_matches_internal(stored_pattern, pattern, trace) {
                 let metadata = state.metadata.get(id).unwrap_or(stored_pattern);
-
-                // Calculate Unicode compatibility score
-                let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
-                    // No specific Unicode requirements, use general coverage
-                    Self::calculate_unicode_coverage(&metadata.unicode_ranges) as i32
-                } else {
-                    // Calculate how well this font covers the requested Unicode ranges
-                    Self::calculate_unicode_compatibility(&pattern.unicode_ranges, &metadata.unicode_ranges)
-                };
-
-                let style_score = Self::calculate_style_score(pattern, metadata);
-
-                // Memory fonts get a bonus to prefer them over disk fonts
-                let is_memory = state.memory_fonts.contains_key(id);
-
-                matches.push((*id, unicode_compatibility, style_score, metadata.clone(), is_memory));
-            }
-        }
-
-        // Sort by: 1. Memory font (preferred), 2. Unicode compatibility, 3. Style score
-        matches.sort_by(|a, b| {
-            // Memory fonts first
-            b.4.cmp(&a.4)
-                .then_with(|| b.1.cmp(&a.1)) // Unicode compatibility (higher is better)
-                .then_with(|| a.2.cmp(&b.2)) // Style score (lower is better)
-        });
-
-        matches.first().map(|(id, _, _, metadata, _)| {
-            FontMatch {
-                id: *id,
-                unicode_ranges: metadata.unicode_ranges.clone(),
-                fallbacks: Vec::new(), // Fallbacks computed lazily via compute_fallbacks()
-            }
-        })
-    }
-
-    /// Queries all fonts matching a pattern (internal use only).
-    ///
-    /// Note: This function is now private. Use resolve_font_chain() to build a font fallback chain,
-    /// then call FontFallbackChain::query_for_text() to resolve fonts for specific text.
-    fn query_internal(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Vec<FontMatch> {
-        let state = self.state_read();
-        self.query_internal_locked(&state, pattern, trace)
-    }
-
-    /// Internal variant used when the caller already holds a read
-    /// guard on the state. Avoids re-locking.
-    fn query_internal_locked(
-        &self,
-        state: &FcFontCacheInner,
-        pattern: &FcPattern,
-        trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatch> {
-        let mut matches = Vec::new();
-
-        for (stored_pattern, id) in &state.patterns {
-            if Self::query_matches_internal(stored_pattern, pattern, trace) {
-                let metadata = state.metadata.get(id).unwrap_or(stored_pattern);
-
-                // Calculate Unicode compatibility score
-                let unicode_compatibility = if pattern.unicode_ranges.is_empty() {
-                    Self::calculate_unicode_coverage(&metadata.unicode_ranges) as i32
-                } else {
-                    Self::calculate_unicode_compatibility(&pattern.unicode_ranges, &metadata.unicode_ranges)
-                };
-
-                let style_score = Self::calculate_style_score(pattern, metadata);
-                matches.push((*id, unicode_compatibility, style_score, metadata.clone()));
-            }
-        }
-
-        // Sort by style score (lowest first), THEN by Unicode compatibility (highest first)
-        // Style matching (weight, italic, etc.) is now the primary criterion
-        // Deterministic tiebreaker: prefer non-italic, then alphabetical by name
-        matches.sort_by(|a, b| {
-            a.2.cmp(&b.2) // Style score (lower is better)
-                .then_with(|| b.1.cmp(&a.1)) // Unicode compatibility (higher is better)
-                .then_with(|| a.3.italic.cmp(&b.3.italic)) // Prefer non-italic
-                .then_with(|| a.3.name.cmp(&b.3.name)) // Alphabetical tiebreaker
-        });
-
-        matches
-            .into_iter()
-            .map(|(id, _, _, metadata)| {
-                FontMatch {
-                    id,
-                    unicode_ranges: metadata.unicode_ranges.clone(),
-                    fallbacks: Vec::new(), // Fallbacks computed lazily via compute_fallbacks()
-                }
-            })
-            .collect()
-    }
-
-    /// Compute fallback fonts for a given font
-    /// This is a lazy operation that can be expensive - only call when actually needed
-    /// (e.g., for FFI or debugging, not needed for resolve_char)
-    pub fn compute_fallbacks(
-        &self,
-        font_id: &FontId,
-        trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatchNoFallback> {
-        let state = self.state_read();
-        let pattern = match state.metadata.get(font_id) {
-            Some(p) => p.clone(),
-            None => return Vec::new(),
-        };
-        drop(state);
-
-        self.compute_fallbacks_for_pattern(&pattern, Some(font_id), trace)
-    }
-
-    fn compute_fallbacks_for_pattern(
-        &self,
-        pattern: &FcPattern,
-        exclude_id: Option<&FontId>,
-        _trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatchNoFallback> {
-        let state = self.state_read();
-        let mut candidates = Vec::new();
-
-        // Collect all potential fallbacks (excluding original pattern)
-        for (stored_pattern, id) in &state.patterns {
-            // Skip if this is the original font
-            if exclude_id.is_some() && exclude_id.unwrap() == id {
-                continue;
-            }
-
-            // Check if this font supports any of the unicode ranges
-            if !stored_pattern.unicode_ranges.is_empty() && !pattern.unicode_ranges.is_empty() {
-                // Calculate Unicode compatibility
-                let unicode_compatibility = Self::calculate_unicode_compatibility(
-                    &pattern.unicode_ranges,
-                    &stored_pattern.unicode_ranges
-                );
-
-                // Only include if there's actual overlap
-                if unicode_compatibility > 0 {
-                    let style_score = Self::calculate_style_score(pattern, stored_pattern);
-                    candidates.push((
-                        FontMatchNoFallback {
-                            id: *id,
-                            unicode_ranges: stored_pattern.unicode_ranges.clone(),
-                        },
-                        unicode_compatibility,
-                        style_score,
-                        stored_pattern.clone(),
-                    ));
-                }
-            } else if pattern.unicode_ranges.is_empty() && !stored_pattern.unicode_ranges.is_empty() {
-                // No specific Unicode requirements, use general coverage
-                let coverage = Self::calculate_unicode_coverage(&stored_pattern.unicode_ranges) as i32;
-                let style_score = Self::calculate_style_score(pattern, stored_pattern);
-                candidates.push((
-                    FontMatchNoFallback {
-                        id: *id,
-                        unicode_ranges: stored_pattern.unicode_ranges.clone(),
-                    },
-                    coverage,
-                    style_score,
-                    stored_pattern.clone(),
+                let is_disk = !state.memory_fonts.contains_key(id);
+                matches.push((
+                    is_disk,
+                    fallback::RankKey::for_request(pattern, metadata, &pattern.unicode_ranges),
+                    *id,
+                    metadata,
                 ));
             }
         }
 
-        drop(state);
+        matches.sort();
 
-        // Sort by Unicode compatibility (highest first), THEN by style score (lowest first)
-        candidates.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.2.cmp(&b.2))
-        });
-
-        // Deduplicate by keeping only the best match per unique unicode range
-        let mut seen_ranges = Vec::new();
-        let mut deduplicated = Vec::new();
-
-        for (id, _, _, pattern) in candidates {
-            let mut is_new_range = false;
-
-            for range in &pattern.unicode_ranges {
-                if !seen_ranges.iter().any(|r: &UnicodeRange| r.overlaps(range)) {
-                    seen_ranges.push(*range);
-                    is_new_range = true;
-                }
-            }
-
-            if is_new_range {
-                deduplicated.push(id);
-            }
-        }
-
-        deduplicated
+        matches.first().map(|(_, _, id, metadata)| FontMatch {
+            id: *id,
+            unicode_ranges: metadata.unicode_ranges.clone(),
+            fallbacks: Vec::new(),
+        })
     }
 
     /// Get in-memory font data (cloned out of the shared state).
@@ -2758,624 +2167,6 @@ impl FcFontCache {
         true
     }
     
-    /// Resolve a complete font fallback chain for a CSS font-family stack
-    /// This is the main entry point for font resolution with caching
-    /// Automatically expands generic CSS families (serif, sans-serif, monospace) to OS-specific fonts
-    /// 
-    /// # Arguments
-    /// * `font_families` - CSS font-family stack (e.g., ["Arial", "sans-serif"])
-    /// * `text` - The text to render (used to extract Unicode ranges)
-    /// * `weight` - Font weight
-    /// * `italic` - Italic style requirement
-    /// * `oblique` - Oblique style requirement
-    /// * `trace` - Debug trace messages
-    /// 
-    /// # Returns
-    /// A complete font fallback chain with CSS fallbacks and Unicode fallbacks
-    /// 
-    /// # Example
-    /// ```no_run
-    /// # use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
-    /// let cache = FcFontCache::build();
-    /// let families = vec!["Arial".to_string(), "sans-serif".to_string()];
-    /// let chain = cache.resolve_font_chain(&families, FcWeight::Normal, 
-    ///                                       PatternMatch::DontCare, PatternMatch::DontCare, 
-    ///                                       &mut Vec::new());
-    /// // On macOS: families expanded to ["Arial", "San Francisco", "Helvetica Neue", "Lucida Grande"]
-    /// ```
-    #[cfg(feature = "std")]
-    pub fn resolve_font_chain(
-        &self,
-        font_families: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        trace: &mut Vec<TraceMsg>,
-    ) -> FontFallbackChain {
-        self.resolve_font_chain_with_os(font_families, weight, italic, oblique, trace, OperatingSystem::current())
-    }
-    
-    /// Resolve font chain with explicit OS specification (useful for testing)
-    #[cfg(feature = "std")]
-    pub fn resolve_font_chain_with_os(
-        &self,
-        font_families: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        trace: &mut Vec<TraceMsg>,
-        os: OperatingSystem,
-    ) -> FontFallbackChain {
-        self.resolve_font_chain_impl(font_families, weight, italic, oblique, None, trace, os)
-    }
-
-    /// Resolve a font fallback chain, restricting Unicode fallbacks to the
-    /// caller-supplied set of scripts (usually derived from the actual
-    /// text content of the document).
-    ///
-    /// - `scripts_hint: None` → back-compat behaviour, equivalent to
-    ///   [`FcFontCache::resolve_font_chain`]: pulls in fallback fonts for
-    ///   the full [`DEFAULT_UNICODE_FALLBACK_SCRIPTS`] set.
-    /// - `scripts_hint: Some(&[])` → no Unicode fallbacks attached. For
-    ///   an ASCII-only page this avoids pulling Arial Unicode MS,
-    ///   CJK fonts, etc. into memory when they're not needed.
-    /// - `scripts_hint: Some(&[CJK])` → only CJK fallback attached.
-    ///
-    /// The chain cache is keyed so an ASCII-only resolution cannot be
-    /// served from a slot populated by a default/all-scripts resolution.
-    #[cfg(feature = "std")]
-    pub fn resolve_font_chain_with_scripts(
-        &self,
-        font_families: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        scripts_hint: Option<&[UnicodeRange]>,
-        trace: &mut Vec<TraceMsg>,
-    ) -> FontFallbackChain {
-        self.resolve_font_chain_impl(
-            font_families, weight, italic, oblique, scripts_hint,
-            trace, OperatingSystem::current(),
-        )
-    }
-
-    /// Shared entry used by [`resolve_font_chain_with_os`] and
-    /// [`resolve_font_chain_with_scripts`]. Handles the cache lookup,
-    /// generic-family expansion, and delegation to the uncached builder.
-    #[cfg(feature = "std")]
-    fn resolve_font_chain_impl(
-        &self,
-        font_families: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        scripts_hint: Option<&[UnicodeRange]>,
-        trace: &mut Vec<TraceMsg>,
-        os: OperatingSystem,
-    ) -> FontFallbackChain {
-        // Check cache FIRST - key uses original (unexpanded) families
-        // plus a hash over the scripts_hint so ASCII-only callers don't
-        // consume a slot filled by a default-scripts caller.
-        let scripts_hint_hash = scripts_hint.map(hash_scripts_hint);
-        let cache_key = FontChainCacheKey {
-            font_families: font_families.to_vec(),
-            weight,
-            italic,
-            oblique,
-            scripts_hint_hash,
-        };
-
-        if let Some(cached) = self
-            .shared
-            .chain_cache
-            .lock()
-            .ok()
-            .and_then(|c| c.get(&cache_key).cloned())
-        {
-            return cached;
-        }
-
-        // Expand generic CSS families to OS-specific fonts
-        let expanded_families = expand_font_families(font_families, os, &[]);
-
-        // Keep the originally-requested generic families ("serif",
-        // "sans-serif", "monospace", ...) around. The expansion above turns
-        // them into a hardcoded list of real OS font names and drops the
-        // generic name itself; the chain builder uses this list to fall back
-        // to *registered* fonts when none of those OS names exist (wasm,
-        // headless caches, or an embedder that only registered an in-memory
-        // bundled font). See `resolve_font_chain_uncached`.
-        let generic_fallbacks: Vec<String> = font_families
-            .iter()
-            .filter(|f| config::is_generic_family(f))
-            .cloned()
-            .collect();
-
-        // Build the chain
-        let chain = self.resolve_font_chain_uncached(
-            &expanded_families,
-            &generic_fallbacks,
-            weight,
-            italic,
-            oblique,
-            scripts_hint,
-            trace,
-        );
-
-        // Cache the result
-        if let Ok(mut cache) = self.shared.chain_cache.lock() {
-            cache.insert(cache_key, chain.clone());
-        }
-
-        chain
-    }
-    
-    /// Internal implementation without caching.
-    ///
-    /// `scripts_hint`:
-    /// - `None` pulls in the full [`DEFAULT_UNICODE_FALLBACK_SCRIPTS`]
-    ///   set (the original, back-compat behaviour).
-    /// - `Some(&[])` attaches no Unicode fallbacks.
-    /// - `Some(ranges)` attaches fallbacks only for those ranges.
-    #[cfg(feature = "std")]
-    fn resolve_font_chain_uncached(
-        &self,
-        font_families: &[String],
-        generic_fallbacks: &[String],
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        scripts_hint: Option<&[UnicodeRange]>,
-        trace: &mut Vec<TraceMsg>,
-    ) -> FontFallbackChain {
-        let mut css_fallbacks = Vec::new();
-        
-        // Resolve each CSS font-family to its system fallbacks
-        for (_i, family) in font_families.iter().enumerate() {
-            // Check if this is a generic font family
-            let (pattern, is_generic) = if config::is_generic_family(family) {
-                let monospace = if family.eq_ignore_ascii_case("monospace") {
-                    PatternMatch::True
-                } else {
-                    PatternMatch::False
-                };
-                let pattern = FcPattern {
-                    name: None,
-                    weight,
-                    italic,
-                    oblique,
-                    monospace,
-                    unicode_ranges: Vec::new(),
-                    ..Default::default()
-                };
-                (pattern, true)
-            } else {
-                // Specific font family name
-                let pattern = FcPattern {
-                    name: Some(family.clone()),
-                    weight,
-                    italic,
-                    oblique,
-                    unicode_ranges: Vec::new(),
-                    ..Default::default()
-                };
-                (pattern, false)
-            };
-            
-            // Use fuzzy matching for specific fonts (fast token-based lookup)
-            // For generic families, use query (slower but necessary for property matching)
-            let mut matches = if is_generic {
-                // Generic families need full pattern matching
-                self.query_internal(&pattern, trace)
-            } else {
-                // Specific font names: use fast token-based fuzzy matching.
-                let mut m = self.fuzzy_query_by_name(family, weight, italic, oblique, &[], trace);
-                // The token-fuzzy index is a no-op on the azul web-lift fork
-                // (`index_pattern_tokens`), so `fuzzy_query_by_name` returns nothing
-                // for every specific family name. Without a fallback here the whole
-                // expanded CSS stack ("DejaVu Sans", "Noto Sans", "Liberation Sans",
-                // …) resolves to NOTHING, and generic families collapse to the
-                // coverage/style-ranked `name: None` fallback below — which grabs the
-                // highest-Unicode-coverage CJK megafont (Noto Sans JP/CJK) for plain
-                // Latin body text and picks arbitrary weights (a Bold-Italic for a
-                // Regular request). Fall back to a normalized exact-family lookup so
-                // the real Latin fallback names actually match. Normalized equality
-                // ("noto sans" -> "notosans") also fixes the substring leak where
-                // "Noto Sans" would otherwise latch onto "Noto Sans JP".
-                if m.is_empty() {
-                    m = self.query_by_family_normalized(family, weight, italic, oblique);
-                }
-                m
-            };
-            
-            // For generic families, limit to top 5 fonts to avoid too many matches
-            if is_generic && matches.len() > 5 {
-                matches.truncate(5);
-            }
-            
-            // Always add the CSS fallback group to preserve CSS ordering
-            // even if no fonts were found for this family
-            css_fallbacks.push(CssFallbackGroup {
-                css_name: family.clone(),
-                fonts: matches,
-            });
-        }
-
-        // Headless / wasm / memory-only fallback.
-        //
-        // Generic CSS families ("serif"/"sans-serif"/"monospace"/...) were
-        // expanded by the caller to a hardcoded list of real OS font names.
-        // On a system that actually has those fonts the loop above matched
-        // them and we're done. But on wasm, a headless cache, or an embedder
-        // that only registered an in-memory bundled font, NONE of those OS
-        // names exist — and the original generic name was dropped, so a
-        // registered font (whatever its family name) would never be reached.
-        //
-        // So: if the whole expanded stack matched nothing at all, retry each
-        // originally-requested generic family as a generic `name: None`
-        // query, which any registered font can satisfy. This runs ONLY when
-        // nothing else matched, so on systems with real fonts it adds nothing
-        // and never reorders real matches (any such fallback must come AFTER
-        // real matches).
-        if !generic_fallbacks.is_empty()
-            && css_fallbacks.iter().all(|g| g.fonts.is_empty())
-        {
-            for generic in generic_fallbacks {
-                let monospace = if generic.eq_ignore_ascii_case("monospace") {
-                    PatternMatch::True
-                } else {
-                    PatternMatch::False
-                };
-                let pattern = FcPattern {
-                    name: None,
-                    weight,
-                    italic,
-                    oblique,
-                    monospace,
-                    unicode_ranges: Vec::new(),
-                    ..Default::default()
-                };
-                let mut matches = self.query_internal(&pattern, trace);
-                if matches.len() > 5 {
-                    matches.truncate(5);
-                }
-                if !matches.is_empty() {
-                    css_fallbacks.push(CssFallbackGroup {
-                        css_name: generic.clone(),
-                        fonts: matches,
-                    });
-                }
-            }
-        }
-
-        // Populate unicode_fallbacks. CSS fallback fonts may falsely claim
-        // coverage of a script via the OS/2 unicode-range bits without
-        // actually having glyphs, so we supplement the CSS chain with an
-        // explicit lookup for each requested script block. resolve_char()
-        // prefers CSS fallbacks first (earlier in the chain wins).
-        //
-        // The set of script blocks to cover is caller-controlled via
-        // `scripts_hint`: `None` keeps the back-compat DEFAULT_UNICODE_FALLBACK_SCRIPTS
-        // behaviour (7 scripts) so existing `resolve_font_chain` consumers
-        // stay unchanged; `Some(&[])` opts into "no unicode fallbacks at all"
-        // for ASCII-only documents, eliminating the big CJK / Arabic fonts
-        // from the resolved chain (and therefore from eager downstream parses).
-        let important_ranges: &[UnicodeRange] =
-            scripts_hint.unwrap_or(DEFAULT_UNICODE_FALLBACK_SCRIPTS);
-        let unicode_fallbacks = if important_ranges.is_empty() {
-            Vec::new()
-        } else {
-            let all_uncovered = vec![false; important_ranges.len()];
-            self.find_unicode_fallbacks(
-                important_ranges,
-                &all_uncovered,
-                &css_fallbacks,
-                weight,
-                italic,
-                oblique,
-                trace,
-            )
-        };
-
-        // WEB-LIFT LAST-RESORT (2026-06-03; the `with_memory_fonts` trap that previously made
-        // editing this file fatal is now fixed by the byte-atomic remill fork support). In the
-        // lifted web backend `find_unicode_fallbacks` returns 0 fonts even though one IS
-        // registered (the matching/iteration mis-lifts), so BOTH chain lists come back empty →
-        // every consumer (resolve_char, query_for_text, prune_chain_to_used_chars) sees no font
-        // → the layout unwraps a None → OOB. When the chain would be empty, append the first
-        // registered font so the chain is non-empty. Native chains are never empty here.
-        let mut unicode_fallbacks = unicode_fallbacks;
-        if css_fallbacks.is_empty() && unicode_fallbacks.is_empty() {
-            let st = self.state_read();
-            if let Some((pat, id)) = st.patterns.iter().next() {
-                unicode_fallbacks.push(FontMatch {
-                    id: *id,
-                    unicode_ranges: pat.unicode_ranges.clone(),
-                    fallbacks: Vec::new(),
-                });
-            }
-        }
-
-        FontFallbackChain {
-            css_fallbacks,
-            unicode_fallbacks,
-            original_stack: font_families.to_vec(),
-        }
-    }
-
-    /// Extract Unicode ranges from text
-    #[allow(dead_code)]
-    fn extract_unicode_ranges(text: &str) -> Vec<UnicodeRange> {
-        let mut chars: Vec<char> = text.chars().collect();
-        chars.sort_unstable();
-        chars.dedup();
-        
-        if chars.is_empty() {
-            return Vec::new();
-        }
-        
-        let mut ranges = Vec::new();
-        let mut range_start = chars[0] as u32;
-        let mut range_end = range_start;
-        
-        for &c in &chars[1..] {
-            let codepoint = c as u32;
-            if codepoint == range_end + 1 {
-                range_end = codepoint;
-            } else {
-                ranges.push(UnicodeRange { start: range_start, end: range_end });
-                range_start = codepoint;
-                range_end = codepoint;
-            }
-        }
-        
-        ranges.push(UnicodeRange { start: range_start, end: range_end });
-        ranges
-    }
-    
-    /// Fuzzy query for fonts by name when exact match fails
-    /// Uses intelligent token-based matching with inverted index for speed:
-    /// 1. Break name into tokens (e.g., "NotoSansJP" -> ["noto", "sans", "jp"])
-    /// 2. Use token_index to find candidate fonts via BTreeSet intersection
-    /// 3. Score only the candidate fonts (instead of all 800+ patterns)
-    /// 4. Prioritize fonts matching more tokens + Unicode coverage
-    #[cfg(feature = "std")]
-    fn fuzzy_query_by_name(
-        &self,
-        requested_name: &str,
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-        unicode_ranges: &[UnicodeRange],
-        _trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatch> {
-        // Extract tokens from the requested name (e.g., "NotoSansJP" -> ["noto", "sans", "jp"])
-        let tokens = Self::extract_font_name_tokens(requested_name);
-        
-        if tokens.is_empty() {
-            return Vec::new();
-        }
-        
-        // Convert tokens to lowercase for case-insensitive lookup
-        let tokens_lower: Vec<String> = tokens.iter().map(|t| t.to_ascii_lowercase()).collect();
-        
-        // Progressive token matching strategy:
-        // Start with first token, then progressively narrow down with each additional token
-        // If adding a token results in 0 matches, use the previous (broader) set
-        // Example: ["Noto"] -> 10 fonts, ["Noto","Sans"] -> 2 fonts, ["Noto","Sans","JP"] -> 0 fonts => use 2 fonts
-        
-        let state = self.state_read();
-
-        // Start with the first token
-        let first_token = &tokens_lower[0];
-        let mut candidate_ids = match state.token_index.get(first_token) {
-            Some(ids) if !ids.is_empty() => ids.clone(),
-            _ => {
-                // First token not found - no fonts match, quit immediately
-                return Vec::new();
-            }
-        };
-
-        // Progressively narrow down with each additional token
-        for token in &tokens_lower[1..] {
-            if let Some(token_ids) = state.token_index.get(token) {
-                // Calculate intersection
-                let intersection: alloc::collections::BTreeSet<FontId> =
-                    candidate_ids.intersection(token_ids).copied().collect();
-
-                if intersection.is_empty() {
-                    // Adding this token results in 0 matches - keep previous set and stop
-                    break;
-                } else {
-                    // Successfully narrowed down - use intersection
-                    candidate_ids = intersection;
-                }
-            } else {
-                // Token not in index - keep current set and stop
-                break;
-            }
-        }
-
-        // Now score only the candidate fonts (HUGE speedup!)
-        let mut candidates = Vec::new();
-
-        for id in candidate_ids {
-            let pattern = match state.metadata.get(&id) {
-                Some(p) => p,
-                None => continue,
-            };
-            
-            // Get pre-tokenized font name (already lowercase)
-            let font_tokens_lower = match state.font_tokens.get(&id) {
-                Some(tokens) => tokens,
-                None => continue,
-            };
-            
-            if font_tokens_lower.is_empty() {
-                continue;
-            }
-            
-            // Calculate token match score (how many requested tokens appear in font name)
-            // Both tokens_lower and font_tokens_lower are already lowercase, so direct comparison
-            let token_matches = tokens_lower.iter()
-                .filter(|req_token| {
-                    font_tokens_lower.iter().any(|font_token| {
-                        // Both already lowercase — exact token match (index guarantees candidates)
-                        font_token == *req_token
-                    })
-                })
-                .count();
-            
-            // Skip if no tokens match (shouldn't happen due to index, but safety check)
-            if token_matches == 0 {
-                continue;
-            }
-            
-            // Calculate token similarity score (0-100)
-            let token_similarity = (token_matches * 100 / tokens.len()) as i32;
-            
-            // Calculate Unicode range similarity
-            let unicode_similarity = if !unicode_ranges.is_empty() && !pattern.unicode_ranges.is_empty() {
-                Self::calculate_unicode_compatibility(unicode_ranges, &pattern.unicode_ranges)
-            } else {
-                0
-            };
-            
-            // CRITICAL: If we have Unicode requirements, ONLY accept fonts that cover them
-            // A font with great name match but no Unicode coverage is useless
-            if !unicode_ranges.is_empty() && unicode_similarity == 0 {
-                continue;
-            }
-            
-            let style_score = Self::calculate_style_score(&FcPattern {
-                weight,
-                italic,
-                oblique,
-                ..Default::default()
-            }, pattern);
-            
-            candidates.push((
-                id,
-                token_similarity,
-                unicode_similarity,
-                style_score,
-                pattern.clone(),
-            ));
-        }
-        
-        // Sort by:
-        // 1. Token matches (more matches = better)
-        // 2. Unicode compatibility (if ranges provided)
-        // 3. Style score (lower is better)
-        // 4. Deterministic tiebreaker: prefer non-italic, then by font name
-        candidates.sort_by(|a, b| {
-            if !unicode_ranges.is_empty() {
-                // When we have Unicode requirements, prioritize coverage
-                b.1.cmp(&a.1) // Token similarity (higher is better) - PRIMARY
-                    .then_with(|| b.2.cmp(&a.2)) // Unicode similarity (higher is better) - SECONDARY
-                    .then_with(|| a.3.cmp(&b.3)) // Style score (lower is better) - TERTIARY
-                    .then_with(|| a.4.italic.cmp(&b.4.italic)) // Prefer non-italic (False < True)
-                    .then_with(|| a.4.name.cmp(&b.4.name)) // Alphabetical by name
-            } else {
-                // No Unicode requirements, token similarity is primary
-                b.1.cmp(&a.1) // Token similarity (higher is better)
-                    .then_with(|| a.3.cmp(&b.3)) // Style score (lower is better)
-                    .then_with(|| a.4.italic.cmp(&b.4.italic)) // Prefer non-italic (False < True)
-                    .then_with(|| a.4.name.cmp(&b.4.name)) // Alphabetical by name
-            }
-        });
-        
-        // Take top 5 matches
-        candidates.truncate(5);
-        
-        // Convert to FontMatch
-        candidates
-            .into_iter()
-            .map(|(id, _token_sim, _unicode_sim, _style, pattern)| {
-                FontMatch {
-                    id,
-                    unicode_ranges: pattern.unicode_ranges.clone(),
-                    fallbacks: Vec::new(), // Fallbacks computed lazily via compute_fallbacks()
-                }
-            })
-            .collect()
-    }
-
-    /// Resolve a specific CSS family name to registered faces by NORMALIZED
-    /// family equality, ranked by style (weight/italic/oblique) closeness.
-    ///
-    /// This is the correct, stable matcher for a concrete `font-family` name
-    /// (as opposed to a generic like `sans-serif`): it matches
-    /// `font-family: "DejaVu Sans"` to the family whose normalized name is
-    /// exactly `dejavusans` — never to `dejavusansmono` or `dejavusanscondensed`,
-    /// and never `"Noto Sans"` to `"Noto Sans JP"`. `normalize_family_name`
-    /// strips spaces/hyphens/case so the CSS spelling and the stored family
-    /// spelling line up regardless of formatting.
-    ///
-    /// Among faces of the matched family the best style score wins (exact
-    /// weight, then nearest weight; correct slant), so `font-weight: bold`
-    /// selects the Bold face and a Regular request avoids Bold/Italic faces.
-    /// Falls back to matching the stored `name` by the same normalized rule for
-    /// fonts that carry no family field.
-    fn query_by_family_normalized(
-        &self,
-        family: &str,
-        weight: FcWeight,
-        italic: PatternMatch,
-        oblique: PatternMatch,
-    ) -> Vec<FontMatch> {
-        let target = crate::utils::normalize_family_name(family);
-        if target.is_empty() {
-            return Vec::new();
-        }
-        let query = FcPattern {
-            weight,
-            italic,
-            oblique,
-            ..Default::default()
-        };
-        let state = self.state_read();
-        // ONE map probe. This used to walk every registered pattern and
-        // allocate a normalized String per face per call — O(fonts) with two
-        // allocations each, on the only path a specific family name can take
-        // (`fuzzy_query_by_name` is a no-op on the azul web fork, so it
-        // always falls through to here). Measured from azul at ~0.52 ms per
-        // lookup against a system font set, and a CSS stack with generic
-        // expansion asks ~150 times.
-        //
-        // A family nobody has is now free: the probe misses and returns.
-        let Some(ids) = state.family_index.get(&target) else {
-            return Vec::new();
-        };
-        let mut candidates: Vec<(FontId, i32, FcPattern)> = Vec::new();
-        for id in ids {
-            let Some(meta) = state.metadata.get(id).or_else(|| {
-                state.patterns.iter().find(|(_, pid)| *pid == id).map(|(p, _)| p)
-            }) else {
-                continue;
-            };
-            let style_score = Self::calculate_style_score(&query, meta);
-            candidates.push((*id, style_score, meta.clone()));
-        }
-        drop(state);
-
-        // Lowest style score first; deterministic tiebreak: non-italic, then name.
-        candidates.sort_by(|a, b| {
-            a.1.cmp(&b.1)
-                .then_with(|| a.2.italic.cmp(&b.2.italic))
-                .then_with(|| a.2.name.cmp(&b.2.name))
-        });
-        candidates.truncate(5);
-        candidates
-            .into_iter()
-            .map(|(id, _, pattern)| FontMatch {
-                id,
-                unicode_ranges: pattern.unicode_ranges.clone(),
-                fallbacks: Vec::new(),
-            })
-            .collect()
-    }
-
     /// Extract tokens from a font name
     /// E.g., "NotoSansJP" -> ["Noto", "Sans", "JP"]
     /// E.g., "Noto Sans CJK JP" -> ["Noto", "Sans", "CJK", "JP"]
@@ -3411,141 +2202,8 @@ impl FcFontCache {
         tokens
     }
     
-    /// Find fonts to cover missing Unicode ranges
-    /// Uses intelligent matching: prefers fonts with similar names to existing ones
-    /// Early quits once all Unicode ranges are covered for performance
-    fn find_unicode_fallbacks(
-        &self,
-        unicode_ranges: &[UnicodeRange],
-        covered_chars: &[bool],
-        existing_groups: &[CssFallbackGroup],
-        _weight: FcWeight,
-        _italic: PatternMatch,
-        _oblique: PatternMatch,
-        trace: &mut Vec<TraceMsg>,
-    ) -> Vec<FontMatch> {
-        // Extract uncovered ranges
-        let mut uncovered_ranges = Vec::new();
-        for (i, &covered) in covered_chars.iter().enumerate() {
-            if !covered && i < unicode_ranges.len() {
-                uncovered_ranges.push(unicode_ranges[i].clone());
-            }
-        }
-        
-        if uncovered_ranges.is_empty() {
-            return Vec::new();
-        }
-
-        // Query for fonts that cover these ranges.
-        // Use DontCare for weight/italic/oblique — we want ANY font that covers
-        // the missing characters, regardless of style. The similarity sort below
-        // will prefer fonts matching the existing chain's style anyway.
-        let pattern = FcPattern {
-            name: None,
-            weight: FcWeight::Normal, // Normal weight is not filtered by query_matches_internal (line 1836)
-            italic: PatternMatch::DontCare,
-            oblique: PatternMatch::DontCare,
-            unicode_ranges: uncovered_ranges.clone(),
-            ..Default::default()
-        };
-        
-        let mut candidates = self.query_internal(&pattern, trace);
-
-        // Intelligent sorting: prefer fonts with similar names to existing ones
-        // Extract font family prefixes from existing fonts (e.g., "Noto Sans" from "Noto Sans JP")
-        let existing_prefixes: Vec<String> = existing_groups
-            .iter()
-            .flat_map(|group| {
-                group.fonts.iter().filter_map(|font| {
-                    self.get_metadata_by_id(&font.id)
-                        .and_then(|meta| meta.family.clone())
-                        .and_then(|family| {
-                            // Extract prefix (e.g., "Noto Sans" from "Noto Sans JP")
-                            family.split_whitespace()
-                                .take(2)
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                                .into()
-                        })
-                })
-            })
-            .collect();
-        
-        // Sort candidates by:
-        // 1. Name similarity to existing fonts (highest priority)
-        // 2. Unicode coverage (secondary)
-        candidates.sort_by(|a, b| {
-            let a_meta = self.get_metadata_by_id(&a.id);
-            let b_meta = self.get_metadata_by_id(&b.id);
-
-            let a_score = Self::calculate_font_similarity_score(a_meta.as_ref(), &existing_prefixes);
-            let b_score = Self::calculate_font_similarity_score(b_meta.as_ref(), &existing_prefixes);
-            
-            b_score.cmp(&a_score) // Higher score = better match
-                .then_with(|| {
-                    let a_coverage = Self::calculate_unicode_compatibility(&uncovered_ranges, &a.unicode_ranges);
-                    let b_coverage = Self::calculate_unicode_compatibility(&uncovered_ranges, &b.unicode_ranges);
-                    b_coverage.cmp(&a_coverage)
-                })
-        });
-        
-        // Early quit optimization: only take fonts until all ranges are covered
-        let mut result = Vec::new();
-        let mut remaining_uncovered: Vec<bool> = vec![true; uncovered_ranges.len()];
-        
-        for candidate in candidates {
-            // Check which ranges this font covers
-            let mut covers_new_range = false;
-            
-            for (i, range) in uncovered_ranges.iter().enumerate() {
-                if remaining_uncovered[i] {
-                    // Check if this font covers this range
-                    for font_range in &candidate.unicode_ranges {
-                        if font_range.overlaps(range) {
-                            remaining_uncovered[i] = false;
-                            covers_new_range = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            // Only add fonts that cover at least one new range
-            if covers_new_range {
-                result.push(candidate);
-                
-                // Early quit: if all ranges are covered, stop
-                if remaining_uncovered.iter().all(|&uncovered| !uncovered) {
-                    break;
-                }
-            }
-        }
-        
-        result
-    }
-    
-    /// Calculate similarity score between a font and existing font prefixes
-    /// Higher score = more similar
-    fn calculate_font_similarity_score(
-        font_meta: Option<&FcPattern>,
-        existing_prefixes: &[String],
-    ) -> i32 {
-        let Some(meta) = font_meta else { return 0; };
-        let Some(family) = &meta.family else { return 0; };
-        
-        // Check if this font's family matches any existing prefix
-        for prefix in existing_prefixes {
-            if family.starts_with(prefix) {
-                return 100; // Strong match
-            }
-            if family.contains(prefix) {
-                return 50; // Partial match
-            }
-        }
-        
-        0 // No match
-    }
-    
+    /// Total coverage of `ranges` in codepoints (widths summed; callers
+    /// pass a normalized, disjoint set).
     /// Find fallback fonts for a given pattern
     // Helper to calculate total unicode coverage
     pub fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
@@ -5647,18 +4305,18 @@ mod system_alias_tests {
 
     #[test]
     fn config_first_expansion_beats_the_builtin_lists() {
-        let cache = FcFontCache::default();
-        {
-            let mut state = cache.state_write();
-            let mut aliases = BTreeMap::new();
-            ParseFontsConfAliases(SAMPLE, &mut aliases);
-            state.system_aliases = aliases;
-        }
-        let out = cache.expand_font_families_config_first(
-            &["Arial".to_string(), "sans-serif".to_string()],
-            OperatingSystem::Linux,
-            &[],
-        );
+        // What `build_inner` does on Linux: the parsed aliases are the
+        // authority, the built-in tables only fill what they leave unsaid.
+        let mut aliases = BTreeMap::new();
+        ParseFontsConfAliases(SAMPLE, &mut aliases);
+        let mut config = FcFallbackConfig::default();
+        config.absorb_system_aliases(aliases);
+        config.merge_defaults(&FcFallbackConfig::os_defaults(OperatingSystem::Linux));
+
+        let cache = FcFontCache::default().with_fallback_config(config);
+        let out = cache
+            .fallback_config()
+            .candidate_families(&["Arial".to_string(), "sans-serif".to_string()], &[]);
         assert_eq!(
             out,
             vec![
@@ -5673,12 +4331,9 @@ mod system_alias_tests {
 
     #[test]
     fn generic_family_without_config_falls_back_to_builtin_lists() {
-        let cache = FcFontCache::default();
-        let out = cache.expand_font_families_config_first(
-            &["sans-serif".to_string()],
-            OperatingSystem::Linux,
-            &[],
-        );
+        let mut config = FcFallbackConfig::default();
+        config.merge_defaults(&FcFallbackConfig::os_defaults(OperatingSystem::Linux));
+        let out = config.candidate_families(&["sans-serif".to_string()], &[]);
         assert!(
             !out.is_empty() && out.iter().any(|f| f == "DejaVu Sans"),
             "no configuration parsed -> the built-in candidates are the last resort: {out:?}"
