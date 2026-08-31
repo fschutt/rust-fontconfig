@@ -22,10 +22,7 @@ pub struct FontManifest {
 }
 
 impl FontManifest {
-    /// Bump on breaking changes. v2 adds `bytes_hash` per file entry
-    /// for the Arc-shared-bytes deduplication added in rust-fontconfig 3.3.
-    /// v3: `unicode_ranges` is exact cmap coverage (5.0); a v2 manifest
-    /// carries block-rounded coverage and must be rescanned.
+    /// Cache format version. Bump on breaking changes.
     pub const CURRENT_VERSION: u32 = 3;
 }
 
@@ -36,8 +33,7 @@ pub struct FontCacheEntry {
     pub mtime_secs: u64,
     /// File size in bytes
     pub file_size: u64,
-    /// 64-bit content hash of the whole file (see
-    /// `crate::utils::content_hash_u64`). 0 = not computed.
+    /// 64-bit content hash of the whole file. 0 = not computed.
     #[serde(default)]
     pub bytes_hash: u64,
     /// Parsed font data for each font index in the file
@@ -45,10 +41,6 @@ pub struct FontCacheEntry {
 }
 
 /// A single font face within a font file, for disk cache serialization.
-///
-/// Font files (especially `.ttc` collections) can contain multiple faces.
-/// Each entry pairs the parsed metadata with the face index so we can
-/// reconstruct the full registry from the cache without re-parsing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FontIndexEntry {
     /// Parsed font metadata (name, family, weight, italic, unicode ranges, etc.)
@@ -59,30 +51,18 @@ pub struct FontIndexEntry {
 
 impl FcFontRegistry {
     /// Load font metadata from the on-disk cache.
-    ///
-    /// Reads and deserializes the bincode font manifest from the platform
-    /// cache directory, then populates the inner `FcFontCache` with all cached
-    /// patterns, font paths, and token indices. Marks all cached file paths as
-    /// processed/completed so builder threads skip them.
-    ///
-    /// Returns `Some(())` on success, `None` if the cache is missing,
-    /// unreadable, malformed, or has a version mismatch.
-    /// On WASM this is a no-op that always returns `None`.
     #[cfg(not(target_family = "wasm"))]
     pub fn load_from_disk_cache(&self) -> Option<()> {
         self.load_from_disk_cache_at(&get_font_cache_path()?)
     }
 
-    /// Same as [`FcFontRegistry::load_from_disk_cache`], but reads from an
-    /// explicit path instead of the platform cache directory.
-    ///
-    /// This exists so the cache round-trip is testable without mutating the
-    /// process environment (`HOME` / `XDG_CACHE_HOME`), which is what
-    /// [`get_font_cache_path`] is derived from and which cannot be changed
-    /// safely from a test that runs alongside others in the same process.
+    /// Load font metadata from the on-disk cache at a specific path.
     #[cfg(not(target_family = "wasm"))]
     pub fn load_from_disk_cache_at(&self, cache_path: &std::path::Path) -> Option<()> {
-        let data = std::fs::read(cache_path).ok()?;
+        use std::io::Read;
+        let mut file = std::fs::File::open(cache_path).ok()?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).ok()?;
         let manifest: FontManifest = bincode::deserialize(&data).ok()?;
 
         if manifest.version != FontManifest::CURRENT_VERSION {
@@ -137,28 +117,12 @@ impl FcFontRegistry {
     }
 
     /// Serialize the current registry state to the on-disk font cache.
-    ///
-    /// Collects all discovered font paths and their parsed metadata into a
-    /// [`FontManifest`], then writes it as bincode to the platform cache
-    /// directory (e.g. `~/.cache/rfc/fonts/manifest.bin` on Linux).
-    ///
-    /// Returns `None` if the cache path cannot be determined, the parent
-    /// directory cannot be created, or serialization / writing fails.
-    /// On WASM this is a no-op that always returns `None` (no filesystem access).
     #[cfg(not(target_family = "wasm"))]
     pub fn save_to_disk_cache(&self) -> Option<()> {
         self.save_to_disk_cache_at(&get_font_cache_path()?)
     }
 
-    /// Same as [`FcFontRegistry::save_to_disk_cache`], but writes to an
-    /// explicit path instead of the platform cache directory. See
-    /// [`FcFontRegistry::load_from_disk_cache_at`] for why this seam exists.
-    ///
-    /// The write is atomic: the manifest is serialized to a sibling
-    /// `manifest.bin.tmp-<pid>` and then renamed over the destination. A
-    /// process killed mid-write therefore leaves either the previous manifest
-    /// or no manifest at all — never a truncated one that
-    /// `load_from_disk_cache` would have to reject on every subsequent launch.
+    /// Serialize the current registry state to the on-disk font cache at a specific path.
     #[cfg(not(target_family = "wasm"))]
     pub fn save_to_disk_cache_at(&self, cache_path: &std::path::Path) -> Option<()> {
         std::fs::create_dir_all(cache_path.parent()?).ok()?;
@@ -198,9 +162,7 @@ impl FcFontRegistry {
             entries,
         };
 
-        // `state_read` is held for the duration of the collection above; drop
-        // it before touching the filesystem so a slow disk cannot stall
-        // readers/writers of the registry.
+        // Drop the lock before touching the filesystem to avoid stalling readers/writers.
         drop(state);
 
         let data = bincode::serialize(&manifest).ok()?;
@@ -209,10 +171,23 @@ impl FcFontRegistry {
         tmp_name.push(alloc::format!(".tmp-{}", std::process::id()));
         let tmp_path = cache_path.with_file_name(tmp_name);
 
-        if std::fs::write(&tmp_path, data).is_err() {
+        use std::io::Write;
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(f) => f,
+            Err(_) => return None,
+        };
+
+        if file.write_all(&data).is_err() || file.sync_all().is_err() {
+            drop(file);
             let _ = std::fs::remove_file(&tmp_path);
             return None;
         }
+        drop(file);
+
         if std::fs::rename(&tmp_path, cache_path).is_err() {
             let _ = std::fs::remove_file(&tmp_path);
             return None;
@@ -236,7 +211,7 @@ impl FcFontRegistry {
 
 /// Get file mtime (seconds since epoch) and size in bytes.
 pub fn get_file_metadata(path: &str) -> Option<(u64, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = std::fs::File::open(path).and_then(|f| f.metadata()).ok()?;
     let mtime = meta
         .modified()
         .ok()
