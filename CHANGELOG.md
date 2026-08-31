@@ -2,6 +2,132 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.0] - 2026-08-31
+
+### Fixed
+
+- **Fallback fonts are chosen per script from configuration, never by
+  breadth of coverage (issue #26).** On Windows, `resolve_font_chain(["sans-serif"])`
+  rendered Japanese with GNU Unifont. Two things conspired: the scripts hint
+  never reached generic-family expansion (`expand_font_families(.., &[])`),
+  so the per-script OS tables were dead code and no Japanese font entered
+  the CSS chain; and `find_unicode_fallbacks` ranked every candidate by how
+  many requested blocks it covered, then greedily set-covered the document —
+  so the pan-Unicode font won every script it included, by construction.
+  Making coverage measurement more accurate (4.4.8's cmap-authoritative
+  coverage) made that worse, not better: Unifont's score became more
+  legitimately dominant. The reporter's "it worked until I added Arabic" was
+  a tie broken alphabetically.
+
+  The chain is now built in three tiers, in resolution order, and the
+  per-script structure lives *inside* the precomputed chain (this crate's
+  callers resolve once per stack, ahead of layout and possibly while the
+  async registry is still parsing, so there is no per-run query to carry a
+  language the way fontconfig's `FcFontSort` does):
+
+  1. The CSS stack. A generic family carries per-script preferred fonts
+     (`CssFallbackGroup::script_fonts`, consulted before its base fonts for
+     characters in that block — what browsers do with `sans-serif`).
+  2. A coverage-gated group per requested script block
+     (`FontFallbackChain::unicode_fallbacks: Vec<ScriptFallbackGroup>`):
+     configured preferences first, then any registered font covering the
+     block, ranked by one `fallback::RankKey` — coverage *of that block*,
+     style closeness, upright before italic, dedication (how much of the
+     font is this script), narrower before wider, name. Breadth is never a
+     bonus; the dedicated font beats the everything-font.
+  3. An explicit last resort (`FcFallbackConfig::last_resort`), used
+     without a coverage check for whatever nothing else covers — the font
+     whose `.notdef` the embedder wants drawn.
+
+  The scripts hint bounds the precomputation: `Some(&[])` builds no script
+  tier at all, `None` uses `DEFAULT_UNICODE_FALLBACK_SCRIPTS`.
+
+- **Fonts loaded from the disk manifest were invisible to named-family
+  lookup.** `load_from_disk_cache_at` never called `index_pattern_family`
+  (4.5.0's family index), only the no-op token indexer. Every insert now
+  goes through one function (`insert_disk_font` / `insert_memory_font`),
+  so the four maps and the index cannot drift apart again.
+  `insert_fast_pattern` also invalidates memoized chains now.
+
+### Added
+
+- **`FcFallbackConfig` — the resolution side of `FcScanConfig`.** Everything
+  the chain builder knows about the host is injected: `generic_families`
+  (base candidates per `GenericFamily`), `substitutions` (missing named
+  family → replacements), `script_fallbacks` (`FcScriptFallback { range,
+  generic, families }`), `last_resort`, `default_generic`. There is no
+  built-in table on the resolve path; `FcFallbackConfig::os_defaults(os)`
+  is the explicit opt-in carrying the old tables (with kana preferring the
+  Japanese font and Hangul the Korean one, where the old single CJK list
+  could not distinguish). `FcFallbackConfig::empty()` configures nothing;
+  `merge_defaults` fills only what a configuration leaves unsaid;
+  `absorb_system_aliases` takes over parsed `fonts.conf` `<alias><prefer>`
+  entries; `candidate_families(stack, scripts)` lists exactly the families
+  a chain can contain, which is what the async registry now parses ahead
+  of resolving — the two agree by construction.
+
+  `FcFontCache::{fallback_config, set_fallback_config, with_fallback_config}`;
+  `FcFontCache::default()` carries an empty configuration; `build()` and
+  `build_with_families()` parse the platform aliases where there are any and
+  fill the gaps from `os_defaults`. `FcFontRegistry::new_with_configs(scan,
+  fallback)` injects both sides; `new_with_config(scan)` and `new()` keep
+  their behaviour by opting into `os_defaults`.
+
+- **`GenericFamily`**: the thirteen CSS Fonts 4 generics as a type, with
+  `from_css` (case and separators ignored), `as_css`, and `parent` — the
+  generic a less common one borrows configuration from. The three copies of
+  the keyword list are gone; `is_generic_family` is `from_css(..).is_some()`.
+
+- **`FontFallbackChain`**: `last_resort`, `empty(stack)`,
+  `resolve_codepoint(cp) -> Option<(FontId, &str)>` (allocation-free),
+  `fonts()` (every font once, in resolution order). `resolve_char`,
+  `resolve_text` and `query_for_text` read only the chain — no lock, no
+  metadata clone per character; the `cache` argument is kept so call sites
+  compile unchanged. `CssFallbackGroup::script_fonts`.
+
+### Changed
+
+- **`resolve_char` is honest again.** It returns `None` when no font in the
+  chain covers the character and no last resort is configured. The
+  "if exactly one font is registered, return it for everything" branch is
+  gone; an embedder that wants that configures `last_resort`.
+- **Public `query` uses the shared ranking**: memory fonts first, then
+  style, then how much of the requested coverage the font misses, narrower
+  before wider. It no longer prefers the widest font — `query(name: "Arial")`
+  picks "Arial", not "Arial Unicode MS". `compute_fallbacks` ranks the same
+  way over the font's own coverage.
+- The chain memo key hashes the effective script set, so `None` and an
+  explicit default set share a slot.
+
+### Removed
+
+- The token-fuzzy path: `fuzzy_query_by_name`, `token_index`, `font_tokens`
+  and the no-op `index_pattern_tokens` (a no-op in every build since 4.4.3,
+  so the path could not execute). `find_unicode_fallbacks`,
+  `calculate_font_similarity_score`, `query_internal`, and the
+  `system_aliases` cache state (now part of the configuration).
+  `src/lib.rs` is 1,300 lines shorter; chain building lives in
+  `src/fallback.rs`.
+
+### Deprecated
+
+Thin wrappers over `FcFallbackConfig::os_defaults`, removed in the next
+major: `OperatingSystem::{get_serif_fonts, get_sans_serif_fonts,
+get_monospace_fonts, expand_generic_family}`, `expand_font_families`,
+`FcFontCache::{expand_font_families_config_first, system_alias_prefs,
+resolve_font_chain_with_os}`.
+
+### Tests
+
+- `tests/issue_26_unicode_fallback_ranking.rs`: ten hermetic tests with
+  three mock fonts shaped like a Windows box (Segoe UI, MS Gothic, Unifont)
+  — the first tests in the crate where more than one font covers the same
+  script and the assertion is *which one wins*. They cover the reporter's
+  scenario, the unconfigured ranking, `Some(&[])`, configured preferences
+  over ranking, the default generic for generic-less stacks, the last
+  resort, substitutions, memo invalidation on config change, and that the
+  registry's prefetch list covers the chain.
+
 ## [4.6.0] - 2026-08-29
 
 ### Added

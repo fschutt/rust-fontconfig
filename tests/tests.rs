@@ -1,65 +1,83 @@
 use rust_fontconfig::*;
 
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
 #[test]
 fn test_operating_system_font_expansion() {
-    // Test Windows font expansion (without Unicode ranges = default fonts)
-    let windows_os = OperatingSystem::Windows;
-    let no_ranges: &[UnicodeRange] = &[];
-    
-    assert_eq!(windows_os.get_serif_fonts(no_ranges), vec!["Times New Roman".to_string()]);
+    // The tables the crate used to hard-code, now an explicit opt-in.
+    let windows = FcFallbackConfig::os_defaults(OperatingSystem::Windows);
+    assert_eq!(windows.generic_candidates(GenericFamily::Serif), names(&["Times New Roman"]));
     assert_eq!(
-        windows_os.get_sans_serif_fonts(no_ranges),
-        vec!["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"]
-            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        windows.generic_candidates(GenericFamily::SansSerif),
+        names(&["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"])
     );
     assert_eq!(
-        windows_os.get_monospace_fonts(no_ranges),
-        vec!["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"]
-            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        windows.generic_candidates(GenericFamily::Monospace),
+        names(&["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"])
     );
-    
-    // Test macOS font expansion
-    let macos_os = OperatingSystem::MacOS;
+
+    let macos = FcFallbackConfig::os_defaults(OperatingSystem::MacOS);
     assert_eq!(
-        macos_os.get_serif_fonts(no_ranges),
-        vec!["Times New Roman", "Times", "New York", "Palatino"].iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        macos.generic_candidates(GenericFamily::Serif),
+        names(&["Times New Roman", "Times", "New York", "Palatino"])
     );
     assert_eq!(
-        macos_os.get_sans_serif_fonts(no_ranges),
-        vec!["San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular", "Helvetica Neue", "Helvetica", "Lucida Grande"]
-            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        macos.generic_candidates(GenericFamily::SansSerif),
+        names(&["San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular", "Helvetica Neue", "Helvetica", "Lucida Grande"])
     );
     assert_eq!(
-        macos_os.get_monospace_fonts(no_ranges),
-        vec!["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"]
-            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        macos.generic_candidates(GenericFamily::Monospace),
+        names(&["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"])
     );
-    
-    // Test Linux font expansion
-    let linux_os = OperatingSystem::Linux;
+
+    let linux = FcFallbackConfig::os_defaults(OperatingSystem::Linux);
+    assert_eq!(linux.generic_candidates(GenericFamily::Serif).len(), 8, "Linux should have 8 serif fonts");
     assert_eq!(
-        linux_os.get_serif_fonts(no_ranges).len(),
-        8,
-        "Linux should have 8 serif fonts"
+        linux.generic_candidates(GenericFamily::SansSerif),
+        names(&["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"])
     );
+
+    // Generics without a table of their own borrow their parent's.
     assert_eq!(
-        linux_os.get_sans_serif_fonts(no_ranges),
-        vec!["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"]
-            .iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        windows.generic_candidates(GenericFamily::SystemUi),
+        windows.generic_candidates(GenericFamily::SansSerif)
     );
-    
-    // Test generic family expansion
+
+    // A script hint puts that script's preferences before the base list,
+    // and the block decides the order: kana want the Japanese font first.
+    let hiragana = [UnicodeRange { start: 0x3040, end: 0x309F }];
+    let expanded = windows.expand_generic(GenericFamily::SansSerif, &hiragana);
+    assert_eq!(expanded[0], "MS Gothic");
+    assert!(expanded.contains(&"Segoe UI".to_string()));
+    let hangul = [UnicodeRange { start: 0xAC00, end: 0xD7A3 }];
+    assert_eq!(windows.expand_generic(GenericFamily::SansSerif, &hangul)[0], "Malgun Gothic");
+
+    // Stack expansion keeps CSS order: the named family, then the generic's list.
     let families = vec!["Arial".to_string(), "sans-serif".to_string()];
-    let expanded = expand_font_families(&families, OperatingSystem::MacOS, no_ranges);
+    let expanded = macos.candidate_families(&families, &[]);
     assert_eq!(expanded[0], "Arial");
     assert_eq!(expanded[1], "San Francisco");
     assert_eq!(expanded[2], ".AppleSystemUIFont");
     assert_eq!(expanded[3], ".SFUIText");
-    
-    // Test non-generic family (should pass through unchanged)
+
+    // A non-generic family passes through unchanged.
     let specific = vec!["MyCustomFont".to_string()];
-    let expanded = expand_font_families(&specific, OperatingSystem::Windows, no_ranges);
-    assert_eq!(expanded, vec!["MyCustomFont".to_string()]);
+    assert_eq!(windows.candidate_families(&specific, &[]), names(&["MyCustomFont"]));
+
+    // The 4.x entry points are thin wrappers over the same tables.
+    #[allow(deprecated)]
+    {
+        assert_eq!(
+            OperatingSystem::Windows.get_sans_serif_fonts(&[]),
+            windows.generic_candidates(GenericFamily::SansSerif)
+        );
+        assert_eq!(
+            expand_font_families(&families, OperatingSystem::MacOS, &[]),
+            macos.candidate_families(&families, &[])
+        );
+    }
 }
 
 #[test]
@@ -125,7 +143,7 @@ fn test_unicode_range_matching() {
     };
 
     // Create the font cache with our mock fonts
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     cache.with_memory_fonts(vec![
         (latin_pattern.clone(), latin_font),
         (cyrillic_pattern.clone(), cyrillic_font),
@@ -262,7 +280,7 @@ fn test_weight_matching() {
     };
 
     // Create the font cache
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     cache.with_memory_fonts(vec![
         (normal_pattern.clone(), normal_font),
         (bold_pattern.clone(), bold_font),
@@ -397,7 +415,7 @@ fn test_trace_messages() {
         ..Default::default()
     };
 
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     cache.with_memory_fonts(vec![(test_pattern.clone(), test_font)]);
 
     // Test name mismatch
@@ -613,7 +631,7 @@ fn test_font_search() {
     let fonts = getfonts(arial_id, arial_bold_id, courier_id, fira_id, noto_cjk_id);
 
     // Create font cache with all our test fonts using deterministic IDs
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     for (id, pattern, font) in fonts {
         cache.with_memory_font_with_id(id, pattern, font);
     }
@@ -697,7 +715,7 @@ fn test_failing_isolated() {
     let fonts = getfonts(arial_id, arial_bold_id, courier_id, fira_id, noto_cjk_id);
 
     // Create font cache with all our test fonts using deterministic IDs
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     for (id, pattern, font) in fonts {
         cache.with_memory_font_with_id(id, pattern, font);
     }
@@ -727,7 +745,7 @@ fn test_failing_isolated_2() {
     let fonts = getfonts(arial_id, arial_bold_id, courier_id, fira_id, noto_cjk_id);
 
     // Create font cache with all our test fonts using deterministic IDs
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     for (id, pattern, font) in fonts {
         cache.with_memory_font_with_id(id, pattern, font);
     }
@@ -833,7 +851,7 @@ fn query_with_fallback_is_total_like_fc_match() {
         unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
         ..Default::default()
     };
-    let mut cache = FcFontCache::default();
+    let cache = FcFontCache::default();
     cache.with_memory_fonts(vec![(
         installed.clone(),
         FcFont { bytes: vec![0, 1, 2, 3], font_index: 0, id: "only-font".to_string() },
