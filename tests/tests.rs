@@ -4,6 +4,26 @@ fn names(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
+/// `PatternMatch` crosses the C boundary by value, and the header is
+/// hand-maintained. Read the header and hold the enum to it, so the two
+/// cannot drift apart again (they did: reordering the Rust variants once
+/// made every C caller's `FC_MATCH_FALSE` arrive as `True`).
+#[test]
+fn pattern_match_discriminants_match_the_c_header() {
+    let header = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/ffi/rust_fontconfig.h"))
+        .expect("ffi/rust_fontconfig.h is part of the repository");
+    let header_value = |name: &str| -> i32 {
+        let at = header.find(name).unwrap_or_else(|| panic!("{name} is not declared in the header"));
+        let rest = header[at + name.len()..].trim_start().trim_start_matches('=').trim_start();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().unwrap_or_else(|_| panic!("{name} has no numeric value in the header"))
+    };
+    assert_eq!(PatternMatch::True as i32, header_value("FC_MATCH_TRUE"));
+    assert_eq!(PatternMatch::False as i32, header_value("FC_MATCH_FALSE"));
+    assert_eq!(PatternMatch::DontCare as i32, header_value("FC_MATCH_DONT_CARE"));
+    assert_eq!(PatternMatch::default(), PatternMatch::DontCare);
+}
+
 #[test]
 fn test_operating_system_font_expansion() {
     // The tables the crate used to hard-code, now an explicit opt-in.
