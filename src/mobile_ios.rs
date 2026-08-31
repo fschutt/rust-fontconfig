@@ -1,26 +1,9 @@
 //! iOS-only font discovery via CoreText.
 //!
-//! On iOS, system fonts (`Helvetica.ttc`, `SFNS.ttc`, `PingFang.ttc`, …) live
-//! under `/System/Library/Fonts/{,Core,AssetsV2}/` and the per-app CoreText
-//! cache. The app sandbox denies `read_dir(2)` on those paths even when the
-//! files are world-readable, so a plain directory scan returns nothing — but the
-//! individual files *are* openable once you know the path.
-//!
-//! We get those paths from CoreText. Earlier versions used
-//! `CTFontManagerCopyAvailableFontURLs`, but that symbol is **macOS-only** — it
-//! is not exported by the iOS CoreText framework, so an iOS build failed to link
-//! ("Undefined symbols: _CTFontManagerCopyAvailableFontURLs"). Instead we build
-//! the available-fonts collection and read each descriptor's `kCTFontURLAttribute`:
-//!
-//!   CTFontCollectionCreateFromAvailableFonts(NULL)        // iOS 7+
-//!     -> CTFontCollectionCreateMatchingFontDescriptors()  // iOS 7+
-//!       -> CTFontDescriptorCopyAttribute(d, kCTFontURLAttribute)  // iOS 3.2+
-//!         -> CFURLGetFileSystemRepresentation()           // iOS 2.0+
-//!
-//! All of these are available from iOS 7 (the URL attribute since 3.2), so this
-//! links and runs on every iOS version azul targets. The resulting `PathBuf`s
-//! feed the same `FcParseFont` path the desktop arms use. Many descriptors share
-//! one `.ttc`, so the paths are de-duplicated before returning.
+//! On iOS, `read_dir` is denied on system font directories by the sandbox,
+//! but the files are readable if their exact paths are known. We use
+//! `CTFontCollectionCreateFromAvailableFonts` to query available fonts and extract
+//! their paths via `kCTFontURLAttribute`.
 
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -76,12 +59,9 @@ extern "C" {
     fn CFRelease(cf: *const c_void);
 }
 
-/// Enumerate every available font's on-disk path via CoreText. Returns an empty
-/// vec if CoreText reports no fonts (it never should on a real device). Uses only
-/// iOS-7-and-newer symbols so it links on every supported iOS version.
+/// Enumerate every available font's on-disk path via CoreText.
 pub(crate) fn copy_available_font_urls() -> Vec<PathBuf> {
-    // Deduplicate: a `.ttc` exposes many descriptors (one per face) that all map
-    // to the same file URL; we only want to parse each file once.
+    // Deduplicate: multiple font faces map to the same file URL.
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
 
     unsafe {
@@ -96,7 +76,6 @@ pub(crate) fn copy_available_font_urls() -> Vec<PathBuf> {
         }
 
         let count = CFArrayGetCount(descriptors);
-        // PATH_MAX on Darwin is 1024; allow extra room for symlinked cache trees.
         let mut buf = [0u8; 4096];
 
         for i in 0..count {
@@ -104,10 +83,10 @@ pub(crate) fn copy_available_font_urls() -> Vec<PathBuf> {
             if desc.is_null() {
                 continue;
             }
-            // Owned (+1) CFURLRef — must CFRelease.
+            // Owned CFURLRef must be released.
             let url = CTFontDescriptorCopyAttribute(desc, kCTFontURLAttribute) as CFURLRef;
             if url.is_null() {
-                continue; // in-memory / data fonts have no file URL
+                continue; // Data fonts have no file URL.
             }
             let ok =
                 CFURLGetFileSystemRepresentation(url, true, buf.as_mut_ptr(), buf.len() as CFIndex);
