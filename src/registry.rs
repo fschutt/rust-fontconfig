@@ -557,7 +557,7 @@ impl FcFontRegistry {
             let state = self.cache.state_read();
             needed_families
                 .iter()
-                .filter(|fam| !family_exists_in_patterns(fam, state.patterns.keys()))
+                .filter(|fam| !family_exists_in_patterns(fam, state.metadata.values()))
                 .cloned()
                 .collect()
         };
