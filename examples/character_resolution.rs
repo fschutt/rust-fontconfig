@@ -1,10 +1,7 @@
-//! Character resolution example
+//! Resolves individual characters to fonts using font chains to
+//! debug font coverage issues.
 //!
-//! Demonstrates how to resolve individual characters to fonts using font chains.
-//! Useful for debugging font coverage issues (e.g. CJK, emoji, symbols).
-//!
-//! Run with:
-//!   cargo run --example character_resolution
+//! Run with: cargo run --example character_resolution
 
 use rust_fontconfig::{FcFontCache, FcWeight, PatternMatch};
 
@@ -57,7 +54,7 @@ fn main() {
             .and_then(|(_, info)| info.as_ref())
             .and_then(|(id, _)| cache.get_metadata_by_id(id))
             .and_then(|m| m.name.clone().or(m.family.clone()))
-            .unwrap_or_else(|| "⚠ NOT FOUND".to_string());
+            .unwrap_or_else(|| "Not found".to_string());
 
         println!("{:<6} {:<30} {}", ch, description, font_name);
     }
@@ -91,7 +88,7 @@ fn main() {
 
             println!(
                 "  {} '{}' (U+{:04X})",
-                if in_arial { "✓" } else { "✗" },
+                if in_arial { "[Y]" } else { "[N]" },
                 ch,
                 ch as u32
             );

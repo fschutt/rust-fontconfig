@@ -1,22 +1,19 @@
-//! Integration API example
+//! Shows the workflow for integrating rust-fontconfig into a text
+//! layout pipeline: from CSS font-family resolution to loading font bytes.
 //!
-//! Shows the complete workflow for integrating rust-fontconfig into a text
-//! layout pipeline — from CSS font-family resolution to loading font bytes.
-//!
-//! Run with:
-//!   cargo run --example integration_api
+//! Run with: cargo run --example integration_api
 
 use rust_fontconfig::{FcFontCache, FcWeight, FontId, PatternMatch};
 
 fn main() {
-    println!("=== Font Integration Pipeline ===\n");
+    println!("Font Integration Pipeline\n");
 
-    // ── Step 1: Build font cache ──
+    // Step 1: Build font cache
     println!("Step 1: Build font cache");
     let cache = FcFontCache::build();
     println!("  {} fonts loaded\n", cache.list().len());
 
-    // ── Step 2: Resolve CSS font-family ──
+    // Resolve CSS font families
     let css_families = vec![
         "Helvetica".to_string(),
         "Arial".to_string(),
@@ -33,7 +30,12 @@ fn main() {
     );
 
     for (i, group) in chain.css_fallbacks.iter().enumerate() {
-        print!("  [{}] '{}': {} fonts", i + 1, group.css_name, group.fonts.len());
+        print!(
+            "  [{}] '{}': {} fonts",
+            i + 1,
+            group.css_name,
+            group.fonts.len()
+        );
         if let Some(first) = group.fonts.first() {
             if let Some(meta) = cache.get_metadata_by_id(&first.id) {
                 print!(
@@ -49,13 +51,13 @@ fn main() {
         chain.unicode_fallbacks.len()
     );
 
-    // ── Step 3: Resolve text to font runs ──
+    // Resolve text to font runs
     let text = "Hello 世界! Привет мир";
     println!("Step 3: Resolve text: '{}'\n", text);
 
     let resolved = chain.resolve_text(&cache, text);
 
-    // Group by runs of same font
+    // Group characters into font runs
     let mut runs: Vec<(String, Option<FontId>)> = Vec::new();
     let mut current_text = String::new();
     let mut current_id: Option<FontId> = None;
@@ -81,11 +83,11 @@ fn main() {
             .as_ref()
             .and_then(|id| cache.get_metadata_by_id(id))
             .and_then(|m| m.name.clone().or(m.family.clone()))
-            .unwrap_or_else(|| "[NO FONT]".into());
+            .unwrap_or_else(|| "[No font]".into());
         println!("    '{}' -> {}", run_text, name);
     }
 
-    // ── Step 4: Load font bytes ──
+    // Load font bytes
     let unique_fonts: std::collections::HashSet<_> =
         runs.iter().filter_map(|(_, id)| *id).collect();
 
@@ -115,8 +117,8 @@ fn main() {
     }
 
     println!("\nPipeline summary:");
-    println!("  1. FcFontCache::build()       — once at startup");
-    println!("  2. cache.resolve_font_chain() — per CSS font-family");
-    println!("  3. chain.resolve_text()       — per text run");
-    println!("  4. cache.get_font_by_id()     — load bytes for shaping");
+    println!("  1. FcFontCache::build()       (once at startup)");
+    println!("  2. cache.resolve_font_chain() (per CSS font family)");
+    println!("  3. chain.resolve_text()       (per text run)");
+    println!("  4. cache.get_font_by_id()     (load bytes for shaping)");
 }

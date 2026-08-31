@@ -1,24 +1,24 @@
-//! Basic font query example (synchronous API)
+//! Demonstrates the `FcFontCache::build()` API which scans all system
+//! fonts upfront. This is slower than the incremental `registry` API.
 //!
-//! Demonstrates the classic `FcFontCache::build()` API which scans ALL system
-//! fonts upfront. This works but is slow (~700ms on a system with 1000 fonts).
-//! For faster startup, see the `registry` example.
-//!
-//! Run with:
-//!   cargo run --example getfont
+//! Run with: cargo run --example getfont
 
 use rust_fontconfig::{FcFontCache, FcPattern, FcWeight};
 use std::time::Instant;
 
 fn main() {
-    // Build the cache — scans and parses ALL system fonts
+    // Build the cache
     let start = Instant::now();
     let cache = FcFontCache::build();
     let build_time = start.elapsed();
 
-    println!("Cache built: {} fonts in {:?}\n", cache.list().len(), build_time);
+    println!(
+        "Cache built: {} fonts in {:?}\n",
+        cache.list().len(),
+        build_time
+    );
 
-    // Query various fonts to showcase fuzzy matching
+    // Query fonts to demonstrate fuzzy matching
     let queries = [
         ("Arial", FcWeight::Normal, "Common sans-serif"),
         ("Helvetica", FcWeight::Bold, "Bold variant"),
@@ -45,11 +45,19 @@ fn main() {
                     .and_then(|m| m.name.clone().or(m.family.clone()))
                     .unwrap_or_else(|| format!("{:?}", fm.id));
                 println!(
-                    "  ✓ '{}' ({}) -> {} [{:?}]",
-                    name, desc, found, t.elapsed()
+                    "  [Y] '{}' ({}) -> {} [{:?}]",
+                    name,
+                    desc,
+                    found,
+                    t.elapsed()
                 );
             }
-            None => println!("  ✗ '{}' ({}) -> NOT FOUND [{:?}]", name, desc, t.elapsed()),
+            None => println!(
+                "  [N] '{}' ({}) -> Not found [{:?}]",
+                name,
+                desc,
+                t.elapsed()
+            ),
         }
     }
 }

@@ -1,10 +1,7 @@
-//! Detailed font query patterns
+//! Shows how to query by family name, style, generic families, list fonts,
+//! and search by name substring.
 //!
-//! Shows how to query by family name, style (bold/italic), generic families,
-//! list fonts, and search by name substring.
-//!
-//! Run with:
-//!   cargo run --example query
+//! Run with: cargo run --example query
 
 use rust_fontconfig::{FcFontCache, FcPattern, FcWeight, PatternMatch};
 
@@ -13,8 +10,8 @@ fn main() {
     let cache = FcFontCache::build();
     println!("Font cache built with {} fonts\n", cache.list().len());
 
-    // ── Query by family name ──
-    println!("=== Query by Family Name ===");
+    // Query by family name
+    println!("Query by Family Name");
     let mut trace = Vec::new();
     let pattern = FcPattern {
         family: Some("Arial".to_string()),
@@ -41,8 +38,8 @@ fn main() {
         println!("Arial not found");
     }
 
-    // ── Query generic family ──
-    println!("\n=== Query Generic 'serif' ===");
+    // Query generic family
+    println!("\nQuery Generic 'serif'");
     trace.clear();
     if let Some(result) = cache.query(
         &FcPattern {
@@ -52,15 +49,12 @@ fn main() {
         &mut trace,
     ) {
         if let Some(meta) = cache.get_metadata_by_id(&result.id) {
-            println!(
-                "Found: {:?}",
-                meta.name.as_ref().or(meta.family.as_ref())
-            );
+            println!("Found: {:?}", meta.name.as_ref().or(meta.family.as_ref()));
         }
     }
 
-    // ── Query by style (bold + italic) ──
-    println!("\n=== Query Bold Italic ===");
+    // Query by style (bold + italic)
+    println!("\nQuery Bold Italic");
     trace.clear();
     if let Some(result) = cache.query(
         &FcPattern {
@@ -81,12 +75,17 @@ fn main() {
         }
     }
 
-    // ── List bold fonts ──
-    println!("\n=== First 5 Bold Fonts ===");
+    // List bold fonts
+    println!("\nFirst 5 Bold Fonts");
     for (meta, id) in cache
         .list()
         .into_iter()
-        .filter(|(m, _)| matches!(m.weight, FcWeight::Bold | FcWeight::ExtraBold | FcWeight::Black))
+        .filter(|(m, _)| {
+            matches!(
+                m.weight,
+                FcWeight::Bold | FcWeight::ExtraBold | FcWeight::Black
+            )
+        })
         .take(5)
     {
         println!(
@@ -96,21 +95,20 @@ fn main() {
         );
     }
 
-    // ── Search by name substring ──
-    println!("\n=== Fonts with 'Mono' in name ===");
-    for (meta, _id) in cache.list().into_iter().filter(|(m, _)| {
-        m.name
-            .as_ref()
-            .map(|n| n.contains("Mono"))
-            .unwrap_or(false)
-            || m.family
-                .as_ref()
-                .map(|f| f.contains("Mono"))
-                .unwrap_or(false)
-    }).take(10) {
-        println!(
-            "  {:?}",
-            meta.name.as_ref().or(meta.family.as_ref())
-        );
+    // Search by name substring
+    println!("\nFonts with 'Mono' in name");
+    for (meta, _id) in cache
+        .list()
+        .into_iter()
+        .filter(|(m, _)| {
+            m.name.as_ref().map(|n| n.contains("Mono")).unwrap_or(false)
+                || m.family
+                    .as_ref()
+                    .map(|f| f.contains("Mono"))
+                    .unwrap_or(false)
+        })
+        .take(10)
+    {
+        println!("  {:?}", meta.name.as_ref().or(meta.family.as_ref()));
     }
 }
