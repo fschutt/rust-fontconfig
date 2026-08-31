@@ -1459,3 +1459,26 @@ fn fonts_are_one_record_each() {
     cache.with_memory_fonts(vec![(pattern, font(&[9, 9, 9]))]);
     assert_eq!(cache.len(), 5, "different bytes under the same pattern: a record of its own");
 }
+
+/// The font-file walk follows directory symlinks but visits each directory
+/// once, so a link cycle terminates and a second route to the same directory
+/// does not list its files twice. (Both scanners used to recurse unguarded; a
+/// cycle overflowed the scout thread's stack, which aborts the process.)
+#[cfg(unix)]
+#[test]
+fn font_file_walk_survives_a_symlink_cycle_and_lists_each_file_once() {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("rfc-walk-{}-{nanos}", std::process::id()));
+    let fonts = root.join("a");
+    std::fs::create_dir_all(&fonts).unwrap();
+    std::fs::write(fonts.join("one.ttf"), include_bytes!("fixtures/InstrumentSerif-Regular.ttf")).unwrap();
+    std::fs::write(fonts.join("notes.txt"), "not a font").unwrap();
+    std::os::unix::fs::symlink(&root, fonts.join("loop")).unwrap(); // a/loop -> root: a cycle
+    std::os::unix::fs::symlink(&fonts, root.join("twin")).unwrap(); // twin -> a: a second route
+
+    let files = rust_fontconfig::utils::collect_font_files(&root);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].ends_with("one.ttf"));
+}

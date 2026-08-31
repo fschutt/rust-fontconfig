@@ -3624,35 +3624,13 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
     }
 }
 
-/// Recursively collect all files from a directory (no parsing, no allsorts).
+/// Font files under `dir`: see [`crate::utils::collect_font_files`] (cycle-safe,
+/// extension-filtered). The scan used to open and mmap every regular file
+/// under its roots — on macOS that is all of `/System/Library/AssetsV2`.
 #[cfg(feature = "std")]
+#[allow(non_snake_case)]
 fn FcCollectFontFilesRecursive(dir: PathBuf) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut dirs_to_parse = vec![dir];
-
-    loop {
-        let mut new_dirs = Vec::new();
-        for dir in &dirs_to_parse {
-            let entries = match std::fs::read_dir(dir) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    new_dirs.push(path);
-                } else {
-                    files.push(path);
-                }
-            }
-        }
-        if new_dirs.is_empty() {
-            break;
-        }
-        dirs_to_parse = new_dirs;
-    }
-
-    files
+    crate::utils::collect_font_files(&dir)
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]

@@ -105,6 +105,41 @@ pub fn is_font_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Every font file (by extension, see [`FONT_EXTENSIONS`]) under `root`,
+/// breadth-first. Symbolic links to directories are followed, but each
+/// directory is visited once by canonical path, so a link cycle
+/// (`~/.fonts/loop -> ..` is a classic) terminates instead of overflowing
+/// the stack, and the walk stops at depth 32. Both scanners — the
+/// synchronous `FcFontCache::build` and the registry's scout — use this.
+#[cfg(feature = "std")]
+pub fn collect_font_files(root: &std::path::Path) -> alloc::vec::Vec<std::path::PathBuf> {
+    use std::collections::{BTreeSet, VecDeque};
+    const MAX_DEPTH: usize = 32;
+
+    let mut files = alloc::vec::Vec::new();
+    let mut visited: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut queue: VecDeque<(std::path::PathBuf, usize)> = VecDeque::new();
+    queue.push_back((root.to_path_buf(), 0));
+    while let Some((dir, depth)) = queue.pop_front() {
+        let identity = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !visited.insert(identity) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < MAX_DEPTH {
+                    queue.push_back((path, depth + 1));
+                }
+            } else if is_font_file(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
