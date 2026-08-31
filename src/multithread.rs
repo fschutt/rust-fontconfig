@@ -89,7 +89,9 @@ impl FcFontRegistry {
                 continue;
             }
 
-            let Ok(mut known_paths) = self.known_paths.write() else { return };
+            let Ok(mut known_paths) = self.known_paths.write() else {
+                return;
+            };
             let mut queue_opt = (!lazy).then(|| self.build_queue.lock().ok()).flatten();
 
             for path in &dir_paths {
@@ -145,16 +147,15 @@ impl FcFontRegistry {
         // Filter to recognized font extensions. CoreText also returns app-bundled
         // resources occasionally, so the filter keeps us pruning anything not
         // parseable.
-        let filtered: Vec<PathBuf> = ios_paths
-            .into_iter()
-            .filter(|p| is_font_file(p))
-            .collect();
+        let filtered: Vec<PathBuf> = ios_paths.into_iter().filter(|p| is_font_file(p)).collect();
 
         if filtered.is_empty() {
             return;
         }
 
-        let Ok(mut known_paths) = self.known_paths.write() else { return };
+        let Ok(mut known_paths) = self.known_paths.write() else {
+            return;
+        };
         let mut queue_opt = (!lazy).then(|| self.build_queue.lock().ok()).flatten();
 
         for path in &filtered {
@@ -204,7 +205,7 @@ impl FcFontRegistry {
     ///   "queue empty + scan complete" condition (as the eager
     ///   path does) would race the Critical job push and cause the
     ///   request to hang forever.
-     /// Body of a builder thread. The registry is held only for the duration
+    /// Body of a builder thread. The registry is held only for the duration
     /// of one step, so a registry whose last `Arc` was dropped is freed — and
     /// its builders exit — within one step (at most one 100 ms wait or one
     /// font parse). Builders used to hold an `Arc` themselves, which made

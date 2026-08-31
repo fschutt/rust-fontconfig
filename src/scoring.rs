@@ -274,7 +274,10 @@ mod tests {
     fn find_family_paths_exact_match() {
         let mut known = BTreeMap::new();
         known.insert("arial".to_string(), vec![PathBuf::from("/fonts/Arial.ttf")]);
-        known.insert("helvetica".to_string(), vec![PathBuf::from("/fonts/Helvetica.ttf")]);
+        known.insert(
+            "helvetica".to_string(),
+            vec![PathBuf::from("/fonts/Helvetica.ttf")],
+        );
 
         let paths = find_family_paths("arial", &known);
         assert_eq!(paths.len(), 1);
@@ -289,7 +292,10 @@ mod tests {
             "arialnarrow".to_string(),
             vec![PathBuf::from("/fonts/ArialNarrow.ttf")],
         );
-        known.insert("helvetica".to_string(), vec![PathBuf::from("/fonts/Helvetica.ttf")]);
+        known.insert(
+            "helvetica".to_string(),
+            vec![PathBuf::from("/fonts/Helvetica.ttf")],
+        );
 
         // "arial" matches both "arial" (exact) and "arialnarrow" (contains)
         let paths = find_family_paths("arial", &known);
@@ -323,11 +329,7 @@ mod tests {
         let mut completed = HashSet::new();
         completed.insert(PathBuf::from("/fonts/Arial.ttf"));
 
-        let incomplete = find_incomplete_paths(
-            &["arial".to_string()],
-            &known,
-            &completed,
-        );
+        let incomplete = find_incomplete_paths(&["arial".to_string()], &known, &completed);
 
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0].0, PathBuf::from("/fonts/ArialBold.ttf"));
@@ -350,7 +352,10 @@ mod tests {
             family: Some("Helvetica Neue".to_string()),
             ..Default::default()
         };
-        assert!(family_exists_in_patterns("helveticaneue", [&pattern].into_iter()));
+        assert!(family_exists_in_patterns(
+            "helveticaneue",
+            [&pattern].into_iter()
+        ));
     }
 
     #[test]
@@ -359,7 +364,10 @@ mod tests {
             name: Some("Arial".to_string()),
             ..Default::default()
         };
-        assert!(!family_exists_in_patterns("courier", [&pattern].into_iter()));
+        assert!(!family_exists_in_patterns(
+            "courier",
+            [&pattern].into_iter()
+        ));
     }
 
     /// Helper: tokenize a stem into all lowercase tokens.

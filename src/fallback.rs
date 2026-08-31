@@ -168,7 +168,11 @@ impl FontFallbackChain {
     }
 
     /// Per-character resolution of `text`.
-    pub fn resolve_text(&self, cache: &FcFontCache, text: &str) -> Vec<(char, Option<(FontId, String)>)> {
+    pub fn resolve_text(
+        &self,
+        cache: &FcFontCache,
+        text: &str,
+    ) -> Vec<(char, Option<(FontId, String)>)> {
         text.chars()
             .map(|ch| (ch, self.resolve_char(cache, ch)))
             .collect()
@@ -286,7 +290,11 @@ pub struct RankKey {
 impl RankKey {
     /// Rank `candidate` for characters of `block` under `style`. `None` when
     /// the candidate covers nothing of the block.
-    pub fn for_block(style: &FcPattern, candidate: &FcPattern, block: &UnicodeRange) -> Option<Self> {
+    pub fn for_block(
+        style: &FcPattern,
+        candidate: &FcPattern,
+        block: &UnicodeRange,
+    ) -> Option<Self> {
         let overlap = overlap_size(&candidate.unicode_ranges, block);
         if overlap == 0 {
             return None;
@@ -318,7 +326,11 @@ impl RankKey {
 
     /// Rank `candidate` against a whole requested range set (the public
     /// `query` path): style first, then how much of the request it misses.
-    pub fn for_request(style: &FcPattern, candidate: &FcPattern, requested: &[UnicodeRange]) -> Self {
+    pub fn for_request(
+        style: &FcPattern,
+        candidate: &FcPattern,
+        requested: &[UnicodeRange],
+    ) -> Self {
         let (requested_width, overlap) = requested.iter().fold((0u32, 0u32), |(w, o), r| {
             (
                 w.saturating_add(range_width(r)),
@@ -423,7 +435,10 @@ fn faces_for_family(
         .collect();
     ranked.sort();
     ranked.truncate(MAX_FACES_PER_FAMILY);
-    ranked.into_iter().map(|(_, id, meta)| font_match(id, meta)).collect()
+    ranked
+        .into_iter()
+        .map(|(_, id, meta)| font_match(id, meta))
+        .collect()
 }
 
 /// The faces of every family in `families`, in that order, each font once,
@@ -457,7 +472,10 @@ fn faces_unconfigured(state: &FcFontCacheInner, style: &FcPattern) -> Vec<FontMa
         .collect();
     ranked.sort();
     ranked.truncate(MAX_FACES_PER_FAMILY);
-    ranked.into_iter().map(|(_, id, meta)| font_match(id, meta)).collect()
+    ranked
+        .into_iter()
+        .map(|(_, id, meta)| font_match(id, meta))
+        .collect()
 }
 
 /// Every registered font that covers any of `block`, best first by
@@ -477,7 +495,10 @@ fn ranked_coverage_candidates(
         .collect();
     ranked.sort();
     ranked.truncate(limit);
-    ranked.into_iter().map(|(_, id, meta)| font_match(id, meta)).collect()
+    ranked
+        .into_iter()
+        .map(|(_, id, meta)| font_match(id, meta))
+        .collect()
 }
 
 /// Build the chain for `stack` from the cache state and `config`. Pure over
@@ -507,7 +528,8 @@ pub(crate) fn build_chain(
                 if !generics_in_stack.contains(&generic) {
                     generics_in_stack.push(generic);
                 }
-                let fonts = faces_for_families(state, config.generic_candidates(generic), style, &css_base);
+                let fonts =
+                    faces_for_families(state, config.generic_candidates(generic), style, &css_base);
                 css_base.extend(ids(&fonts));
                 css_all.extend(ids(&fonts));
 
@@ -517,7 +539,10 @@ pub(crate) fn build_chain(
                     let fonts = faces_for_families(state, &names, style, &css_base);
                     if !fonts.is_empty() {
                         css_all.extend(ids(&fonts));
-                        script_fonts.push(ScriptFallbackGroup { range: *block, fonts });
+                        script_fonts.push(ScriptFallbackGroup {
+                            range: *block,
+                            fonts,
+                        });
                     }
                 }
                 css_fallbacks.push(CssFallbackGroup {
@@ -529,7 +554,12 @@ pub(crate) fn build_chain(
             None => {
                 let mut fonts = faces_for_family(state, family, style, &css_base);
                 if fonts.is_empty() {
-                    fonts = faces_for_families(state, config.substitutions_for(family), style, &css_base);
+                    fonts = faces_for_families(
+                        state,
+                        config.substitutions_for(family),
+                        style,
+                        &css_base,
+                    );
                 }
                 css_base.extend(ids(&fonts));
                 css_all.extend(ids(&fonts));
@@ -585,7 +615,10 @@ pub(crate) fn build_chain(
             &mut seen,
         );
         if !fonts.is_empty() {
-            unicode_fallbacks.push(ScriptFallbackGroup { range: *block, fonts });
+            unicode_fallbacks.push(ScriptFallbackGroup {
+                range: *block,
+                fonts,
+            });
         }
     }
 
@@ -712,7 +745,11 @@ impl FcFontCache {
     /// Fonts that can stand in for `font_id`: every registered font covering
     /// part of its coverage, ranked by [`RankKey::for_request`] over that
     /// coverage. Used by the C API; not needed for chain resolution.
-    pub fn compute_fallbacks(&self, font_id: &FontId, _trace: &mut Vec<TraceMsg>) -> Vec<FontMatchNoFallback> {
+    pub fn compute_fallbacks(
+        &self,
+        font_id: &FontId,
+        _trace: &mut Vec<TraceMsg>,
+    ) -> Vec<FontMatchNoFallback> {
         let state = self.state_read();
         let Some(pattern) = state.metadata.get(font_id) else {
             return Vec::new();
@@ -726,7 +763,10 @@ impl FcFontCache {
             .metadata
             .iter()
             .filter(|(id, meta)| {
-                *id != font_id && requested.iter().any(|r| overlap_size(&meta.unicode_ranges, r) > 0)
+                *id != font_id
+                    && requested
+                        .iter()
+                        .any(|r| overlap_size(&meta.unicode_ranges, r) > 0)
             })
             .map(|(id, meta)| (RankKey::for_request(pattern, meta, requested), *id, meta))
             .collect();

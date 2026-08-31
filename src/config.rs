@@ -22,9 +22,19 @@ use crate::UnicodeRange;
 /// Generic CSS font family keywords (CSS Fonts Level 4 §2.1.1), as the
 /// author writes them. [`GenericFamily::from_css`] is the parser.
 pub const GENERIC_FAMILIES: &[&str] = &[
-    "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
-    "ui-serif", "ui-sans-serif", "ui-monospace", "ui-rounded",
-    "emoji", "math", "fangsong",
+    "serif",
+    "sans-serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
+    "emoji",
+    "math",
+    "fangsong",
 ];
 
 /// Check whether `family` is a generic CSS font family (case-insensitive,
@@ -207,15 +217,42 @@ impl Default for FcFallbackConfig {
 pub mod blocks {
     use crate::UnicodeRange;
 
-    pub const ARABIC: UnicodeRange = UnicodeRange { start: 0x0600, end: 0x06FF };
-    pub const HEBREW: UnicodeRange = UnicodeRange { start: 0x0590, end: 0x05FF };
-    pub const THAI: UnicodeRange = UnicodeRange { start: 0x0E00, end: 0x0E7F };
-    pub const CJK_SYMBOLS_AND_PUNCTUATION: UnicodeRange = UnicodeRange { start: 0x3000, end: 0x303F };
-    pub const HIRAGANA: UnicodeRange = UnicodeRange { start: 0x3040, end: 0x309F };
-    pub const KATAKANA: UnicodeRange = UnicodeRange { start: 0x30A0, end: 0x30FF };
-    pub const CJK_UNIFIED_IDEOGRAPHS: UnicodeRange = UnicodeRange { start: 0x4E00, end: 0x9FFF };
-    pub const HANGUL_SYLLABLES: UnicodeRange = UnicodeRange { start: 0xAC00, end: 0xD7A3 };
-    pub const HALFWIDTH_AND_FULLWIDTH_FORMS: UnicodeRange = UnicodeRange { start: 0xFF00, end: 0xFFEF };
+    pub const ARABIC: UnicodeRange = UnicodeRange {
+        start: 0x0600,
+        end: 0x06FF,
+    };
+    pub const HEBREW: UnicodeRange = UnicodeRange {
+        start: 0x0590,
+        end: 0x05FF,
+    };
+    pub const THAI: UnicodeRange = UnicodeRange {
+        start: 0x0E00,
+        end: 0x0E7F,
+    };
+    pub const CJK_SYMBOLS_AND_PUNCTUATION: UnicodeRange = UnicodeRange {
+        start: 0x3000,
+        end: 0x303F,
+    };
+    pub const HIRAGANA: UnicodeRange = UnicodeRange {
+        start: 0x3040,
+        end: 0x309F,
+    };
+    pub const KATAKANA: UnicodeRange = UnicodeRange {
+        start: 0x30A0,
+        end: 0x30FF,
+    };
+    pub const CJK_UNIFIED_IDEOGRAPHS: UnicodeRange = UnicodeRange {
+        start: 0x4E00,
+        end: 0x9FFF,
+    };
+    pub const HANGUL_SYLLABLES: UnicodeRange = UnicodeRange {
+        start: 0xAC00,
+        end: 0xD7A3,
+    };
+    pub const HALFWIDTH_AND_FULLWIDTH_FORMS: UnicodeRange = UnicodeRange {
+        start: 0xFF00,
+        end: 0xFFEF,
+    };
 }
 
 fn names(list: &[&str]) -> Vec<String> {
@@ -256,32 +293,105 @@ impl FcFallbackConfig {
         match os {
             OperatingSystem::Windows => {
                 generic(Serif, &["Times New Roman"]);
-                generic(SansSerif, &["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"]);
-                generic(Monospace, &["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"]);
+                generic(
+                    SansSerif,
+                    &[
+                        "Segoe UI",
+                        "Tahoma",
+                        "Microsoft Sans Serif",
+                        "MS Sans Serif",
+                        "Helv",
+                    ],
+                );
+                generic(
+                    Monospace,
+                    &[
+                        "Segoe UI Mono",
+                        "Courier New",
+                        "Cascadia Code",
+                        "Cascadia Mono",
+                        "Consolas",
+                    ],
+                );
             }
             OperatingSystem::Linux => {
-                generic(Serif, &[
-                    "Times", "Times New Roman", "DejaVu Serif", "Free Serif",
-                    "Noto Serif", "Bitstream Vera Serif", "Roman", "Regular",
-                ]);
-                generic(SansSerif, &["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"]);
-                generic(Monospace, &[
-                    "Source Code Pro", "Cantarell", "DejaVu Sans Mono",
-                    "Roboto Mono", "Ubuntu Monospace", "Droid Sans Mono",
-                ]);
+                generic(
+                    Serif,
+                    &[
+                        "Times",
+                        "Times New Roman",
+                        "DejaVu Serif",
+                        "Free Serif",
+                        "Noto Serif",
+                        "Bitstream Vera Serif",
+                        "Roman",
+                        "Regular",
+                    ],
+                );
+                generic(
+                    SansSerif,
+                    &[
+                        "Ubuntu",
+                        "Arial",
+                        "DejaVu Sans",
+                        "Noto Sans",
+                        "Liberation Sans",
+                    ],
+                );
+                generic(
+                    Monospace,
+                    &[
+                        "Source Code Pro",
+                        "Cantarell",
+                        "DejaVu Sans Mono",
+                        "Roboto Mono",
+                        "Ubuntu Monospace",
+                        "Droid Sans Mono",
+                    ],
+                );
             }
             OperatingSystem::MacOS | OperatingSystem::IOS => {
                 generic(Serif, &["Times New Roman", "Times", "New York", "Palatino"]);
-                generic(SansSerif, &[
-                    "San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular",
-                    "Helvetica Neue", "Helvetica", "Lucida Grande",
-                ]);
-                generic(Monospace, &["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"]);
+                generic(
+                    SansSerif,
+                    &[
+                        "San Francisco",
+                        ".AppleSystemUIFont",
+                        ".SFUIText",
+                        ".SFUI-Regular",
+                        "Helvetica Neue",
+                        "Helvetica",
+                        "Lucida Grande",
+                    ],
+                );
+                generic(
+                    Monospace,
+                    &[
+                        "SF Mono",
+                        "Menlo",
+                        "Monaco",
+                        "Courier",
+                        "Oxygen Mono",
+                        "Source Code Pro",
+                        "Fira Mono",
+                    ],
+                );
             }
             OperatingSystem::Android => {
                 generic(Serif, &["Noto Serif", "Roboto Serif", "Droid Serif"]);
-                generic(SansSerif, &["Roboto", "Roboto-Regular", "Noto Sans", "Droid Sans"]);
-                generic(Monospace, &["Roboto Mono", "Droid Sans Mono", "Noto Sans Mono", "DejaVu Sans Mono"]);
+                generic(
+                    SansSerif,
+                    &["Roboto", "Roboto-Regular", "Noto Sans", "Droid Sans"],
+                );
+                generic(
+                    Monospace,
+                    &[
+                        "Roboto Mono",
+                        "Droid Sans Mono",
+                        "Noto Sans Mono",
+                        "DejaVu Sans Mono",
+                    ],
+                );
             }
             OperatingSystem::Wasm => {}
         }
@@ -297,7 +407,11 @@ impl FcFallbackConfig {
         // their list keeps the historical order; kana are Japanese and
         // Hangul is Korean, so those blocks put the matching font first.
         let mut cjk = |g: GenericFamily, ideographs: &[&str], kana: &[&str], hangul: &[&str]| {
-            for block in [CJK_SYMBOLS_AND_PUNCTUATION, CJK_UNIFIED_IDEOGRAPHS, HALFWIDTH_AND_FULLWIDTH_FORMS] {
+            for block in [
+                CJK_SYMBOLS_AND_PUNCTUATION,
+                CJK_UNIFIED_IDEOGRAPHS,
+                HALFWIDTH_AND_FULLWIDTH_FORMS,
+            ] {
                 script(g, block, ideographs);
             }
             for block in [HIRAGANA, KATAKANA] {
@@ -308,14 +422,24 @@ impl FcFallbackConfig {
 
         match os {
             OperatingSystem::Windows => {
-                cjk(Serif, &["MS Mincho", "SimSun", "MingLiU"], &["MS Mincho", "SimSun", "MingLiU"], &["SimSun", "MS Mincho", "MingLiU"]);
+                cjk(
+                    Serif,
+                    &["MS Mincho", "SimSun", "MingLiU"],
+                    &["MS Mincho", "SimSun", "MingLiU"],
+                    &["SimSun", "MS Mincho", "MingLiU"],
+                );
                 cjk(
                     SansSerif,
                     &["Microsoft YaHei", "MS Gothic", "Malgun Gothic", "SimHei"],
                     &["MS Gothic", "Microsoft YaHei", "Malgun Gothic", "SimHei"],
                     &["Malgun Gothic", "Microsoft YaHei", "MS Gothic", "SimHei"],
                 );
-                cjk(Monospace, &["MS Gothic", "SimHei"], &["MS Gothic", "SimHei"], &["MS Gothic", "SimHei"]);
+                cjk(
+                    Monospace,
+                    &["MS Gothic", "SimHei"],
+                    &["MS Gothic", "SimHei"],
+                    &["MS Gothic", "SimHei"],
+                );
                 script(Serif, ARABIC, &["Traditional Arabic"]);
                 script(SansSerif, ARABIC, &["Segoe UI Arabic"]);
                 script(SansSerif, HEBREW, &["Segoe UI Hebrew"]);
@@ -324,21 +448,63 @@ impl FcFallbackConfig {
             OperatingSystem::Linux => {
                 cjk(
                     Serif,
-                    &["Noto Serif CJK SC", "Noto Serif CJK JP", "Noto Serif CJK KR"],
-                    &["Noto Serif CJK JP", "Noto Serif CJK SC", "Noto Serif CJK KR"],
-                    &["Noto Serif CJK KR", "Noto Serif CJK SC", "Noto Serif CJK JP"],
+                    &[
+                        "Noto Serif CJK SC",
+                        "Noto Serif CJK JP",
+                        "Noto Serif CJK KR",
+                    ],
+                    &[
+                        "Noto Serif CJK JP",
+                        "Noto Serif CJK SC",
+                        "Noto Serif CJK KR",
+                    ],
+                    &[
+                        "Noto Serif CJK KR",
+                        "Noto Serif CJK SC",
+                        "Noto Serif CJK JP",
+                    ],
                 );
                 cjk(
                     SansSerif,
-                    &["Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR", "WenQuanYi Micro Hei", "Droid Sans Fallback"],
-                    &["Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Sans CJK KR", "WenQuanYi Micro Hei", "Droid Sans Fallback"],
-                    &["Noto Sans CJK KR", "Noto Sans CJK SC", "Noto Sans CJK JP", "WenQuanYi Micro Hei", "Droid Sans Fallback"],
+                    &[
+                        "Noto Sans CJK SC",
+                        "Noto Sans CJK JP",
+                        "Noto Sans CJK KR",
+                        "WenQuanYi Micro Hei",
+                        "Droid Sans Fallback",
+                    ],
+                    &[
+                        "Noto Sans CJK JP",
+                        "Noto Sans CJK SC",
+                        "Noto Sans CJK KR",
+                        "WenQuanYi Micro Hei",
+                        "Droid Sans Fallback",
+                    ],
+                    &[
+                        "Noto Sans CJK KR",
+                        "Noto Sans CJK SC",
+                        "Noto Sans CJK JP",
+                        "WenQuanYi Micro Hei",
+                        "Droid Sans Fallback",
+                    ],
                 );
                 cjk(
                     Monospace,
-                    &["Noto Sans Mono CJK SC", "Noto Sans Mono CJK JP", "WenQuanYi Zen Hei Mono"],
-                    &["Noto Sans Mono CJK JP", "Noto Sans Mono CJK SC", "WenQuanYi Zen Hei Mono"],
-                    &["Noto Sans Mono CJK SC", "Noto Sans Mono CJK JP", "WenQuanYi Zen Hei Mono"],
+                    &[
+                        "Noto Sans Mono CJK SC",
+                        "Noto Sans Mono CJK JP",
+                        "WenQuanYi Zen Hei Mono",
+                    ],
+                    &[
+                        "Noto Sans Mono CJK JP",
+                        "Noto Sans Mono CJK SC",
+                        "WenQuanYi Zen Hei Mono",
+                    ],
+                    &[
+                        "Noto Sans Mono CJK SC",
+                        "Noto Sans Mono CJK JP",
+                        "WenQuanYi Zen Hei Mono",
+                    ],
                 );
                 script(Serif, ARABIC, &["Noto Serif Arabic"]);
                 script(SansSerif, ARABIC, &["Noto Sans Arabic"]);
@@ -354,11 +520,34 @@ impl FcFallbackConfig {
                 );
                 cjk(
                     SansSerif,
-                    &["Hiragino Sans", "Hiragino Kaku Gothic ProN", "PingFang SC", "PingFang TC", "Apple SD Gothic Neo"],
-                    &["Hiragino Sans", "Hiragino Kaku Gothic ProN", "PingFang SC", "PingFang TC", "Apple SD Gothic Neo"],
-                    &["Apple SD Gothic Neo", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "PingFang SC", "PingFang TC"],
+                    &[
+                        "Hiragino Sans",
+                        "Hiragino Kaku Gothic ProN",
+                        "PingFang SC",
+                        "PingFang TC",
+                        "Apple SD Gothic Neo",
+                    ],
+                    &[
+                        "Hiragino Sans",
+                        "Hiragino Kaku Gothic ProN",
+                        "PingFang SC",
+                        "PingFang TC",
+                        "Apple SD Gothic Neo",
+                    ],
+                    &[
+                        "Apple SD Gothic Neo",
+                        "Hiragino Sans",
+                        "Hiragino Kaku Gothic ProN",
+                        "PingFang SC",
+                        "PingFang TC",
+                    ],
                 );
-                cjk(Monospace, &["Hiragino Sans", "PingFang SC"], &["Hiragino Sans", "PingFang SC"], &["Hiragino Sans", "PingFang SC"]);
+                cjk(
+                    Monospace,
+                    &["Hiragino Sans", "PingFang SC"],
+                    &["Hiragino Sans", "PingFang SC"],
+                    &["Hiragino Sans", "PingFang SC"],
+                );
                 script(Serif, ARABIC, &["Geeza Pro"]);
                 script(SansSerif, ARABIC, &["Geeza Pro"]);
                 script(SansSerif, HEBREW, &["Arial Hebrew"]);
@@ -367,15 +556,42 @@ impl FcFallbackConfig {
             OperatingSystem::Android => {
                 cjk(
                     Serif,
-                    &["Noto Serif CJK SC", "Noto Serif CJK JP", "Noto Serif CJK KR"],
-                    &["Noto Serif CJK JP", "Noto Serif CJK SC", "Noto Serif CJK KR"],
-                    &["Noto Serif CJK KR", "Noto Serif CJK SC", "Noto Serif CJK JP"],
+                    &[
+                        "Noto Serif CJK SC",
+                        "Noto Serif CJK JP",
+                        "Noto Serif CJK KR",
+                    ],
+                    &[
+                        "Noto Serif CJK JP",
+                        "Noto Serif CJK SC",
+                        "Noto Serif CJK KR",
+                    ],
+                    &[
+                        "Noto Serif CJK KR",
+                        "Noto Serif CJK SC",
+                        "Noto Serif CJK JP",
+                    ],
                 );
                 cjk(
                     SansSerif,
-                    &["Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR", "Droid Sans Fallback"],
-                    &["Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Sans CJK KR", "Droid Sans Fallback"],
-                    &["Noto Sans CJK KR", "Noto Sans CJK SC", "Noto Sans CJK JP", "Droid Sans Fallback"],
+                    &[
+                        "Noto Sans CJK SC",
+                        "Noto Sans CJK JP",
+                        "Noto Sans CJK KR",
+                        "Droid Sans Fallback",
+                    ],
+                    &[
+                        "Noto Sans CJK JP",
+                        "Noto Sans CJK SC",
+                        "Noto Sans CJK KR",
+                        "Droid Sans Fallback",
+                    ],
+                    &[
+                        "Noto Sans CJK KR",
+                        "Noto Sans CJK SC",
+                        "Noto Sans CJK JP",
+                        "Droid Sans Fallback",
+                    ],
                 );
                 cjk(
                     Monospace,
@@ -416,7 +632,11 @@ impl FcFallbackConfig {
     /// (and the generics it borrows from) first, then generic-agnostic
     /// entries. `generic = None` returns only the latter. Deduplicated,
     /// order preserved.
-    pub fn script_candidates(&self, generic: Option<GenericFamily>, block: &UnicodeRange) -> Vec<String> {
+    pub fn script_candidates(
+        &self,
+        generic: Option<GenericFamily>,
+        block: &UnicodeRange,
+    ) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(generic) = generic {
             for g in generic.lineage() {
@@ -481,12 +701,18 @@ impl FcFallbackConfig {
                 .for_each(|f| push_unique(&mut out, f));
         }
         for block in ranges {
-            let generic = if any_generic { None } else { Some(self.default_generic) };
+            let generic = if any_generic {
+                None
+            } else {
+                Some(self.default_generic)
+            };
             self.script_candidates(generic, block)
                 .iter()
                 .for_each(|f| push_unique(&mut out, f));
         }
-        self.last_resort.iter().for_each(|f| push_unique(&mut out, f));
+        self.last_resort
+            .iter()
+            .for_each(|f| push_unique(&mut out, f));
         out
     }
 
@@ -543,12 +769,26 @@ impl FcFallbackConfig {
 /// (e.g. "ArialBold.ttf", "NotoSans-SemiBold.otf"). Used by the scout thread
 /// to extract the base family name from a filename.
 pub const FONT_STYLE_TOKENS: &[&str] = &[
-    "Regular", "Bold", "Italic", "Light", "Medium", "Thin",
-    "Black", "ExtraLight", "ExtraBold", "SemiBold", "DemiBold",
-    "Heavy", "Oblique", "Condensed", "Expanded",
+    "Regular",
+    "Bold",
+    "Italic",
+    "Light",
+    "Medium",
+    "Thin",
+    "Black",
+    "ExtraLight",
+    "ExtraBold",
+    "SemiBold",
+    "DemiBold",
+    "Heavy",
+    "Oblique",
+    "Condensed",
+    "Expanded",
     // The tokenizer splits compound styles (e.g. "SemiBold" → "Semi" + "Bold"),
     // so we need the modifier prefixes as standalone style tokens too.
-    "Extra", "Semi", "Demi",
+    "Extra",
+    "Semi",
+    "Demi",
 ];
 
 /// Static system font directories per OS. No allocation.
@@ -562,10 +802,7 @@ pub fn system_font_dirs(os: OperatingSystem) -> &'static [&'static str] {
             "/Library/Fonts",
             "/System/Library/AssetsV2",
         ],
-        OperatingSystem::Linux => &[
-            "/usr/share/fonts",
-            "/usr/local/share/fonts",
-        ],
+        OperatingSystem::Linux => &["/usr/share/fonts", "/usr/local/share/fonts"],
         // Android system-font directories are world-readable. Vendor partitions
         // (`/product/fonts`, `/system_ext/fonts`) carry OEM-specific families
         // (Samsung One UI, MIUI, EMUI). `/data/fonts` is the user-selected
@@ -594,10 +831,7 @@ pub fn system_font_dirs(os: OperatingSystem) -> &'static [&'static str] {
 /// Combines the static [`system_font_dirs`] with user-specific paths
 /// resolved from environment variables (`HOME`, `SystemRoot`, etc.).
 pub fn font_directories(os: OperatingSystem) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = system_font_dirs(os)
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+    let mut dirs: Vec<PathBuf> = system_font_dirs(os).iter().map(PathBuf::from).collect();
 
     match os {
         OperatingSystem::MacOS => {
@@ -615,8 +849,8 @@ pub fn font_directories(os: OperatingSystem) -> Vec<PathBuf> {
             let system_root = std::env::var("SystemRoot")
                 .or_else(|_| std::env::var("WINDIR"))
                 .unwrap_or_else(|_| "C:\\Windows".to_string());
-            let user_profile = std::env::var("USERPROFILE")
-                .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
+            let user_profile =
+                std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".to_string());
             dirs.push(PathBuf::from(format!("{}\\Fonts", system_root)));
             dirs.push(PathBuf::from(format!(
                 "{}\\AppData\\Local\\Microsoft\\Windows\\Fonts",
@@ -649,51 +883,88 @@ pub fn common_font_families(os: OperatingSystem) -> &'static [&'static str] {
     match os {
         OperatingSystem::MacOS => &[
             // System UI fonts (actual filenames use SFNS prefix)
-            "San Francisco", "SFNS", "System Font",
+            "San Francisco",
+            "SFNS",
+            "System Font",
             // Sans-serif
-            "Helvetica Neue", "Helvetica", "Arial", "Lucida Grande",
+            "Helvetica Neue",
+            "Helvetica",
+            "Arial",
+            "Lucida Grande",
             // Serif
-            "Times New Roman", "Georgia",
+            "Times New Roman",
+            "Georgia",
             // Monospace
-            "Menlo", "SF Mono", "Courier",
+            "Menlo",
+            "SF Mono",
+            "Courier",
         ],
         OperatingSystem::Linux => &[
             // Sans-serif
-            "DejaVu Sans", "Ubuntu", "Roboto", "Noto Sans",
-            "Liberation Sans", "Droid Sans", "Arial",
+            "DejaVu Sans",
+            "Ubuntu",
+            "Roboto",
+            "Noto Sans",
+            "Liberation Sans",
+            "Droid Sans",
+            "Arial",
             // Serif
-            "DejaVu Serif", "Noto Serif",
+            "DejaVu Serif",
+            "Noto Serif",
             // Monospace
             "DejaVu Sans Mono",
         ],
         OperatingSystem::Windows => &[
             // Sans-serif
-            "Segoe UI", "Arial", "Tahoma", "Verdana",
+            "Segoe UI",
+            "Arial",
+            "Tahoma",
+            "Verdana",
             // Serif
-            "Times New Roman", "Calibri",
+            "Times New Roman",
+            "Calibri",
             // Monospace
-            "Consolas", "Courier New",
+            "Consolas",
+            "Courier New",
         ],
         OperatingSystem::IOS => &[
             // System UI fonts (filenames use SFNS/SFUI prefix)
-            "San Francisco", "SFNS", "SFNSDisplay", "SFNSText", "SFUI",
-            ".AppleSystemUIFont", "System Font",
+            "San Francisco",
+            "SFNS",
+            "SFNSDisplay",
+            "SFNSText",
+            "SFUI",
+            ".AppleSystemUIFont",
+            "System Font",
             // Sans-serif
-            "Helvetica Neue", "Helvetica", "Avenir", "Avenir Next",
+            "Helvetica Neue",
+            "Helvetica",
+            "Avenir",
+            "Avenir Next",
             // Serif
-            "Times New Roman", "Georgia",
+            "Times New Roman",
+            "Georgia",
             // Monospace
-            "Menlo", "SF Mono", "Courier",
+            "Menlo",
+            "SF Mono",
+            "Courier",
         ],
         OperatingSystem::Android => &[
             // System UI fonts
-            "Roboto", "Roboto Flex", "Roboto Condensed",
+            "Roboto",
+            "Roboto Flex",
+            "Roboto Condensed",
             // Sans-serif
-            "Noto Sans", "Droid Sans",
+            "Noto Sans",
+            "Droid Sans",
             // Serif
-            "Noto Serif", "Roboto Serif", "Droid Serif",
+            "Noto Serif",
+            "Roboto Serif",
+            "Droid Serif",
             // Monospace
-            "Roboto Mono", "Droid Sans Mono", "Noto Sans Mono",
+            "Roboto Mono",
+            "Droid Sans Mono",
+            "Noto Sans Mono",
         ],
         OperatingSystem::Wasm => &[],
     }
@@ -826,10 +1097,7 @@ pub fn tokenize_font_stem(stem: &str) -> Vec<String> {
 /// - `"NotoSansJP-Regular.otf"` → `"notosansjp"`
 /// - `"Helvetica Neue Bold Italic.ttf"` → `"helveticaneue"`
 pub fn guess_family_from_filename(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
     tokenize_font_stem(stem).join("")
 }
@@ -855,12 +1123,12 @@ mod tests {
     #[test]
     fn font_style_tokens_covers_common_styles() {
         for token in &[
-            "Regular", "Bold", "Italic", "Light", "Medium",
-            "Thin", "Black", "Oblique", "SemiBold",
+            "Regular", "Bold", "Italic", "Light", "Medium", "Thin", "Black", "Oblique", "SemiBold",
         ] {
             assert!(
                 FONT_STYLE_TOKENS.contains(token),
-                "missing style token: {}", token
+                "missing style token: {}",
+                token
             );
         }
     }
@@ -898,7 +1166,8 @@ mod tests {
             assert!(!config.font_dirs.is_empty(), "no dirs for {:?}", os);
             assert!(
                 !config.priority_families.is_empty(),
-                "no families for {:?}", os
+                "no families for {:?}",
+                os
             );
 
             // os_defaults must be exactly the old hard-coded behavior:
@@ -909,10 +1178,7 @@ mod tests {
                 .map(|f| f.to_string())
                 .collect();
             assert_eq!(config.priority_families, legacy);
-            assert_eq!(
-                config.priority_token_sets(),
-                tokenize_common_families(os)
-            );
+            assert_eq!(config.priority_token_sets(), tokenize_common_families(os));
         }
     }
 
@@ -1024,10 +1290,7 @@ mod tests {
             vec!["noto", "sans", "jp"]
         );
         // "SFMono" stays as one token (consecutive uppercase → no CamelCase split)
-        assert_eq!(
-            tokenize_font_stem("SFMono-SemiBold"),
-            vec!["sfmono"]
-        );
+        assert_eq!(tokenize_font_stem("SFMono-SemiBold"), vec!["sfmono"]);
     }
 
     /// Helper: tokenize a stem into all lowercase tokens (including style tokens).

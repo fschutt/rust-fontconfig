@@ -59,13 +59,18 @@ use std::collections::HashSet;
 /// outside the azul tree.
 #[cfg(all(feature = "std", target_os = "macos"))]
 fn rfc_probe_heap(label: &str) {
-    if !rfc_detail_enabled() { return; }
+    if !rfc_detail_enabled() {
+        return;
+    }
     if let Some(p) = rfc_detail_path() {
         let heap = rfc_heap_bytes();
-        write_detail_line(p, &format!(
-            r#"{{"ev":"phase","call":0,"label":"{}","heap":{}}}"#,
-            label, heap
-        ));
+        write_detail_line(
+            p,
+            &format!(
+                r#"{{"ev":"phase","call":0,"label":"{}","heap":{}}}"#,
+                label, heap
+            ),
+        );
     }
 }
 
@@ -74,13 +79,18 @@ fn rfc_probe_heap(_label: &str) {}
 
 #[cfg(all(feature = "std", target_os = "macos"))]
 fn rfc_probe_heap_extra(label: &str, extra: u64) {
-    if !rfc_detail_enabled() { return; }
+    if !rfc_detail_enabled() {
+        return;
+    }
     if let Some(p) = rfc_detail_path() {
         let heap = rfc_heap_bytes();
-        write_detail_line(p, &format!(
-            r#"{{"ev":"phase","call":0,"label":"{}","heap":{},"extra":{}}}"#,
-            label, heap, extra
-        ));
+        write_detail_line(
+            p,
+            &format!(
+                r#"{{"ev":"phase","call":0,"label":"{}","heap":{},"extra":{}}}"#,
+                label, heap, extra
+            ),
+        );
     }
 }
 
@@ -93,10 +103,10 @@ fn rfc_detail_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        let Ok(v) = std::env::var("AZ_PROFILE") else { return false };
-        let has = |tok: &str| {
-            v.split(',').any(|p| p.trim().eq_ignore_ascii_case(tok))
+        let Ok(v) = std::env::var("AZ_PROFILE") else {
+            return false;
         };
+        let has = |tok: &str| v.split(',').any(|p| p.trim().eq_ignore_ascii_case(tok));
         has("heap") && has("jsonl") && has("detail")
     })
 }
@@ -105,7 +115,8 @@ fn rfc_detail_enabled() -> bool {
 fn rfc_detail_path() -> Option<&'static str> {
     use std::sync::OnceLock;
     static PATH: OnceLock<Option<String>> = OnceLock::new();
-    PATH.get_or_init(|| std::env::var("AZ_PROFILE_OUT").ok()).as_deref()
+    PATH.get_or_init(|| std::env::var("AZ_PROFILE_OUT").ok())
+        .as_deref()
 }
 
 #[cfg(all(feature = "std", target_os = "macos"))]
@@ -129,7 +140,11 @@ fn rfc_heap_bytes() -> usize {
 #[cfg(all(feature = "std", target_os = "macos"))]
 fn write_detail_line(path: &str, line: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -180,17 +195,15 @@ const WAITLESS_TARGET: bool = true;
 #[cfg(not(target_family = "wasm"))]
 const WAITLESS_TARGET: bool = false;
 
-use crate::{
-    FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight,
-    FontFallbackChain, FontId, FontMatch, NamedFont, OperatingSystem, PatternMatch,
-    UnicodeRange,
-};
 use crate::config::{FcFallbackConfig, FcScanConfig};
 use crate::scoring::{
-    family_exists_in_patterns, find_family_paths, find_incomplete_paths,
-    FcBuildJob, Priority,
+    family_exists_in_patterns, find_family_paths, find_incomplete_paths, FcBuildJob, Priority,
 };
 use crate::utils::normalize_family_name;
+use crate::{
+    FcFontCache, FcFontPath, FcParseFontBytes, FcPattern, FcWeight, FontFallbackChain, FontId,
+    FontMatch, NamedFont, OperatingSystem, PatternMatch, UnicodeRange,
+};
 
 // ── The Registry ────────────────────────────────────────────────────────────
 
@@ -296,7 +309,10 @@ impl std::fmt::Debug for FcFontRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FcFontRegistry")
             .field("scan_complete", &self.scan_complete.load(Ordering::Relaxed))
-            .field("build_complete", &self.build_complete.load(Ordering::Relaxed))
+            .field(
+                "build_complete",
+                &self.build_complete.load(Ordering::Relaxed),
+            )
             .field("cache_loaded", &self.cache_loaded.load(Ordering::Relaxed))
             .finish()
     }
@@ -354,7 +370,10 @@ impl FcFontRegistry {
     /// invents neither; [`FcScanConfig::os_defaults`] and
     /// [`FcFallbackConfig::os_defaults`] are the explicit opt-ins to the
     /// built-in tables.
-    pub fn new_with_configs(scan_config: FcScanConfig, fallback_config: FcFallbackConfig) -> Arc<Self> {
+    pub fn new_with_configs(
+        scan_config: FcScanConfig,
+        fallback_config: FcFallbackConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cache: FcFontCache::default().with_fallback_config(fallback_config),
             known_paths: crate::StLock::new(BTreeMap::new()),
@@ -442,37 +461,37 @@ impl FcFontRegistry {
 
         #[cfg(not(feature = "single-thread-unsafe-locks"))]
         {
-        let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2)
-            .saturating_sub(1)
-            .max(1);
+            let num_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .saturating_sub(1)
+                .max(1);
 
-        // Spawn Scout thread
-        // Threads hold only a Weak handle: dropping the last Arc frees the
-        // registry and ends its builders within one step, so `shutdown()`
-        // is a courtesy, not a requirement.
-        let scout = Arc::downgrade(self);
-        std::thread::Builder::new()
-            .name("rfc-font-scout".to_string())
-            .spawn(move || {
-                if let Some(registry) = scout.upgrade() {
-                    if FcFontRegistry::enter_step(&registry) {
-                        registry.scout_thread();
-                    }
-                    registry.leave_step();
-                }
-            })
-            .expect("failed to spawn font scout thread");
-
-        // Spawn Builder threads
-        for i in 0..num_threads {
-            let registry = Arc::downgrade(self);
+            // Spawn Scout thread
+            // Threads hold only a Weak handle: dropping the last Arc frees the
+            // registry and ends its builders within one step, so `shutdown()`
+            // is a courtesy, not a requirement.
+            let scout = Arc::downgrade(self);
             std::thread::Builder::new()
-                .name(format!("rfc-font-builder-{}", i))
-                .spawn(move || FcFontRegistry::builder_thread(registry))
-                .expect("failed to spawn font builder thread");
-        }
+                .name("rfc-font-scout".to_string())
+                .spawn(move || {
+                    if let Some(registry) = scout.upgrade() {
+                        if FcFontRegistry::enter_step(&registry) {
+                            registry.scout_thread();
+                        }
+                        registry.leave_step();
+                    }
+                })
+                .expect("failed to spawn font scout thread");
+
+            // Spawn Builder threads
+            for i in 0..num_threads {
+                let registry = Arc::downgrade(self);
+                std::thread::Builder::new()
+                    .name(format!("rfc-font-builder-{}", i))
+                    .spawn(move || FcFontRegistry::builder_thread(registry))
+                    .expect("failed to spawn font builder thread");
+            }
         }
     }
 
@@ -484,10 +503,7 @@ impl FcFontRegistry {
     /// waits for the Builder to process them.
     ///
     /// Hard timeout: 5 seconds.
-    pub fn request_fonts(
-        &self,
-        family_stacks: &[Vec<String>],
-    ) -> Vec<FontFallbackChain> {
+    pub fn request_fonts(&self, family_stacks: &[Vec<String>]) -> Vec<FontFallbackChain> {
         let deadline = Instant::now() + Duration::from_secs(5);
 
         rfc_probe_heap("rf_start");
@@ -500,7 +516,8 @@ impl FcFontRegistry {
         let config = self.cache.fallback_config();
 
         for stack in family_stacks {
-            for family in config.candidate_families(stack, crate::DEFAULT_UNICODE_FALLBACK_SCRIPTS) {
+            for family in config.candidate_families(stack, crate::DEFAULT_UNICODE_FALLBACK_SCRIPTS)
+            {
                 let normalized = normalize_family_name(&family);
                 if !needed_families.contains(&normalized) {
                     needed_families.push(normalized);
@@ -531,8 +548,7 @@ impl FcFontRegistry {
         // also saves the allocations for `needed_families`, `missing`,
         // `incomplete_paths` on every layout pass, which was measurable
         // on its own (~500 B transient / call).
-        if self.cache_loaded.load(Ordering::Acquire)
-            || self.build_complete.load(Ordering::Acquire)
+        if self.cache_loaded.load(Ordering::Acquire) || self.build_complete.load(Ordering::Acquire)
         {
             let result = self.resolve_chains(family_stacks);
             rfc_probe_heap("rf_after_resolve_fast");
@@ -550,11 +566,11 @@ impl FcFontRegistry {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     if !WAITLESS_TARGET {
-                    eprintln!(
+                        eprintln!(
                             "[rfc-font-registry] WARNING: Timed out waiting for font scout (5s). \
                              Proceeding with available fonts."
                         );
-                }
+                    }
                     return self.resolve_chains(family_stacks);
                 }
                 completed = match self.progress.wait_timeout(completed, remaining) {
@@ -580,7 +596,10 @@ impl FcFontRegistry {
         //    fully parsed yet. Uses completed_paths (not processed_paths!)
         //    because processed_paths is set BEFORE parsing, while
         //    completed_paths is set AFTER parsing + insert_font().
-        let incomplete_paths = self.known_paths.read().ok()
+        let incomplete_paths = self
+            .known_paths
+            .read()
+            .ok()
             .zip(self.completed_paths.lock().ok())
             .map(|(known, completed)| find_incomplete_paths(&needed_families, &known, &completed))
             .unwrap_or_default();
@@ -651,11 +670,11 @@ impl FcFontRegistry {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     if !WAITLESS_TARGET {
-                    eprintln!(
+                        eprintln!(
                             "[rfc-font-registry] WARNING: Timed out waiting for font files (5s). \
                              Proceeding with available fonts."
                         );
-                }
+                    }
                     break;
                 }
                 completed = match self.progress.wait_timeout(completed, remaining) {
@@ -717,7 +736,8 @@ impl FcFontRegistry {
         oblique: PatternMatch,
     ) -> FontFallbackChain {
         let mut trace = Vec::new();
-        self.cache.resolve_font_chain(font_families, weight, italic, oblique, &mut trace)
+        self.cache
+            .resolve_font_chain(font_families, weight, italic, oblique, &mut trace)
     }
 
     /// On-demand font-chain resolution: triggers the scout + builder
@@ -756,7 +776,12 @@ impl FcFontRegistry {
         // exactly the families the builder just parsed.
         let mut trace = Vec::new();
         self.cache.resolve_font_chain_with_scripts(
-            font_families, weight, italic, oblique, scripts_hint, &mut trace,
+            font_families,
+            weight,
+            italic,
+            oblique,
+            scripts_hint,
+            &mut trace,
         )
     }
 
@@ -806,9 +831,7 @@ impl FcFontRegistry {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 if !WAITLESS_TARGET {
-                    eprintln!(
-                        "[rfc-font-registry] WARNING: wait_for_scout timed out (5s)."
-                    );
+                    eprintln!("[rfc-font-registry] WARNING: wait_for_scout timed out (5s).");
                 }
                 return;
             }
@@ -898,14 +921,18 @@ impl FcFontRegistry {
         let current_known_paths;
         loop {
             let Ok(paths) = self.known_paths.read() else {
-                return requests.iter().map(|(stack, _)| FontFallbackChain::empty(stack)).collect();
+                return requests
+                    .iter()
+                    .map(|(stack, _)| FontFallbackChain::empty(stack))
+                    .collect();
             };
             // Heuristic: if any request has a family that resolves
             // to a non-empty path list, we have enough to make
             // progress. In the typical case the first directory
             // publish covers all system fonts.
             let any_matches = requests.iter().any(|(stack, _)| {
-                let expanded = config.candidate_families(stack, crate::DEFAULT_UNICODE_FALLBACK_SCRIPTS);
+                let expanded =
+                    config.candidate_families(stack, crate::DEFAULT_UNICODE_FALLBACK_SCRIPTS);
                 expanded.iter().any(|fam| {
                     let fam_norm = crate::utils::normalize_family_name(fam);
                     !crate::scoring::find_family_paths(&fam_norm, &*paths).is_empty()
@@ -920,7 +947,10 @@ impl FcFontRegistry {
                     current_known_paths = p;
                     break;
                 } else {
-                    return requests.iter().map(|(stack, _)| FontFallbackChain::empty(stack)).collect();
+                    return requests
+                        .iter()
+                        .map(|(stack, _)| FontFallbackChain::empty(stack))
+                        .collect();
                 }
             }
             drop(paths);
@@ -933,8 +963,7 @@ impl FcFontRegistry {
                     return Vec::new();
                 }
             };
-            let remaining = Duration::from_millis(500)
-                .saturating_sub(wait_start.elapsed());
+            let remaining = Duration::from_millis(500).saturating_sub(wait_start.elapsed());
             if remaining.is_zero() {
                 drop(completed);
                 if let Ok(p) = self.known_paths.read() {
@@ -962,7 +991,8 @@ impl FcFontRegistry {
         let mut chains = Vec::with_capacity(requests.len());
 
         for (stack, codepoints) in requests {
-            let expanded = config.candidate_families(stack, crate::DEFAULT_UNICODE_FALLBACK_SCRIPTS);
+            let expanded =
+                config.candidate_families(stack, crate::DEFAULT_UNICODE_FALLBACK_SCRIPTS);
             let mut css_fallbacks: Vec<CssFallbackGroup> = Vec::new();
             let mut uncovered: alloc::collections::BTreeSet<char> = codepoints.clone();
 
@@ -985,15 +1015,24 @@ impl FcFontRegistry {
                     // this exact path before with a codepoint set
                     // that covers the current uncovered set.
                     if let Some(cached_ids) = self.cache.lookup_paths_cached(&path_str) {
-                        let mut picked: Option<(crate::FontId, crate::FcPattern, alloc::collections::BTreeSet<char>)> = None;
+                        let mut picked: Option<(
+                            crate::FontId,
+                            crate::FcPattern,
+                            alloc::collections::BTreeSet<char>,
+                        )> = None;
                         for id in cached_ids {
-                            let Some(pattern) = self.cache.get_metadata_by_id(&id) else { continue };
+                            let Some(pattern) = self.cache.get_metadata_by_id(&id) else {
+                                continue;
+                            };
                             let covers: alloc::collections::BTreeSet<char> = uncovered
                                 .iter()
                                 .copied()
                                 .filter(|ch| {
                                     let cp = *ch as u32;
-                                    pattern.unicode_ranges.iter().any(|r| cp >= r.start && cp <= r.end)
+                                    pattern
+                                        .unicode_ranges
+                                        .iter()
+                                        .any(|r| cp >= r.start && cp <= r.end)
                                 })
                                 .collect();
                             if covers.is_empty() {
@@ -1001,8 +1040,8 @@ impl FcFontRegistry {
                             }
                             let is_bold = pattern.weight >= FcWeight::Bold;
                             let is_italic = pattern.italic == PatternMatch::True;
-                            let style_dist = (is_bold != want_bold) as u8
-                                + (is_italic != want_italic) as u8;
+                            let style_dist =
+                                (is_bold != want_bold) as u8 + (is_italic != want_italic) as u8;
                             let replace = match &picked {
                                 None => true,
                                 Some((_, pat, _)) => {
@@ -1041,7 +1080,9 @@ impl FcFontRegistry {
                     // cmap-probe that face first. Fall through to
                     // the next-best style match only if the top
                     // choice covers zero new codepoints.
-                    let Some(bytes) = read_or_mmap_font(&path) else { continue };
+                    let Some(bytes) = read_or_mmap_font(&path) else {
+                        continue;
+                    };
                     let num_faces = FcCountFontFaces(bytes.as_slice());
                     let bytes_hash = crate::utils::content_dedup_hash_u64(bytes.as_slice());
 
@@ -1059,9 +1100,11 @@ impl FcFontRegistry {
                     };
 
                     for face_index in face_order {
-                        let Some(cov) = FcParseFontFaceFast(
-                            bytes.as_slice(), face_index, &uncovered,
-                        ) else { continue };
+                        let Some(cov) =
+                            FcParseFontFaceFast(bytes.as_slice(), face_index, &uncovered)
+                        else {
+                            continue;
+                        };
                         if cov.covered.is_empty() {
                             continue;
                         }
@@ -1179,8 +1222,10 @@ fn collect_face_style_order(
     want_italic: bool,
 ) -> Vec<usize> {
     use allsorts::{
-        binary::read::ReadScope, font_data::FontData,
-        tables::{FontTableProvider, HeadTable}, tag,
+        binary::read::ReadScope,
+        font_data::FontData,
+        tables::{FontTableProvider, HeadTable},
+        tag,
     };
 
     let scope = ReadScope::new(bytes);
@@ -1190,9 +1235,15 @@ fn collect_face_style_order(
 
     let mut styles: Vec<(usize, bool, bool)> = Vec::with_capacity(num_faces);
     for fi in 0..num_faces {
-        let Ok(provider) = font_file.table_provider(fi) else { continue };
-        let Ok(Some(head_data)) = provider.table_data(tag::HEAD) else { continue };
-        let Ok(head) = ReadScope::new(&head_data).read::<HeadTable>() else { continue };
+        let Ok(provider) = font_file.table_provider(fi) else {
+            continue;
+        };
+        let Ok(Some(head_data)) = provider.table_data(tag::HEAD) else {
+            continue;
+        };
+        let Ok(head) = ReadScope::new(&head_data).read::<HeadTable>() else {
+            continue;
+        };
         styles.push((fi, head.is_bold(), head.is_italic()));
     }
     if styles.is_empty() {

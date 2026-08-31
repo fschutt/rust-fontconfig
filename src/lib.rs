@@ -91,29 +91,29 @@ use allsorts::tag;
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 
-pub mod utils;
 #[cfg(feature = "std")]
 pub mod config;
 #[cfg(feature = "std")]
 pub mod fallback;
+pub mod utils;
 #[cfg(feature = "std")]
 pub use config::{FcFallbackConfig, FcScriptFallback, GenericFamily};
 #[cfg(feature = "std")]
-pub use fallback::{CssFallbackGroup, FontFallbackChain, ScriptFallbackGroup};
-#[cfg(feature = "std")]
 use fallback::FontChainCacheKey;
+#[cfg(feature = "std")]
+pub use fallback::{CssFallbackGroup, FontFallbackChain, ScriptFallbackGroup};
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
+#[cfg(feature = "cache")]
+pub mod disk_cache;
 #[cfg(feature = "async-registry")]
-pub mod scoring;
+pub mod multithread;
 #[cfg(feature = "async-registry")]
 pub mod registry;
 #[cfg(feature = "async-registry")]
-pub mod multithread;
-#[cfg(feature = "cache")]
-pub mod disk_cache;
+pub mod scoring;
 
 #[cfg(all(target_os = "ios", feature = "std", feature = "parsing"))]
 mod mobile_ios;
@@ -150,14 +150,24 @@ impl OperatingSystem {
         #[cfg(target_family = "wasm")]
         return OperatingSystem::Wasm;
 
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos", target_os = "ios", target_os = "android", target_family = "wasm")))]
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "android",
+            target_family = "wasm"
+        )))]
         return OperatingSystem::Linux; // Default fallback
     }
-    
+
     /// Built-in `serif` candidates for this OS, script-specific entries for
     /// `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
     #[cfg(feature = "std")]
-    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::Serif, ranges)`")]
+    #[deprecated(
+        since = "5.0.0",
+        note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::Serif, ranges)`"
+    )]
     pub fn get_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
         FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::Serif, unicode_ranges)
     }
@@ -165,24 +175,39 @@ impl OperatingSystem {
     /// Built-in `sans-serif` candidates for this OS, script-specific entries
     /// for `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
     #[cfg(feature = "std")]
-    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::SansSerif, ranges)`")]
+    #[deprecated(
+        since = "5.0.0",
+        note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::SansSerif, ranges)`"
+    )]
     pub fn get_sans_serif_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::SansSerif, unicode_ranges)
+        FcFallbackConfig::os_defaults(*self)
+            .expand_generic(GenericFamily::SansSerif, unicode_ranges)
     }
 
     /// Built-in `monospace` candidates for this OS, script-specific entries
     /// for `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
     #[cfg(feature = "std")]
-    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::Monospace, ranges)`")]
+    #[deprecated(
+        since = "5.0.0",
+        note = "use `FcFallbackConfig::os_defaults(os).expand_generic(GenericFamily::Monospace, ranges)`"
+    )]
     pub fn get_monospace_fonts(&self, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
-        FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::Monospace, unicode_ranges)
+        FcFallbackConfig::os_defaults(*self)
+            .expand_generic(GenericFamily::Monospace, unicode_ranges)
     }
 
     /// Expand one CSS family entry against the built-in tables for this OS.
     /// A named family expands to itself.
     #[cfg(feature = "std")]
-    #[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).expand_family(family, ranges)`")]
-    pub fn expand_generic_family(&self, family: &str, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+    #[deprecated(
+        since = "5.0.0",
+        note = "use `FcFallbackConfig::os_defaults(os).expand_family(family, ranges)`"
+    )]
+    pub fn expand_generic_family(
+        &self,
+        family: &str,
+        unicode_ranges: &[UnicodeRange],
+    ) -> Vec<String> {
         FcFallbackConfig::os_defaults(*self).expand_family(family, unicode_ranges)
     }
 }
@@ -193,8 +218,15 @@ impl OperatingSystem {
 /// resolves with its injected [`FcFallbackConfig`], and
 /// [`FcFallbackConfig::os_defaults`] is the explicit opt-in to these tables.
 #[cfg(feature = "std")]
-#[deprecated(since = "5.0.0", note = "use `FcFallbackConfig::os_defaults(os).candidate_families(families, ranges)`")]
-pub fn expand_font_families(families: &[String], os: OperatingSystem, unicode_ranges: &[UnicodeRange]) -> Vec<String> {
+#[deprecated(
+    since = "5.0.0",
+    note = "use `FcFallbackConfig::os_defaults(os).candidate_families(families, ranges)`"
+)]
+pub fn expand_font_families(
+    families: &[String],
+    os: OperatingSystem,
+    unicode_ranges: &[UnicodeRange],
+) -> Vec<String> {
     FcFallbackConfig::os_defaults(os).candidate_families(families, unicode_ranges)
 }
 
@@ -590,13 +622,34 @@ pub struct UnicodeRange {
 /// with a detected-from-document set before calling
 /// [`FcFontCache::resolve_font_chain_with_scripts`].
 pub const DEFAULT_UNICODE_FALLBACK_SCRIPTS: &[UnicodeRange] = &[
-    UnicodeRange { start: 0x0400, end: 0x04FF }, // Cyrillic
-    UnicodeRange { start: 0x0600, end: 0x06FF }, // Arabic
-    UnicodeRange { start: 0x0900, end: 0x097F }, // Devanagari
-    UnicodeRange { start: 0x3040, end: 0x309F }, // Hiragana
-    UnicodeRange { start: 0x30A0, end: 0x30FF }, // Katakana
-    UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK Unified Ideographs
-    UnicodeRange { start: 0xAC00, end: 0xD7A3 }, // Hangul Syllables
+    UnicodeRange {
+        start: 0x0400,
+        end: 0x04FF,
+    }, // Cyrillic
+    UnicodeRange {
+        start: 0x0600,
+        end: 0x06FF,
+    }, // Arabic
+    UnicodeRange {
+        start: 0x0900,
+        end: 0x097F,
+    }, // Devanagari
+    UnicodeRange {
+        start: 0x3040,
+        end: 0x309F,
+    }, // Hiragana
+    UnicodeRange {
+        start: 0x30A0,
+        end: 0x30FF,
+    }, // Katakana
+    UnicodeRange {
+        start: 0x4E00,
+        end: 0x9FFF,
+    }, // CJK Unified Ideographs
+    UnicodeRange {
+        start: 0xAC00,
+        end: 0xD7A3,
+    }, // Hangul Syllables
 ];
 
 impl UnicodeRange {
@@ -617,32 +670,64 @@ impl UnicodeRange {
 /// Check if any range covers CJK Unified Ideographs, Hiragana, Katakana, or Hangul
 pub fn has_cjk_ranges(ranges: &[UnicodeRange]) -> bool {
     const BLOCKS: [UnicodeRange; 4] = [
-        UnicodeRange { start: 0x3040, end: 0x309F }, // Hiragana
-        UnicodeRange { start: 0x30A0, end: 0x30FF }, // Katakana
-        UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK Unified Ideographs
-        UnicodeRange { start: 0xAC00, end: 0xD7AF }, // Hangul Syllables
+        UnicodeRange {
+            start: 0x3040,
+            end: 0x309F,
+        }, // Hiragana
+        UnicodeRange {
+            start: 0x30A0,
+            end: 0x30FF,
+        }, // Katakana
+        UnicodeRange {
+            start: 0x4E00,
+            end: 0x9FFF,
+        }, // CJK Unified Ideographs
+        UnicodeRange {
+            start: 0xAC00,
+            end: 0xD7AF,
+        }, // Hangul Syllables
     ];
     ranges.iter().any(|r| BLOCKS.iter().any(|b| r.overlaps(b)))
 }
 
 /// Check if any range covers the Arabic block
 pub fn has_arabic_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0600, end: 0x06FF }))
+    ranges.iter().any(|r| {
+        r.overlaps(&UnicodeRange {
+            start: 0x0600,
+            end: 0x06FF,
+        })
+    })
 }
 
 /// Check if any range covers the Cyrillic block
 pub fn has_cyrillic_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0400, end: 0x04FF }))
+    ranges.iter().any(|r| {
+        r.overlaps(&UnicodeRange {
+            start: 0x0400,
+            end: 0x04FF,
+        })
+    })
 }
 
 /// Check if any range covers the Hebrew block
 pub fn has_hebrew_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0590, end: 0x05FF }))
+    ranges.iter().any(|r| {
+        r.overlaps(&UnicodeRange {
+            start: 0x0590,
+            end: 0x05FF,
+        })
+    })
 }
 
 /// Check if any range covers the Thai block
 pub fn has_thai_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0E00, end: 0x0E7F }))
+    ranges.iter().any(|r| {
+        r.overlaps(&UnicodeRange {
+            start: 0x0E00,
+            end: 0x0E7F,
+        })
+    })
 }
 
 /// Log levels for trace messages
@@ -774,7 +859,9 @@ impl PartialOrd for FcFontRenderConfig {
 impl Ord for FcFontRenderConfig {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         // Compare all non-f64 fields first
-        let ord = self.antialias.cmp(&other.antialias)
+        let ord = self
+            .antialias
+            .cmp(&other.antialias)
             .then_with(|| self.hinting.cmp(&other.hinting))
             .then_with(|| self.hintstyle.cmp(&other.hintstyle))
             .then_with(|| self.autohint.cmp(&other.autohint))
@@ -1168,13 +1255,19 @@ impl<T> core::fmt::Debug for StLock<T> {
 #[cfg(not(feature = "single-thread-unsafe-locks"))]
 impl<T> StLock<T> {
     pub fn new(v: T) -> Self {
-        Self { lock: std::sync::RwLock::new(v) }
+        Self {
+            lock: std::sync::RwLock::new(v),
+        }
     }
     pub fn read(&self) -> Result<StReadGuard<'_, T>, core::convert::Infallible> {
-        Ok(StReadGuard { g: self.lock.read().unwrap_or_else(|e| e.into_inner()) })
+        Ok(StReadGuard {
+            g: self.lock.read().unwrap_or_else(|e| e.into_inner()),
+        })
     }
     pub fn write(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
-        Ok(StWriteGuard { g: self.lock.write().unwrap_or_else(|e| e.into_inner()) })
+        Ok(StWriteGuard {
+            g: self.lock.write().unwrap_or_else(|e| e.into_inner()),
+        })
     }
     pub fn lock(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
         self.write()
@@ -1187,7 +1280,9 @@ pub struct StReadGuard<'a, T> {
 #[cfg(not(feature = "single-thread-unsafe-locks"))]
 impl<'a, T> core::ops::Deref for StReadGuard<'a, T> {
     type Target = T;
-    fn deref(&self) -> &T { &self.g }
+    fn deref(&self) -> &T {
+        &self.g
+    }
 }
 #[cfg(not(feature = "single-thread-unsafe-locks"))]
 pub struct StWriteGuard<'a, T> {
@@ -1196,11 +1291,15 @@ pub struct StWriteGuard<'a, T> {
 #[cfg(not(feature = "single-thread-unsafe-locks"))]
 impl<'a, T> core::ops::Deref for StWriteGuard<'a, T> {
     type Target = T;
-    fn deref(&self) -> &T { &self.g }
+    fn deref(&self) -> &T {
+        &self.g
+    }
 }
 #[cfg(not(feature = "single-thread-unsafe-locks"))]
 impl<'a, T> core::ops::DerefMut for StWriteGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T { &mut self.g }
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.g
+    }
 }
 
 #[cfg(feature = "single-thread-unsafe-locks")]
@@ -1220,16 +1319,24 @@ impl<T> core::fmt::Debug for StLock<T> {
 #[cfg(feature = "single-thread-unsafe-locks")]
 impl<T> StLock<T> {
     pub fn new(v: T) -> Self {
-        Self { cell: std::cell::UnsafeCell::new(v) }
+        Self {
+            cell: std::cell::UnsafeCell::new(v),
+        }
     }
     pub fn read(&self) -> Result<StReadGuard<'_, T>, core::convert::Infallible> {
-        Ok(StReadGuard { r: unsafe { &*self.cell.get() } })
+        Ok(StReadGuard {
+            r: unsafe { &*self.cell.get() },
+        })
     }
     pub fn write(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
-        Ok(StWriteGuard { r: unsafe { &mut *self.cell.get() } })
+        Ok(StWriteGuard {
+            r: unsafe { &mut *self.cell.get() },
+        })
     }
     pub fn lock(&self) -> Result<StWriteGuard<'_, T>, core::convert::Infallible> {
-        Ok(StWriteGuard { r: unsafe { &mut *self.cell.get() } })
+        Ok(StWriteGuard {
+            r: unsafe { &mut *self.cell.get() },
+        })
     }
 }
 #[cfg(feature = "single-thread-unsafe-locks")]
@@ -1239,7 +1346,9 @@ pub struct StReadGuard<'a, T> {
 #[cfg(feature = "single-thread-unsafe-locks")]
 impl<'a, T> core::ops::Deref for StReadGuard<'a, T> {
     type Target = T;
-    fn deref(&self) -> &T { self.r }
+    fn deref(&self) -> &T {
+        self.r
+    }
 }
 #[cfg(feature = "single-thread-unsafe-locks")]
 pub struct StWriteGuard<'a, T> {
@@ -1248,11 +1357,15 @@ pub struct StWriteGuard<'a, T> {
 #[cfg(feature = "single-thread-unsafe-locks")]
 impl<'a, T> core::ops::Deref for StWriteGuard<'a, T> {
     type Target = T;
-    fn deref(&self) -> &T { self.r }
+    fn deref(&self) -> &T {
+        self.r
+    }
 }
 #[cfg(feature = "single-thread-unsafe-locks")]
 impl<'a, T> core::ops::DerefMut for StWriteGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T { self.r }
+    fn deref_mut(&mut self) -> &mut T {
+        self.r
+    }
 }
 
 pub(crate) struct FcFontCacheShared {
@@ -1335,12 +1448,19 @@ impl FcFontCacheInner {
     /// manifest loaded on top of a scan — so a font is one record no matter
     /// how many roads lead to it, and two different files that happen to
     /// carry identical name tables stay two records.
-    pub(crate) fn insert_disk_font(&mut self, mut pattern: FcPattern, id: FontId, path: FcFontPath) -> FontId {
+    pub(crate) fn insert_disk_font(
+        &mut self,
+        mut pattern: FcPattern,
+        id: FontId,
+        path: FcFontPath,
+    ) -> FontId {
         pattern.unicode_ranges =
             FcFontCache::normalize_unicode_ranges(core::mem::take(&mut pattern.unicode_ranges));
         if let Some(existing) = self.by_path.get(&path.path).and_then(|ids| {
             ids.iter().copied().find(|existing| {
-                self.disk_fonts.get(existing).is_some_and(|p| p.font_index == path.font_index)
+                self.disk_fonts
+                    .get(existing)
+                    .is_some_and(|p| p.font_index == path.font_index)
                     && self.metadata.get(existing) == Some(&pattern)
             })
         }) {
@@ -1357,7 +1477,12 @@ impl FcFontCacheInner {
     /// Returns the id the font is registered under: `id`, or the existing id
     /// when a memory font with the same pattern, face index and bytes (by
     /// content hash) is already registered.
-    pub(crate) fn insert_memory_font(&mut self, mut pattern: FcPattern, id: FontId, font: FcFont) -> FontId {
+    pub(crate) fn insert_memory_font(
+        &mut self,
+        mut pattern: FcPattern,
+        id: FontId,
+        font: FcFont,
+    ) -> FontId {
         pattern.unicode_ranges =
             FcFontCache::normalize_unicode_ranges(core::mem::take(&mut pattern.unicode_ranges));
         let hash = crate::utils::content_dedup_hash_u64(&font.bytes);
@@ -1374,7 +1499,6 @@ impl FcFontCacheInner {
         self.metadata.insert(id, pattern);
         id
     }
-
 }
 
 impl Clone for FcFontCache {
@@ -1445,7 +1569,10 @@ impl FcFontCache {
 
     /// The configured candidates for `family`: a generic keyword's base
     /// candidates, or a named family's substitutions.
-    #[deprecated(since = "5.0.0", note = "read `fallback_config().generic_candidates(..)` / `substitutions_for(..)`")]
+    #[deprecated(
+        since = "5.0.0",
+        note = "read `fallback_config().generic_candidates(..)` / `substitutions_for(..)`"
+    )]
     pub fn system_alias_prefs(&self, family: &str) -> Vec<String> {
         let state = self.state_read();
         match GenericFamily::from_css(family) {
@@ -1456,7 +1583,10 @@ impl FcFontCache {
 
     /// Expand a CSS stack through this cache's configuration, filling gaps
     /// from the built-in tables for `os`.
-    #[deprecated(since = "5.0.0", note = "use `fallback_config().candidate_families(families, ranges)`")]
+    #[deprecated(
+        since = "5.0.0",
+        note = "use `fallback_config().candidate_families(families, ranges)`"
+    )]
     pub fn expand_font_families_config_first(
         &self,
         families: &[String],
@@ -1472,9 +1602,7 @@ impl FcFontCache {
     /// was poisoned by a panic inside the write guard — same
     /// contract as `RwLock::read().expect(..)`.
     #[inline]
-    pub(crate) fn state_read(
-        &self,
-    ) -> StReadGuard<'_, FcFontCacheInner> {
+    pub(crate) fn state_read(&self) -> StReadGuard<'_, FcFontCacheInner> {
         // [az-web-lift] StLock::read() is Infallible (never poisons/spins).
         match self.shared.state.read() {
             Ok(g) => g,
@@ -1485,9 +1613,7 @@ impl FcFontCache {
     /// Acquire a write guard on the cache's state. Panics on
     /// poisoning, same as `state_read`.
     #[inline]
-    pub(crate) fn state_write(
-        &self,
-    ) -> StWriteGuard<'_, FcFontCacheInner> {
+    pub(crate) fn state_write(&self) -> StWriteGuard<'_, FcFontCacheInner> {
         // [az-web-lift] StLock::write() is Infallible (never poisons/spins).
         match self.shared.state.write() {
             Ok(g) => g,
@@ -1516,12 +1642,7 @@ impl FcFontCache {
     }
 
     /// Adds a memory font with a specific ID (for testing).
-    pub fn with_memory_font_with_id(
-        &self,
-        id: FontId,
-        pattern: FcPattern,
-        font: FcFont,
-    ) -> &Self {
+    pub fn with_memory_font_with_id(&self, id: FontId, pattern: FcPattern, font: FcFont) -> &Self {
         let pattern = Self::populate_memory_font_ranges(pattern, &font);
         let mut state = self.state_write();
         state.insert_memory_font(pattern, id, font);
@@ -1613,7 +1734,11 @@ impl FcFontCache {
     /// name), or `None` if nothing is. A map probe; `request_fonts_fast` uses
     /// it to reuse fast-probed faces across layout passes.
     pub fn lookup_paths_cached(&self, path: &str) -> Option<Vec<FontId>> {
-        self.state_read().by_path.get(path).cloned().filter(|ids| !ids.is_empty())
+        self.state_read()
+            .by_path
+            .get(path)
+            .cloned()
+            .filter(|ids| !ids.is_empty())
     }
 
     /// Get font data for a given font ID.
@@ -1671,9 +1796,9 @@ impl FcFontCache {
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<FontBytes>> {
         use std::sync::Arc;
         match self.get_font_by_id(id)? {
-            OwnedFontSource::Memory(font) => Some(Arc::new(FontBytes::Owned(
-                Arc::from(font.bytes.as_slice()),
-            ))),
+            OwnedFontSource::Memory(font) => {
+                Some(Arc::new(FontBytes::Owned(Arc::from(font.bytes.as_slice()))))
+            }
             OwnedFontSource::Disk(path) => {
                 let hash = path.bytes_hash;
                 if hash != 0 {
@@ -1700,15 +1825,21 @@ impl FcFontCache {
 
     /// Returns an empty font cache (no_std / no filesystem).
     #[cfg(not(feature = "std"))]
-    pub fn build() -> Self { Self::default() }
+    pub fn build() -> Self {
+        Self::default()
+    }
 
     /// Scans system font directories using filename heuristics (no allsorts).
     #[cfg(all(feature = "std", not(feature = "parsing")))]
-    pub fn build() -> Self { Self::build_from_filenames() }
+    pub fn build() -> Self {
+        Self::build_from_filenames()
+    }
 
     /// Scans and parses all system fonts via allsorts for full metadata.
     #[cfg(all(feature = "std", feature = "parsing"))]
-    pub fn build() -> Self { Self::build_inner(None) }
+    pub fn build() -> Self {
+        Self::build_inner(None)
+    }
 
     /// Filename-only scan: discovers fonts on disk, guesses metadata from
     /// the filename using [`config::tokenize_font_stem`].
@@ -1724,38 +1855,42 @@ impl FcFontCache {
                         Some(p) => p,
                         None => continue,
                     };
-                    state.insert_disk_font(pattern, FontId::new(), FcFontPath {
-                        path: path.to_string_lossy().to_string(),
-                        font_index: 0,
-                        // Filename-only scan — we never read the bytes,
-                        // so there's no dedup key. Leave as 0.
-                        bytes_hash: 0,
-                    });
+                    state.insert_disk_font(
+                        pattern,
+                        FontId::new(),
+                        FcFontPath {
+                            path: path.to_string_lossy().to_string(),
+                            font_index: 0,
+                            // Filename-only scan — we never read the bytes,
+                            // so there's no dedup key. Leave as 0.
+                            bytes_hash: 0,
+                        },
+                    );
                 }
             }
         }
         cache
     }
-    
+
     /// Builds a font cache with only specific font families (and their fallbacks).
-    /// 
+    ///
     /// This is a performance optimization for applications that know ahead of time
     /// which fonts they need. Instead of scanning all system fonts (which can be slow
     /// on systems with many fonts), only fonts matching the specified families are loaded.
-    /// 
+    ///
     /// Generic family names like "sans-serif", "serif", "monospace" are expanded
-    /// to OS-specific font names (e.g., "sans-serif" on macOS becomes "Helvetica Neue", 
+    /// to OS-specific font names (e.g., "sans-serif" on macOS becomes "Helvetica Neue",
     /// "San Francisco", etc.).
-    /// 
+    ///
     /// **Note**: This will NOT automatically load fallback fonts for scripts not covered
     /// by the requested families. If you need Arabic, CJK, or emoji support, either:
     /// - Add those families explicitly to the filter
     /// - Use `with_memory_fonts()` to add bundled fonts
     /// - Use `build()` to load all system fonts
-    /// 
+    ///
     /// # Arguments
     /// * `families` - Font family names to load (e.g., ["Arial", "sans-serif"])
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// // Only load Arial and sans-serif fallback fonts
@@ -1769,22 +1904,23 @@ impl FcFontCache {
         // final resolution, which goes config-first at query time.
         let os = OperatingSystem::current();
         let mut target_families: Vec<String> = Vec::new();
-        
+
         for family in families {
             let family_str = family.as_ref();
-            let expanded = FcFallbackConfig::os_defaults(os).expand_family(family_str, DEFAULT_UNICODE_FALLBACK_SCRIPTS);
+            let expanded = FcFallbackConfig::os_defaults(os)
+                .expand_family(family_str, DEFAULT_UNICODE_FALLBACK_SCRIPTS);
             if expanded.is_empty() || (expanded.len() == 1 && expanded[0] == family_str) {
                 target_families.push(family_str.to_string());
             } else {
                 target_families.extend(expanded);
             }
         }
-        
+
         Self::build_inner(Some(&target_families))
     }
-    
+
     /// Inner build function that handles both filtered and unfiltered font loading.
-    /// 
+    ///
     /// # Arguments
     /// * `family_filter` - If Some, only load fonts matching these family names.
     ///                     If None, load all fonts.
@@ -1849,12 +1985,18 @@ impl FcFontCache {
                 .or_else(|_| std::env::var("WINDIR"))
                 .unwrap_or_else(|_| "C:\\Windows".to_string());
 
-            let user_profile = std::env::var("USERPROFILE")
-                .unwrap_or_else(|_| "C:\\Users\\Default".to_string());
+            let user_profile =
+                std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".to_string());
 
             let font_dirs = vec![
                 (None, format!("{}\\Fonts\\", system_root)),
-                (None, format!("{}\\AppData\\Local\\Microsoft\\Windows\\Fonts\\", user_profile)),
+                (
+                    None,
+                    format!(
+                        "{}\\AppData\\Local\\Microsoft\\Windows\\Fonts\\",
+                        user_profile
+                    ),
+                ),
             ];
 
             let font_entries = FcScanDirectoriesInner(&font_dirs);
@@ -1925,7 +2067,7 @@ impl FcFontCache {
         drop(state);
         cache
     }
-    
+
     /// Check if a font ID is a memory font (preferred over disk fonts)
     pub fn is_memory_font(&self, id: &FontId) -> bool {
         self.state_read().memory_fonts.contains_key(id)
@@ -2055,7 +2197,10 @@ impl FcFontCache {
 
     /// Check if a pattern matches the query, with detailed tracing
     fn trace_path(k: &FcPattern) -> String {
-        k.name.as_ref().cloned().unwrap_or_else(|| "<unknown>".to_string())
+        k.name
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_string())
     }
 
     pub fn query_matches_internal(
@@ -2209,7 +2354,7 @@ impl FcFontCache {
 
         true
     }
-    
+
     /// Extract tokens from a font name
     /// E.g., "NotoSansJP" -> ["Noto", "Sans", "JP"]
     /// E.g., "Noto Sans CJK JP" -> ["Noto", "Sans", "CJK", "JP"]
@@ -2217,7 +2362,7 @@ impl FcFontCache {
         let mut tokens = Vec::new();
         let mut current_token = String::new();
         let mut last_was_lower = false;
-        
+
         for c in name.chars() {
             if c.is_whitespace() || c == '-' || c == '_' {
                 // Word separator
@@ -2237,14 +2382,14 @@ impl FcFontCache {
                 last_was_lower = c.is_lowercase();
             }
         }
-        
+
         if !current_token.is_empty() {
             tokens.push(current_token);
         }
-        
+
         tokens
     }
-    
+
     /// Total coverage of `ranges` in codepoints (widths summed; callers
     /// pass a normalized, disjoint set).
     /// Find fallback fonts for a given pattern
@@ -2299,15 +2444,15 @@ impl FcFontCache {
             // No specific requirements, return total coverage
             return Self::calculate_unicode_coverage(available) as i32;
         }
-        
+
         let mut total_coverage = 0u32;
-        
+
         for req_range in requested {
             for avail_range in available {
                 // Calculate overlap between requested and available ranges
                 let overlap_start = req_range.start.max(avail_range.start);
                 let overlap_end = req_range.end.min(avail_range.end);
-                
+
                 if overlap_start <= overlap_end {
                     // There is overlap
                     let overlap_size = overlap_end - overlap_start + 1;
@@ -2315,12 +2460,11 @@ impl FcFontCache {
                 }
             }
         }
-        
+
         total_coverage as i32
     }
 
     pub fn calculate_style_score(original: &FcPattern, candidate: &FcPattern) -> i32 {
-
         let mut score = 0_i32;
 
         // Weight calculation with special handling for bold property
@@ -2460,7 +2604,11 @@ fn FcScanDirectories() -> Option<(
         .iter()
         .map(|dir| (None, dir.to_string_lossy().into_owned()))
         .collect();
-    Some((FcScanDirectoriesInner(&dirs), config.render_configs, config.aliases))
+    Some((
+        FcScanDirectoriesInner(&dirs),
+        config.render_configs,
+        config.aliases,
+    ))
 }
 
 /// Deepest chain of `<include>`s [`FcSystemConfig::parse_tree`] follows.
@@ -2539,7 +2687,8 @@ impl FcSystemConfig {
             .collect();
 
         let mut config = Self::default();
-        let mut visited: alloc::collections::BTreeSet<PathBuf> = alloc::collections::BTreeSet::new();
+        let mut visited: alloc::collections::BTreeSet<PathBuf> =
+            alloc::collections::BTreeSet::new();
         let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
         queue.push_back((root.to_path_buf(), 0));
 
@@ -2551,7 +2700,9 @@ impl FcSystemConfig {
             if !visited.insert(identity) {
                 continue;
             }
-            let Ok(metadata) = std::fs::metadata(&path) else { continue };
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
 
             if metadata.is_dir() {
                 // The directory's files come next, before anything queued
@@ -2561,9 +2712,9 @@ impl FcSystemConfig {
                     .filter_map(|entry| entry.ok().map(|e| e.path()))
                     .filter(|p| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false))
                     .filter(|p| {
-                        p.file_name()
-                            .map(|n| n.to_string_lossy())
-                            .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()) && n.ends_with(".conf"))
+                        p.file_name().map(|n| n.to_string_lossy()).is_some_and(|n| {
+                            n.starts_with(|c: char| c.is_ascii_digit()) && n.ends_with(".conf")
+                        })
                     })
                     .collect();
                 entries.sort();
@@ -2576,7 +2727,9 @@ impl FcSystemConfig {
                 continue;
             }
 
-            let Ok(xml) = std::fs::read_to_string(&path) else { continue };
+            let Ok(xml) = std::fs::read_to_string(&path) else {
+                continue;
+            };
             let mut includes: Vec<(Option<String>, PathBuf)> = Vec::new();
             let mut dirs: Vec<(Option<String>, String)> = Vec::new();
             if ParseFontsConf(&xml, &mut includes, &mut dirs).is_none() {
@@ -2615,7 +2768,10 @@ impl FcSystemConfig {
                                 .map(|dir| dir.join(&expanded))
                                 .find(|candidate| candidate.exists())
                                 .unwrap_or_else(|| {
-                                    search_dirs.last().map(|dir| dir.join(&expanded)).unwrap_or(expanded)
+                                    search_dirs
+                                        .last()
+                                        .map(|dir| dir.join(&expanded))
+                                        .unwrap_or(expanded)
                                 })
                         }
                     }),
@@ -2859,10 +3015,7 @@ fn ParseFontsConf(
 /// </match>
 /// ```
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn ParseFontsConfRenderConfig(
-    input: &str,
-    configs: &mut BTreeMap<String, FcFontRenderConfig>,
-) {
+fn ParseFontsConfRenderConfig(input: &str, configs: &mut BTreeMap<String, FcFontRenderConfig>) {
     use xmlparser::Token::*;
     use xmlparser::Tokenizer;
 
@@ -2991,8 +3144,15 @@ fn ParseFontsConfRenderConfig(
                             "edit" => {
                                 if state == State::InEdit {
                                     // Apply the collected value to the config
-                                    if let (Some(ref name), Some(ref val)) = (&current_edit_name, &current_value) {
-                                        apply_edit_value(&mut config, name, val, value_tag.as_deref());
+                                    if let (Some(ref name), Some(ref val)) =
+                                        (&current_edit_name, &current_value)
+                                    {
+                                        apply_edit_value(
+                                            &mut config,
+                                            name,
+                                            val,
+                                            value_tag.as_deref(),
+                                        );
                                     }
                                     state = State::InMatchFont;
                                 }
@@ -3112,7 +3272,6 @@ fn parse_lcdfilter_const(value: &str) -> Option<FcLcdFilter> {
     }
 }
 
-
 /// Intermediate parsed data from a single font face within a font file.
 /// Used to share parsing logic between `FcParseFont` and `FcParseFontBytesInner`.
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -3133,9 +3292,7 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
         font_data::FontData,
         get_name::fontcode_get_name,
         post::PostTable,
-        tables::{
-            os2::Os2, HeadTable, NameTable,
-        },
+        tables::{os2::Os2, HeadTable, NameTable},
         tag,
     };
     use std::collections::BTreeSet;
@@ -3199,20 +3356,24 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
         // Without OS/2 the only weight signal is the `head.macStyle` bold bit, so
         // the face lands on Bold or Normal rather than a precise class.
         let weight = os2_table.as_ref().map_or(
-            if is_bold { FcWeight::Bold } else { FcWeight::Normal },
+            if is_bold {
+                FcWeight::Bold
+            } else {
+                FcWeight::Normal
+            },
             |os2| FcWeight::from_u16(os2.us_weight_class),
         );
-        let stretch = os2_table
-            .as_ref()
-            .map_or(FcStretch::Normal, |os2| FcStretch::from_u16(os2.us_width_class));
+        let stretch = os2_table.as_ref().map_or(FcStretch::Normal, |os2| {
+            FcStretch::from_u16(os2.us_width_class)
+        });
 
         // Coverage comes from the cmap and nothing else: every codepoint the
         // face maps to a real glyph, exactly. See `cmap_coverage`.
         let unicode_ranges = cmap_coverage(&provider).unwrap_or_default();
 
         // Use the shared detect_monospace helper for PANOSE + hmtx fallback
-        let is_monospace = detect_monospace(&provider, os2_table.as_ref(), detected_monospace)
-            .unwrap_or(false);
+        let is_monospace =
+            detect_monospace(&provider, os2_table.as_ref(), detected_monospace).unwrap_or(false);
 
         let name_data = provider.table_data(tag::NAME).ok()??.into_owned();
         let name_table = ReadScope::new(&name_data).read::<NameTable>().ok()?;
@@ -3277,10 +3438,8 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
                     if name.to_bytes().is_empty() {
                         None
                     } else {
-                        let mut name_str =
-                            String::from_utf8_lossy(name.to_bytes()).to_string();
-                        let mut family_str =
-                            String::from_utf8_lossy(family.as_bytes()).to_string();
+                        let mut name_str = String::from_utf8_lossy(name.to_bytes()).to_string();
+                        let mut family_str = String::from_utf8_lossy(family.as_bytes()).to_string();
                         if name_str.starts_with('.') {
                             name_str = name_str[1..].to_string();
                         }
@@ -3474,8 +3633,7 @@ pub fn FcParseFontFaceFast(
         .read::<CmapSubtable<'_>>()
         .ok()?;
 
-    let mut covered: alloc::collections::BTreeSet<char> =
-        alloc::collections::BTreeSet::new();
+    let mut covered: alloc::collections::BTreeSet<char> = alloc::collections::BTreeSet::new();
     for ch in codepoints {
         if matches!(cmap_subtable.map_glyph(*ch as u32), Ok(Some(gid)) if gid != 0) {
             covered.insert(*ch);
@@ -3484,12 +3642,9 @@ pub fn FcParseFontFaceFast(
     // The face's full coverage from the subtable's segments — the same exact
     // set the scan path stores — so a fast-probed face is not left claiming
     // only the characters that happened to be asked for so far.
-    let covered_ranges = coverage_from_subtable(
-        &cmap_subtable,
-        &cmap_data,
-        encoding_record.offset as usize,
-    )
-    .unwrap_or_default();
+    let covered_ranges =
+        coverage_from_subtable(&cmap_subtable, &cmap_data, encoding_record.offset as usize)
+            .unwrap_or_default();
 
     let weight = if is_bold {
         FcWeight::Bold
@@ -3529,9 +3684,8 @@ pub fn FcParseFontFaceFast(
 #[allow(non_snake_case)]
 pub fn FcCountFontFaces(font_bytes: &[u8]) -> usize {
     if font_bytes.len() >= 12 && &font_bytes[0..4] == b"ttcf" {
-        let num_fonts = u32::from_be_bytes([
-            font_bytes[8], font_bytes[9], font_bytes[10], font_bytes[11],
-        ]);
+        let num_fonts =
+            u32::from_be_bytes([font_bytes[8], font_bytes[9], font_bytes[10], font_bytes[11]]);
         // Same cap as parse_font_faces, for safety.
         std::cmp::min(num_fonts as usize, 100).max(1)
     } else {
@@ -3760,7 +3914,7 @@ fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
 fn find_best_cmap_subtable<'a>(
     cmap: &allsorts::tables::cmap::Cmap<'a>,
 ) -> Option<allsorts::tables::cmap::EncodingRecord> {
-    use allsorts::tables::cmap::{PlatformId, EncodingId};
+    use allsorts::tables::cmap::{EncodingId, PlatformId};
 
     // Full-repertoire subtables first (they carry the astral planes: emoji,
     // CJK extensions), BMP-only ones after — the order FreeType and
@@ -3861,7 +4015,9 @@ fn coverage_from_subtable(
                     let base = (range_offset as usize / 2).wrapping_sub(seg_count - i);
                     for code in start..=end {
                         let index = base.wrapping_add((code - start) as usize);
-                        let Some(&value) = glyph_ids.get(index) else { continue };
+                        let Some(&value) = glyph_ids.get(index) else {
+                            continue;
+                        };
                         if value != 0 && value.wrapping_add(delta as u16) != 0 {
                             push(code, code);
                         }
@@ -3873,7 +4029,11 @@ fn coverage_from_subtable(
             for (start, end, start_gid) in format12_groups(cmap_data, offset)? {
                 // gid = start_gid + (code - start): only the first code of a
                 // group that starts at glyph 0 maps to .notdef.
-                let first = if start_gid == 0 { start.saturating_add(1) } else { start };
+                let first = if start_gid == 0 {
+                    start.saturating_add(1)
+                } else {
+                    start
+                };
                 push(first, end.min(0x10FFFF));
             }
         }
@@ -3884,7 +4044,11 @@ fn coverage_from_subtable(
                 }
             }
         }
-        CmapSubtable::Format6 { first_code, glyph_id_array, .. } => {
+        CmapSubtable::Format6 {
+            first_code,
+            glyph_id_array,
+            ..
+        } => {
             for (i, gid) in glyph_id_array.iter().enumerate() {
                 if gid != 0 {
                     let code = *first_code as u32 + i as u32;
@@ -3892,7 +4056,11 @@ fn coverage_from_subtable(
                 }
             }
         }
-        CmapSubtable::Format10 { start_char_code, glyph_id_array, .. } => {
+        CmapSubtable::Format10 {
+            start_char_code,
+            glyph_id_array,
+            ..
+        } => {
             for (i, gid) in glyph_id_array.iter().enumerate() {
                 if gid != 0 {
                     let code = *start_char_code + i as u32;
@@ -3931,8 +4099,16 @@ fn coverage_from_subtable(
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn format12_groups(cmap_data: &[u8], offset: usize) -> Option<Vec<(u32, u32, u32)>> {
     let table = cmap_data.get(offset..)?;
-    let u16_at = |at: usize| table.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
-    let u32_at = |at: usize| table.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let u16_at = |at: usize| {
+        table
+            .get(at..at + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    let u32_at = |at: usize| {
+        table
+            .get(at..at + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
     if u16_at(0)? != 12 {
         return None;
     }
@@ -4023,19 +4199,49 @@ fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
 
     // Family = non-style tokens joined
     let family_tokens = crate::config::tokenize_font_stem(stem);
-    if family_tokens.is_empty() { return None; }
+    if family_tokens.is_empty() {
+        return None;
+    }
     let family = family_tokens.join(" ");
 
     Some(FcPattern {
         name: Some(stem.to_string()),
         family: Some(family),
-        bold: if is_bold { PatternMatch::True } else { PatternMatch::False },
-        italic: if is_italic { PatternMatch::True } else { PatternMatch::False },
-        oblique: if is_oblique { PatternMatch::True } else { PatternMatch::DontCare },
-        monospace: if is_mono { PatternMatch::True } else { PatternMatch::DontCare },
-        condensed: if is_condensed { PatternMatch::True } else { PatternMatch::DontCare },
-        weight: if is_bold { FcWeight::Bold } else { FcWeight::Normal },
-        stretch: if is_condensed { FcStretch::Condensed } else { FcStretch::Normal },
+        bold: if is_bold {
+            PatternMatch::True
+        } else {
+            PatternMatch::False
+        },
+        italic: if is_italic {
+            PatternMatch::True
+        } else {
+            PatternMatch::False
+        },
+        oblique: if is_oblique {
+            PatternMatch::True
+        } else {
+            PatternMatch::DontCare
+        },
+        monospace: if is_mono {
+            PatternMatch::True
+        } else {
+            PatternMatch::DontCare
+        },
+        condensed: if is_condensed {
+            PatternMatch::True
+        } else {
+            PatternMatch::DontCare
+        },
+        weight: if is_bold {
+            FcWeight::Bold
+        } else {
+            FcWeight::Normal
+        },
+        stretch: if is_condensed {
+            FcStretch::Condensed
+        } else {
+            FcStretch::Normal
+        },
         unicode_ranges: Vec::new(),
         metadata: FcFontMetadata::default(),
         render_config: FcFontRenderConfig::default(),
@@ -4083,7 +4289,13 @@ mod system_alias_tests {
         let key = crate::utils::normalize_family_name("sans-serif");
         assert_eq!(
             aliases.get(&key).map(Vec::as_slice),
-            Some(&["Noto Sans".to_string(), "DejaVu Sans".to_string(), "Ubuntu".to_string()][..]),
+            Some(
+                &[
+                    "Noto Sans".to_string(),
+                    "DejaVu Sans".to_string(),
+                    "Ubuntu".to_string()
+                ][..]
+            ),
             "prefer entries append across files in include order, deduplicated"
         );
         assert_eq!(
@@ -4115,9 +4327,9 @@ mod system_alias_tests {
         assert_eq!(
             out,
             vec![
-                "Arial".to_string(),            // named family keeps itself first
-                "Liberation Sans".to_string(),  // its configured substitution
-                "Noto Sans".to_string(),        // sans-serif configured prefer list
+                "Arial".to_string(),           // named family keeps itself first
+                "Liberation Sans".to_string(), // its configured substitution
+                "Noto Sans".to_string(),       // sans-serif configured prefer list
                 "DejaVu Sans".to_string(),
             ],
             "configured preferences resolve the stack; no built-in list entries leak in"
@@ -4149,10 +4361,17 @@ mod coverage_tests {
     /// Every codepoint up to `max` the face's best subtable maps to a real
     /// glyph, found the slow way: one `map_glyph` per codepoint.
     fn brute_force(bytes: &[u8], face: usize, max: u32) -> Vec<UnicodeRange> {
-        let font = ReadScope::new(bytes).read::<FontData<'_>>().expect("font data");
+        let font = ReadScope::new(bytes)
+            .read::<FontData<'_>>()
+            .expect("font data");
         let provider = font.table_provider(face).expect("face");
-        let cmap_data = provider.table_data(tag::CMAP).expect("cmap").expect("cmap present");
-        let cmap = ReadScope::new(&cmap_data).read::<Cmap<'_>>().expect("cmap header");
+        let cmap_data = provider
+            .table_data(tag::CMAP)
+            .expect("cmap")
+            .expect("cmap present");
+        let cmap = ReadScope::new(&cmap_data)
+            .read::<Cmap<'_>>()
+            .expect("cmap header");
         let record = find_best_cmap_subtable(&cmap).expect("a Unicode subtable");
         let subtable = ReadScope::new(&cmap_data)
             .offset(record.offset as usize)
@@ -4195,7 +4414,10 @@ mod coverage_tests {
         ranges
             .iter()
             .filter(|r| r.start <= max)
-            .map(|r| UnicodeRange { start: r.start, end: r.end.min(max) })
+            .map(|r| UnicodeRange {
+                start: r.start,
+                end: r.end.min(max),
+            })
             .collect()
     }
 
@@ -4220,8 +4442,16 @@ mod coverage_tests {
             format12_groups(&cmap, 40),
             Some(vec![(0x20, 0x7E, 3), (0x1F600, 0x1F64F, 200)])
         );
-        assert_eq!(format12_groups(&cmap, 0), None, "offset 0 is not a format-12 subtable");
-        assert_eq!(format12_groups(&cmap[..50], 40), None, "a truncated table is rejected");
+        assert_eq!(
+            format12_groups(&cmap, 0),
+            None,
+            "offset 0 is not a format-12 subtable"
+        );
+        assert_eq!(
+            format12_groups(&cmap[..50], 40),
+            None,
+            "a truncated table is rejected"
+        );
     }
 
     /// The parsed coverage of the bundled fixture is exactly the set of
@@ -4238,12 +4468,18 @@ mod coverage_tests {
         );
 
         let exact = brute_force(FIXTURE, 0, 0x10FFFF);
-        assert_eq!(*parsed, exact, "segment walk and per-codepoint lookup disagree");
+        assert_eq!(
+            *parsed, exact,
+            "segment walk and per-codepoint lookup disagree"
+        );
 
         // Sanity on the shape: a Latin text face, not a block-rounded one.
         assert!(crate::fallback::covers(parsed, 'A' as u32));
         assert!(!crate::fallback::covers(parsed, 0x4E00));
-        let latin_ext_a = UnicodeRange { start: 0x0100, end: 0x017F };
+        let latin_ext_a = UnicodeRange {
+            start: 0x0100,
+            end: 0x017F,
+        };
         let overlap = crate::fallback::overlap_size(parsed, &latin_ext_a);
         assert!(
             overlap > 0 && overlap < 128,
@@ -4278,7 +4514,9 @@ mod coverage_tests {
     #[ignore]
     fn every_installed_font_coverage_matches_its_cmap_at_every_boundary() {
         fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -4301,7 +4539,9 @@ mod coverage_tests {
         let surrogate = |cp: u32| (0xD800..=0xDFFF).contains(&cp);
         let (mut faces_checked, mut skipped) = (0usize, 0usize);
         for path in &files {
-            let Ok(bytes) = std::fs::read(path) else { continue };
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
             let Some(faces) = FcParseFontBytes(&bytes, &path.to_string_lossy()) else {
                 skipped += 1;
                 continue;
@@ -4312,39 +4552,45 @@ mod coverage_tests {
                     continue;
                 }
                 let where_ = format!("{}#{}", path.display(), font.font_index);
-                let checked = with_best_subtable(&bytes, font.font_index, |subtable, cmap_data, offset| {
-                    // allsorts' format-12 `map_glyph` scans the groups linearly;
-                    // a CJK face has thousands, so look those up by binary search.
-                    let groups = match subtable {
-                        CmapSubtable::Format12 { .. } => format12_groups(cmap_data, offset),
-                        _ => None,
-                    };
-                    let mapped = |cp: u32| match &groups {
-                        Some(groups) => {
-                            let i = groups.partition_point(|g| g.1 < cp);
-                            groups
-                                .get(i)
-                                .is_some_and(|&(start, end, gid)| start <= cp && cp <= end && (gid != 0 || cp != start))
+                let checked =
+                    with_best_subtable(&bytes, font.font_index, |subtable, cmap_data, offset| {
+                        // allsorts' format-12 `map_glyph` scans the groups linearly;
+                        // a CJK face has thousands, so look those up by binary search.
+                        let groups = match subtable {
+                            CmapSubtable::Format12 { .. } => format12_groups(cmap_data, offset),
+                            _ => None,
+                        };
+                        let mapped = |cp: u32| match &groups {
+                            Some(groups) => {
+                                let i = groups.partition_point(|g| g.1 < cp);
+                                groups.get(i).is_some_and(|&(start, end, gid)| {
+                                    start <= cp && cp <= end && (gid != 0 || cp != start)
+                                })
+                            }
+                            None => matches!(subtable.map_glyph(cp), Ok(Some(gid)) if gid != 0),
+                        };
+                        for r in &pattern.unicode_ranges {
+                            assert!(
+                                mapped(r.start) && mapped(r.end),
+                                "{where_}: {r:?} does not end on mapped codepoints"
+                            );
+                            if r.start > 0 && !surrogate(r.start - 1) {
+                                assert!(!mapped(r.start - 1), "{where_}: {r:?} starts late");
+                            }
+                            if r.end < 0x10FFFF && !surrogate(r.end + 1) {
+                                assert!(!mapped(r.end + 1), "{where_}: {r:?} ends early");
+                            }
                         }
-                        None => matches!(subtable.map_glyph(cp), Ok(Some(gid)) if gid != 0),
-                    };
-                    for r in &pattern.unicode_ranges {
-                        assert!(mapped(r.start) && mapped(r.end), "{where_}: {r:?} does not end on mapped codepoints");
-                        if r.start > 0 && !surrogate(r.start - 1) {
-                            assert!(!mapped(r.start - 1), "{where_}: {r:?} starts late");
-                        }
-                        if r.end < 0x10FFFF && !surrogate(r.end + 1) {
-                            assert!(!mapped(r.end + 1), "{where_}: {r:?} ends early");
-                        }
-                    }
-                });
+                    });
                 if checked.is_some() {
                     faces_checked += 1;
                 }
             }
         }
-        println!("checked {faces_checked} faces in {} files ({skipped} unparsable)", files.len());
+        println!(
+            "checked {faces_checked} faces in {} files ({skipped} unparsable)",
+            files.len()
+        );
         assert!(faces_checked > 0, "no fonts found to check");
     }
 }
-

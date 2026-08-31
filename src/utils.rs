@@ -125,7 +125,9 @@ pub fn collect_font_files(root: &std::path::Path) -> alloc::vec::Vec<std::path::
         if !visited.insert(identity) {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {

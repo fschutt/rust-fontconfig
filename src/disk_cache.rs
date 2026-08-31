@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
-use crate::{FcFontPath, FcPattern, FontId};
 use crate::registry::FcFontRegistry;
+use crate::{FcFontPath, FcPattern, FontId};
 
 /// Font cache manifest for on-disk serialization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -93,13 +93,18 @@ impl FcFontRegistry {
         let mut processed = self.processed_paths.lock().ok()?;
         let mut completed = self.completed_paths.lock().ok()?;
 
-        manifest.entries.iter()
+        manifest
+            .entries
+            .iter()
             .flat_map(|(path_str, entry)| {
                 let pb = PathBuf::from(path_str);
                 processed.insert(pb.clone());
                 completed.insert(pb);
                 let hash = entry.bytes_hash;
-                entry.font_indices.iter().map(move |idx_entry| (path_str, hash, idx_entry))
+                entry
+                    .font_indices
+                    .iter()
+                    .map(move |idx_entry| (path_str, hash, idx_entry))
             })
             .for_each(|(path_str, bytes_hash, idx_entry)| {
                 state.insert_disk_font(
@@ -162,7 +167,9 @@ impl FcFontRegistry {
 
         let mut entries: BTreeMap<String, FontCacheEntry> = BTreeMap::new();
 
-        state.disk_fonts.iter()
+        state
+            .disk_fonts
+            .iter()
             .filter_map(|(id, font_path)| {
                 state.metadata.get(id).map(|pattern| (font_path, pattern))
             })
@@ -170,8 +177,8 @@ impl FcFontRegistry {
                 entries
                     .entry(font_path.path.clone())
                     .or_insert_with(|| {
-                        let (mtime_secs, file_size) = get_file_metadata(&font_path.path)
-                            .unwrap_or((0, 0));
+                        let (mtime_secs, file_size) =
+                            get_file_metadata(&font_path.path).unwrap_or((0, 0));
                         FontCacheEntry {
                             mtime_secs,
                             file_size,
@@ -230,7 +237,9 @@ impl FcFontRegistry {
 /// Get file mtime (seconds since epoch) and size in bytes.
 pub fn get_file_metadata(path: &str) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()
+    let mtime = meta
+        .modified()
+        .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);

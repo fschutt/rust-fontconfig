@@ -57,9 +57,8 @@ extern "C" {
 
     // Available-fonts collection + its descriptors (iOS 7+).
     fn CTFontCollectionCreateFromAvailableFonts(options: CFDictionaryRef) -> CTFontCollectionRef;
-    fn CTFontCollectionCreateMatchingFontDescriptors(
-        collection: CTFontCollectionRef,
-    ) -> CFArrayRef;
+    fn CTFontCollectionCreateMatchingFontDescriptors(collection: CTFontCollectionRef)
+        -> CFArrayRef;
     // CTFontDescriptorCopyAttribute returns a +1 (owned) CFType (iOS 3.2+).
     fn CTFontDescriptorCopyAttribute(
         descriptor: CTFontDescriptorRef,
@@ -110,12 +109,8 @@ pub(crate) fn copy_available_font_urls() -> Vec<PathBuf> {
             if url.is_null() {
                 continue; // in-memory / data fonts have no file URL
             }
-            let ok = CFURLGetFileSystemRepresentation(
-                url,
-                true,
-                buf.as_mut_ptr(),
-                buf.len() as CFIndex,
-            );
+            let ok =
+                CFURLGetFileSystemRepresentation(url, true, buf.as_mut_ptr(), buf.len() as CFIndex);
             if ok {
                 let nul_idx = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
                 if nul_idx != 0 {
