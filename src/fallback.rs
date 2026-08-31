@@ -338,8 +338,14 @@ impl RankKey {
 
 /// `true` when `ranges` contain `cp`. An empty list covers nothing — a font
 /// that reported no coverage is never assumed to draw everything.
+///
+/// `ranges` must be sorted and disjoint (every pattern in the cache is
+/// normalized on insert), so this is a binary search: exact cmap coverage
+/// runs to thousands of segments for a CJK face, and this is called once
+/// per chain font per character.
 pub fn covers(ranges: &[UnicodeRange], cp: u32) -> bool {
-    ranges.iter().any(|r| r.start <= cp && cp <= r.end)
+    let i = ranges.partition_point(|r| r.end < cp);
+    ranges.get(i).is_some_and(|r| r.start <= cp)
 }
 
 /// Width of a range in codepoints.
@@ -347,11 +353,16 @@ pub fn range_width(r: &UnicodeRange) -> u32 {
     r.end.saturating_sub(r.start).saturating_add(1)
 }
 
-/// Codepoints of `block` that `ranges` cover, capped at the block's width
-/// (so overlapping input ranges cannot inflate it).
+/// Codepoints of `block` that `ranges` cover, capped at the block's width.
+/// `ranges` must be sorted and disjoint (see [`covers`]); the scan starts at
+/// the first range that can reach the block and stops at the first past it.
 pub fn overlap_size(ranges: &[UnicodeRange], block: &UnicodeRange) -> u32 {
     let mut total = 0u32;
-    for r in ranges {
+    let first = ranges.partition_point(|r| r.end < block.start);
+    for r in &ranges[first..] {
+        if r.start > block.end {
+            break;
+        }
         let start = r.start.max(block.start);
         let end = r.end.min(block.end);
         if start <= end {

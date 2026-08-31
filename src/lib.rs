@@ -616,32 +616,33 @@ impl UnicodeRange {
 
 /// Check if any range covers CJK Unified Ideographs, Hiragana, Katakana, or Hangul
 pub fn has_cjk_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| {
-        (r.start >= 0x4E00 && r.start <= 0x9FFF) ||
-        (r.start >= 0x3040 && r.start <= 0x309F) ||
-        (r.start >= 0x30A0 && r.start <= 0x30FF) ||
-        (r.start >= 0xAC00 && r.start <= 0xD7AF)
-    })
+    const BLOCKS: [UnicodeRange; 4] = [
+        UnicodeRange { start: 0x3040, end: 0x309F }, // Hiragana
+        UnicodeRange { start: 0x30A0, end: 0x30FF }, // Katakana
+        UnicodeRange { start: 0x4E00, end: 0x9FFF }, // CJK Unified Ideographs
+        UnicodeRange { start: 0xAC00, end: 0xD7AF }, // Hangul Syllables
+    ];
+    ranges.iter().any(|r| BLOCKS.iter().any(|b| r.overlaps(b)))
 }
 
 /// Check if any range covers the Arabic block
 pub fn has_arabic_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.start >= 0x0600 && r.start <= 0x06FF)
+    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0600, end: 0x06FF }))
 }
 
 /// Check if any range covers the Cyrillic block
 pub fn has_cyrillic_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.start >= 0x0400 && r.start <= 0x04FF)
+    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0400, end: 0x04FF }))
 }
 
 /// Check if any range covers the Hebrew block
 pub fn has_hebrew_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.start >= 0x0590 && r.start <= 0x05FF)
+    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0590, end: 0x05FF }))
 }
 
 /// Check if any range covers the Thai block
 pub fn has_thai_ranges(ranges: &[UnicodeRange]) -> bool {
-    ranges.iter().any(|r| r.start >= 0x0E00 && r.start <= 0x0E7F)
+    ranges.iter().any(|r| r.overlaps(&UnicodeRange { start: 0x0E00, end: 0x0E7F }))
 }
 
 /// Log levels for trace messages
@@ -1306,7 +1307,13 @@ impl FcFontCacheInner {
     /// Register a font backed by a file. The one place a pattern enters the
     /// state: `patterns`, `metadata`, the family index and the file map
     /// stay consistent by construction.
-    pub(crate) fn insert_disk_font(&mut self, pattern: FcPattern, id: FontId, path: FcFontPath) {
+    ///
+    /// Coverage is normalized (sorted, disjoint) on the way in; everything
+    /// that reads it — `fallback::covers`, `fallback::overlap_size` — relies
+    /// on that to binary-search.
+    pub(crate) fn insert_disk_font(&mut self, mut pattern: FcPattern, id: FontId, path: FcFontPath) {
+        pattern.unicode_ranges =
+            FcFontCache::normalize_unicode_ranges(core::mem::take(&mut pattern.unicode_ranges));
         self.index_pattern_family(&pattern, id);
         self.patterns.insert(pattern.clone(), id);
         self.disk_fonts.insert(id, path);
@@ -1314,7 +1321,9 @@ impl FcFontCacheInner {
     }
 
     /// Register a font held in memory. See [`insert_disk_font`](Self::insert_disk_font).
-    pub(crate) fn insert_memory_font(&mut self, pattern: FcPattern, id: FontId, font: FcFont) {
+    pub(crate) fn insert_memory_font(&mut self, mut pattern: FcPattern, id: FontId, font: FcFont) {
+        pattern.unicode_ranges =
+            FcFontCache::normalize_unicode_ranges(core::mem::take(&mut pattern.unicode_ranges));
         self.index_pattern_family(&pattern, id);
         self.patterns.insert(pattern.clone(), id);
         self.memory_fonts.insert(id, font);
@@ -2843,8 +2852,6 @@ fn ParseFontsConfRenderConfig(
         InTestFamily,
         /// Inside <edit name="..."> within a match block
         InEdit,
-        /// Inside a value element (<bool>, <double>, <const>, <string>) within <edit> or <test>
-        InValue,
     }
 
     let mut state = State::Idle;
@@ -2990,7 +2997,7 @@ fn apply_edit_value(
     config: &mut FcFontRenderConfig,
     edit_name: &str,
     value: &str,
-    value_tag: Option<&str>,
+    _value_tag: Option<&str>,
 ) {
     match edit_name {
         "antialias" => {
@@ -3080,143 +3087,6 @@ fn parse_lcdfilter_const(value: &str) -> Option<FcLcdFilter> {
     }
 }
 
-// Unicode range bit positions to actual ranges (full table from OpenType spec).
-// Based on: https://learn.microsoft.com/en-us/typography/opentype/spec/os2#ur
-#[cfg(all(feature = "std", feature = "parsing"))]
-const UNICODE_RANGE_MAPPINGS: &[(usize, u32, u32)] = &[
-    // ulUnicodeRange1 (bits 0-31)
-    (0, 0x0000, 0x007F), // Basic Latin
-    (1, 0x0080, 0x00FF), // Latin-1 Supplement
-    (2, 0x0100, 0x017F), // Latin Extended-A
-    (3, 0x0180, 0x024F), // Latin Extended-B
-    (4, 0x0250, 0x02AF), // IPA Extensions
-    (5, 0x02B0, 0x02FF), // Spacing Modifier Letters
-    (6, 0x0300, 0x036F), // Combining Diacritical Marks
-    (7, 0x0370, 0x03FF), // Greek and Coptic
-    (8, 0x2C80, 0x2CFF), // Coptic
-    (9, 0x0400, 0x04FF), // Cyrillic
-    (10, 0x0530, 0x058F), // Armenian
-    (11, 0x0590, 0x05FF), // Hebrew
-    (12, 0x0600, 0x06FF), // Arabic
-    (13, 0x0700, 0x074F), // Syriac
-    (14, 0x0780, 0x07BF), // Thaana
-    (15, 0x0900, 0x097F), // Devanagari
-    (16, 0x0980, 0x09FF), // Bengali
-    (17, 0x0A00, 0x0A7F), // Gurmukhi
-    (18, 0x0A80, 0x0AFF), // Gujarati
-    (19, 0x0B00, 0x0B7F), // Oriya
-    (20, 0x0B80, 0x0BFF), // Tamil
-    (21, 0x0C00, 0x0C7F), // Telugu
-    (22, 0x0C80, 0x0CFF), // Kannada
-    (23, 0x0D00, 0x0D7F), // Malayalam
-    (24, 0x0E00, 0x0E7F), // Thai
-    (25, 0x0E80, 0x0EFF), // Lao
-    (26, 0x10A0, 0x10FF), // Georgian
-    (27, 0x1B00, 0x1B7F), // Balinese
-    (28, 0x1100, 0x11FF), // Hangul Jamo
-    (29, 0x1E00, 0x1EFF), // Latin Extended Additional
-    (30, 0x1F00, 0x1FFF), // Greek Extended
-    (31, 0x2000, 0x206F), // General Punctuation
-    // ulUnicodeRange2 (bits 32-63)
-    (32, 0x2070, 0x209F), // Superscripts And Subscripts
-    (33, 0x20A0, 0x20CF), // Currency Symbols
-    (34, 0x20D0, 0x20FF), // Combining Diacritical Marks For Symbols
-    (35, 0x2100, 0x214F), // Letterlike Symbols
-    (36, 0x2150, 0x218F), // Number Forms
-    (37, 0x2190, 0x21FF), // Arrows
-    (38, 0x2200, 0x22FF), // Mathematical Operators
-    (39, 0x2300, 0x23FF), // Miscellaneous Technical
-    (40, 0x2400, 0x243F), // Control Pictures
-    (41, 0x2440, 0x245F), // Optical Character Recognition
-    (42, 0x2460, 0x24FF), // Enclosed Alphanumerics
-    (43, 0x2500, 0x257F), // Box Drawing
-    (44, 0x2580, 0x259F), // Block Elements
-    (45, 0x25A0, 0x25FF), // Geometric Shapes
-    (46, 0x2600, 0x26FF), // Miscellaneous Symbols
-    (47, 0x2700, 0x27BF), // Dingbats
-    (48, 0x3000, 0x303F), // CJK Symbols And Punctuation
-    (49, 0x3040, 0x309F), // Hiragana
-    (50, 0x30A0, 0x30FF), // Katakana
-    (51, 0x3100, 0x312F), // Bopomofo
-    (52, 0x3130, 0x318F), // Hangul Compatibility Jamo
-    (53, 0x3190, 0x319F), // Kanbun
-    (54, 0x31A0, 0x31BF), // Bopomofo Extended
-    (55, 0x31C0, 0x31EF), // CJK Strokes
-    (56, 0x31F0, 0x31FF), // Katakana Phonetic Extensions
-    (57, 0x3200, 0x32FF), // Enclosed CJK Letters And Months
-    (58, 0x3300, 0x33FF), // CJK Compatibility
-    (59, 0x4E00, 0x9FFF), // CJK Unified Ideographs
-    (60, 0xA000, 0xA48F), // Yi Syllables
-    (61, 0xA490, 0xA4CF), // Yi Radicals
-    (62, 0xAC00, 0xD7AF), // Hangul Syllables
-    (63, 0xD800, 0xDFFF), // Non-Plane 0 (note: surrogates, not directly usable)
-    // ulUnicodeRange3 (bits 64-95)
-    (64, 0x10000, 0x10FFFF), // Phoenician and other non-BMP (bit 64 indicates non-BMP support)
-    (65, 0xF900, 0xFAFF), // CJK Compatibility Ideographs
-    (66, 0xFB00, 0xFB4F), // Alphabetic Presentation Forms
-    (67, 0xFB50, 0xFDFF), // Arabic Presentation Forms-A
-    (68, 0xFE00, 0xFE0F), // Variation Selectors
-    (69, 0xFE10, 0xFE1F), // Vertical Forms
-    (70, 0xFE20, 0xFE2F), // Combining Half Marks
-    (71, 0xFE30, 0xFE4F), // CJK Compatibility Forms
-    (72, 0xFE50, 0xFE6F), // Small Form Variants
-    (73, 0xFE70, 0xFEFF), // Arabic Presentation Forms-B
-    (74, 0xFF00, 0xFFEF), // Halfwidth And Fullwidth Forms
-    (75, 0xFFF0, 0xFFFF), // Specials
-    (76, 0x0F00, 0x0FFF), // Tibetan
-    (77, 0x0700, 0x074F), // Syriac
-    (78, 0x0780, 0x07BF), // Thaana
-    (79, 0x0D80, 0x0DFF), // Sinhala
-    (80, 0x1000, 0x109F), // Myanmar
-    (81, 0x1200, 0x137F), // Ethiopic
-    (82, 0x13A0, 0x13FF), // Cherokee
-    (83, 0x1400, 0x167F), // Unified Canadian Aboriginal Syllabics
-    (84, 0x1680, 0x169F), // Ogham
-    (85, 0x16A0, 0x16FF), // Runic
-    (86, 0x1780, 0x17FF), // Khmer
-    (87, 0x1800, 0x18AF), // Mongolian
-    (88, 0x2800, 0x28FF), // Braille Patterns
-    (89, 0xA000, 0xA48F), // Yi Syllables
-    (90, 0x1680, 0x169F), // Ogham
-    (91, 0x16A0, 0x16FF), // Runic
-    (92, 0x1700, 0x171F), // Tagalog
-    (93, 0x1720, 0x173F), // Hanunoo
-    (94, 0x1740, 0x175F), // Buhid
-    (95, 0x1760, 0x177F), // Tagbanwa
-    // ulUnicodeRange4 (bits 96-127)
-    (96, 0x1900, 0x194F), // Limbu
-    (97, 0x1950, 0x197F), // Tai Le
-    (98, 0x1980, 0x19DF), // New Tai Lue
-    (99, 0x1A00, 0x1A1F), // Buginese
-    (100, 0x2C00, 0x2C5F), // Glagolitic
-    (101, 0x2D30, 0x2D7F), // Tifinagh
-    (102, 0x4DC0, 0x4DFF), // Yijing Hexagram Symbols
-    (103, 0xA800, 0xA82F), // Syloti Nagri
-    (104, 0x10000, 0x1007F), // Linear B Syllabary
-    (105, 0x10080, 0x100FF), // Linear B Ideograms
-    (106, 0x10100, 0x1013F), // Aegean Numbers
-    (107, 0x10140, 0x1018F), // Ancient Greek Numbers
-    (108, 0x10300, 0x1032F), // Old Italic
-    (109, 0x10330, 0x1034F), // Gothic
-    (110, 0x10380, 0x1039F), // Ugaritic
-    (111, 0x103A0, 0x103DF), // Old Persian
-    (112, 0x10400, 0x1044F), // Deseret
-    (113, 0x10450, 0x1047F), // Shavian
-    (114, 0x10480, 0x104AF), // Osmanya
-    (115, 0x10800, 0x1083F), // Cypriot Syllabary
-    (116, 0x10A00, 0x10A5F), // Kharoshthi
-    (117, 0x1D000, 0x1D0FF), // Byzantine Musical Symbols
-    (118, 0x1D100, 0x1D1FF), // Musical Symbols
-    (119, 0x1D200, 0x1D24F), // Ancient Greek Musical Notation
-    (120, 0x1D300, 0x1D35F), // Tai Xuan Jing Symbols
-    (121, 0x1D400, 0x1D7FF), // Mathematical Alphanumeric Symbols
-    (122, 0x1F000, 0x1F02F), // Mahjong Tiles
-    (123, 0x1F030, 0x1F09F), // Domino Tiles
-    (124, 0x1F300, 0x1F9FF), // Miscellaneous Symbols And Pictographs (Emoji)
-    (125, 0x1F680, 0x1F6FF), // Transport And Map Symbols
-    (126, 0x1F700, 0x1F77F), // Alchemical Symbols
-    (127, 0x1F900, 0x1F9FF), // Supplemental Symbols and Pictographs
-];
 
 /// Intermediate parsed data from a single font face within a font file.
 /// Used to share parsing logic between `FcParseFont` and `FcParseFontBytesInner`.
@@ -3311,58 +3181,9 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
             .as_ref()
             .map_or(FcStretch::Normal, |os2| FcStretch::from_u16(os2.us_width_class));
 
-        // Extract unicode ranges from OS/2 table (fast, but may be inaccurate)
-        // These are hints about what the font *should* support
-        // For actual glyph coverage verification, query the font file directly
-        let mut unicode_ranges = Vec::new();
-
-        // Process the 4 Unicode range bitfields from OS/2 table. All-zero when
-        // there is no OS/2 table, which claims nothing and leaves the cmap union
-        // below to supply the whole coverage set.
-        let os2_ranges = os2_table.as_ref().map_or([0u32; 4], |os2| {
-            [
-                os2.ul_unicode_range1,
-                os2.ul_unicode_range2,
-                os2.ul_unicode_range3,
-                os2.ul_unicode_range4,
-            ]
-        });
-
-        for &(bit, start, end) in UNICODE_RANGE_MAPPINGS {
-            let range_idx = bit / 32;
-            let bit_pos = bit % 32;
-            if range_idx < 4 && (os2_ranges[range_idx] & (1 << bit_pos)) != 0 {
-                unicode_ranges.push(UnicodeRange { start, end });
-            }
-        }
-
-        // OS/2's ulUnicodeRange bits are a HINT, never an upper bound.
-        //
-        // Fonts get these bits wrong in BOTH directions. Over-claiming is the
-        // well-known one: a font advertises a block it has no glyphs for, so
-        // verify against the cmap and drop what it cannot actually draw.
-        //
-        // Under-claiming is the one that used to be invisible here. Noto Sans
-        // CJK's JP face has Hangul glyphs in its cmap but leaves the Hangul bits
-        // clear; gating coverage on OS/2 made those codepoints permanently
-        // unmatchable, so 한국어 resolved to no font at all even with the covering
-        // face installed. fontconfig does not have this failure mode because it
-        // builds FcCharSet by walking the cmap itself and never consults
-        // ulUnicodeRange for coverage.
-        //
-        // So: prune what OS/2 over-claims, then union in everything the cmap
-        // actually covers. Coverage becomes cmap-authoritative, and OS/2 is
-        // reduced to a hint that can only ever lose an argument with the cmap.
-        unicode_ranges = verify_unicode_ranges_with_cmap(&provider, unicode_ranges);
-
-        if let Some(cmap_ranges) = analyze_cmap_coverage(&provider) {
-            unicode_ranges.extend(cmap_ranges);
-        }
-
-        // The two sources use different block boundaries, so the union overlaps.
-        // `calculate_unicode_coverage` sums range widths to rank fallbacks —
-        // leaving overlaps in would double-count and inflate this font's score.
-        unicode_ranges = FcFontCache::normalize_unicode_ranges(unicode_ranges);
+        // Coverage comes from the cmap and nothing else: every codepoint the
+        // face maps to a real glyph, exactly. See `cmap_coverage`.
+        let unicode_ranges = cmap_coverage(&provider).unwrap_or_default();
 
         // Use the shared detect_monospace helper for PANOSE + hmtx fallback
         let is_monospace = detect_monospace(&provider, os2_table.as_ref(), detected_monospace)
@@ -3630,25 +3451,20 @@ pub fn FcParseFontFaceFast(
 
     let mut covered: alloc::collections::BTreeSet<char> =
         alloc::collections::BTreeSet::new();
-    let mut covered_ranges: Vec<UnicodeRange> = Vec::new();
     for ch in codepoints {
-        let cp = *ch as u32;
-        if let Ok(Some(gid)) = cmap_subtable.map_glyph(cp) {
-            if gid != 0 {
-                covered.insert(*ch);
-                // Accumulate into ranges for the FcPattern. Merge
-                // adjacent codepoints so `unicode_ranges` stays
-                // compact (common case on Western text: one range).
-                if let Some(last) = covered_ranges.last_mut() {
-                    if cp == last.end + 1 {
-                        last.end = cp;
-                        continue;
-                    }
-                }
-                covered_ranges.push(UnicodeRange { start: cp, end: cp });
-            }
+        if matches!(cmap_subtable.map_glyph(*ch as u32), Ok(Some(gid)) if gid != 0) {
+            covered.insert(*ch);
         }
     }
+    // The face's full coverage from the subtable's segments — the same exact
+    // set the scan path stores — so a fast-probed face is not left claiming
+    // only the characters that happened to be asked for so far.
+    let covered_ranges = coverage_from_subtable(
+        &cmap_subtable,
+        &cmap_data,
+        encoding_record.offset as usize,
+    )
+    .unwrap_or_default();
 
     let weight = if is_bold {
         FcWeight::Bold
@@ -3935,105 +3751,6 @@ fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
         .map(|name| String::from_utf8_lossy(name.to_bytes()).to_string())
 }
 
-/// Representative test codepoints for each Unicode block.
-/// These are carefully chosen to be actual script characters (not punctuation/symbols)
-/// that a font claiming to support this script should definitely have.
-#[cfg(all(feature = "std", feature = "parsing"))]
-fn get_verification_codepoints(start: u32, end: u32) -> Vec<u32> {
-    match start {
-        // Basic Latin - test uppercase, lowercase, and digits
-        0x0000 => vec!['A' as u32, 'M' as u32, 'Z' as u32, 'a' as u32, 'm' as u32, 'z' as u32],
-        // Latin-1 Supplement - common accented letters
-        0x0080 => vec![0x00C0, 0x00C9, 0x00D1, 0x00E0, 0x00E9, 0x00F1], // À É Ñ à é ñ
-        // Latin Extended-A
-        0x0100 => vec![0x0100, 0x0110, 0x0141, 0x0152, 0x0160], // Ā Đ Ł Œ Š
-        // Latin Extended-B
-        0x0180 => vec![0x0180, 0x01A0, 0x01B0, 0x01CD], // ƀ Ơ ư Ǎ
-        // IPA Extensions
-        0x0250 => vec![0x0250, 0x0259, 0x026A, 0x0279], // ɐ ə ɪ ɹ
-        // Greek and Coptic
-        0x0370 => vec![0x0391, 0x0392, 0x0393, 0x03B1, 0x03B2, 0x03C9], // Α Β Γ α β ω
-        // Cyrillic
-        0x0400 => vec![0x0410, 0x0411, 0x0412, 0x0430, 0x0431, 0x042F], // А Б В а б Я
-        // Armenian
-        0x0530 => vec![0x0531, 0x0532, 0x0533, 0x0561, 0x0562], // Ա Բ Գ ա բ
-        // Hebrew
-        0x0590 => vec![0x05D0, 0x05D1, 0x05D2, 0x05E9, 0x05EA], // א ב ג ש ת
-        // Arabic
-        0x0600 => vec![0x0627, 0x0628, 0x062A, 0x062C, 0x0645], // ا ب ت ج م
-        // Syriac
-        0x0700 => vec![0x0710, 0x0712, 0x0713, 0x0715], // ܐ ܒ ܓ ܕ
-        // Devanagari
-        0x0900 => vec![0x0905, 0x0906, 0x0915, 0x0916, 0x0939], // अ आ क ख ह
-        // Bengali
-        0x0980 => vec![0x0985, 0x0986, 0x0995, 0x0996], // অ আ ক খ
-        // Gurmukhi
-        0x0A00 => vec![0x0A05, 0x0A06, 0x0A15, 0x0A16], // ਅ ਆ ਕ ਖ
-        // Gujarati
-        0x0A80 => vec![0x0A85, 0x0A86, 0x0A95, 0x0A96], // અ આ ક ખ
-        // Oriya
-        0x0B00 => vec![0x0B05, 0x0B06, 0x0B15, 0x0B16], // ଅ ଆ କ ଖ
-        // Tamil
-        0x0B80 => vec![0x0B85, 0x0B86, 0x0B95, 0x0BA4], // அ ஆ க த
-        // Telugu
-        0x0C00 => vec![0x0C05, 0x0C06, 0x0C15, 0x0C16], // అ ఆ క ఖ
-        // Kannada
-        0x0C80 => vec![0x0C85, 0x0C86, 0x0C95, 0x0C96], // ಅ ಆ ಕ ಖ
-        // Malayalam
-        0x0D00 => vec![0x0D05, 0x0D06, 0x0D15, 0x0D16], // അ ആ ക ഖ
-        // Thai
-        0x0E00 => vec![0x0E01, 0x0E02, 0x0E04, 0x0E07, 0x0E40], // ก ข ค ง เ
-        // Lao
-        0x0E80 => vec![0x0E81, 0x0E82, 0x0E84, 0x0E87], // ກ ຂ ຄ ງ
-        // Myanmar
-        0x1000 => vec![0x1000, 0x1001, 0x1002, 0x1010, 0x1019], // က ခ ဂ တ မ
-        // Georgian
-        0x10A0 => vec![0x10D0, 0x10D1, 0x10D2, 0x10D3], // ა ბ გ დ
-        // Hangul Jamo
-        0x1100 => vec![0x1100, 0x1102, 0x1103, 0x1161, 0x1162], // ᄀ ᄂ ᄃ ᅡ ᅢ
-        // Ethiopic
-        0x1200 => vec![0x1200, 0x1208, 0x1210, 0x1218], // ሀ ለ ሐ መ
-        // Cherokee
-        0x13A0 => vec![0x13A0, 0x13A1, 0x13A2, 0x13A3], // Ꭰ Ꭱ Ꭲ Ꭳ
-        // Khmer
-        0x1780 => vec![0x1780, 0x1781, 0x1782, 0x1783], // ក ខ គ ឃ
-        // Mongolian
-        0x1800 => vec![0x1820, 0x1821, 0x1822, 0x1823], // ᠠ ᠡ ᠢ ᠣ
-        // Hiragana
-        0x3040 => vec![0x3042, 0x3044, 0x3046, 0x304B, 0x304D, 0x3093], // あ い う か き ん
-        // Katakana
-        0x30A0 => vec![0x30A2, 0x30A4, 0x30A6, 0x30AB, 0x30AD, 0x30F3], // ア イ ウ カ キ ン
-        // Bopomofo
-        0x3100 => vec![0x3105, 0x3106, 0x3107, 0x3108], // ㄅ ㄆ ㄇ ㄈ
-        // CJK Unified Ideographs - common characters
-        0x4E00 => vec![0x4E00, 0x4E2D, 0x4EBA, 0x5927, 0x65E5, 0x6708], // 一 中 人 大 日 月
-        // Hangul Syllables
-        0xAC00 => vec![0xAC00, 0xAC01, 0xAC04, 0xB098, 0xB2E4], // 가 각 간 나 다
-        // CJK Compatibility Ideographs
-        0xF900 => vec![0xF900, 0xF901, 0xF902], // 豈 更 車
-        // Arabic Presentation Forms-A
-        0xFB50 => vec![0xFB50, 0xFB51, 0xFB52, 0xFB56], // ﭐ ﭑ ﭒ ﭖ
-        // Arabic Presentation Forms-B
-        0xFE70 => vec![0xFE70, 0xFE72, 0xFE74, 0xFE76], // ﹰ ﹲ ﹴ ﹶ
-        // Halfwidth and Fullwidth Forms
-        0xFF00 => vec![0xFF01, 0xFF21, 0xFF41, 0xFF61], // ！ Ａ ａ ｡
-        // Default: sample at regular intervals
-        _ => {
-            let range_size = end - start;
-            if range_size > 20 {
-                vec![
-                    start + range_size / 5,
-                    start + 2 * range_size / 5,
-                    start + 3 * range_size / 5,
-                    start + 4 * range_size / 5,
-                ]
-            } else {
-                vec![start, start + range_size / 2]
-            }
-        }
-    }
-}
-
 /// Find the best Unicode CMAP subtable from a font provider.
 /// Tries multiple platform/encoding combinations in priority order.
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -4050,206 +3767,165 @@ fn find_best_cmap_subtable<'a>(
         .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(1)))
 }
 
-/// Verify OS/2 reported Unicode ranges against actual CMAP support.
-/// Returns only ranges that are actually supported by the font's CMAP table.
+/// Exact coverage of a font face: every codepoint its best Unicode cmap
+/// subtable maps to a real glyph, as a normalized (sorted, disjoint) range
+/// list. This is the same source fontconfig builds its `FcCharSet` from.
+/// OS/2's `ulUnicodeRange` bits are not consulted: fonts get them wrong in
+/// both directions, and a block-level hint cannot say which characters of a
+/// block are missing.
+///
+/// Cost is proportional to the subtable's segment count (format 4) or group
+/// count (format 12) — hundreds to a few thousand entries — with no
+/// per-codepoint lookups except inside format-4 segments that index the
+/// glyphIdArray, which can contain holes.
 #[cfg(all(feature = "std", feature = "parsing"))]
-fn verify_unicode_ranges_with_cmap(
-    provider: &impl FontTableProvider,
-    os2_ranges: Vec<UnicodeRange>
-) -> Vec<UnicodeRange> {
+fn cmap_coverage(provider: &impl FontTableProvider) -> Option<Vec<UnicodeRange>> {
+    use allsorts::binary::read::ReadScope;
     use allsorts::tables::cmap::{Cmap, CmapSubtable};
 
-    if os2_ranges.is_empty() {
-        return Vec::new();
-    }
-
-    // Try to get CMAP subtable
-    let cmap_data = match provider.table_data(tag::CMAP) {
-        Ok(Some(data)) => data,
-        _ => return os2_ranges, // Can't verify, trust OS/2
-    };
-
-    let cmap = match ReadScope::new(&cmap_data).read::<Cmap<'_>>() {
-        Ok(c) => c,
-        Err(_) => return os2_ranges,
-    };
-
-    let encoding_record = match find_best_cmap_subtable(&cmap) {
-        Some(r) => r,
-        None => return os2_ranges, // No suitable subtable, trust OS/2
-    };
-
-    let cmap_subtable = match ReadScope::new(&cmap_data)
-        .offset(encoding_record.offset as usize)
+    let cmap_data = provider.table_data(tag::CMAP).ok()??;
+    let cmap = ReadScope::new(&cmap_data).read::<Cmap<'_>>().ok()?;
+    let record = find_best_cmap_subtable(&cmap)?;
+    let subtable = ReadScope::new(&cmap_data)
+        .offset(record.offset as usize)
         .read::<CmapSubtable<'_>>()
-    {
-        Ok(st) => st,
-        Err(_) => return os2_ranges,
+        .ok()?;
+    coverage_from_subtable(&subtable, &cmap_data, record.offset as usize)
+}
+
+/// See [`cmap_coverage`]. `cmap_data` and `offset` locate the raw subtable,
+/// needed for format 12 whose groups allsorts does not expose.
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn coverage_from_subtable(
+    subtable: &allsorts::tables::cmap::CmapSubtable<'_>,
+    cmap_data: &[u8],
+    offset: usize,
+) -> Option<Vec<UnicodeRange>> {
+    use allsorts::tables::cmap::CmapSubtable;
+
+    let mut ranges: Vec<UnicodeRange> = Vec::new();
+    let mut push = |start: u32, end: u32| {
+        if start > end {
+            return;
+        }
+        match ranges.last_mut() {
+            Some(last) if start <= last.end.saturating_add(1) => last.end = last.end.max(end),
+            _ => ranges.push(UnicodeRange { start, end }),
+        }
     };
 
-    // Verify each range
-    let mut verified_ranges = Vec::new();
-
-    for range in os2_ranges {
-        let test_codepoints = get_verification_codepoints(range.start, range.end);
-
-        // Require at least 50% of test codepoints to have valid glyphs
-        // This is stricter than before to avoid false positives
-        let required_hits = (test_codepoints.len() + 1) / 2; // ceil(len/2)
-        let mut hits = 0;
-
-        for cp in test_codepoints {
-            if cp >= range.start && cp <= range.end {
-                if let Ok(Some(gid)) = cmap_subtable.map_glyph(cp) {
-                    if gid != 0 {
-                        hits += 1;
-                        if hits >= required_hits {
-                            break;
+    match subtable {
+        CmapSubtable::Format4(f4) => {
+            let segments = f4
+                .start_codes
+                .iter()
+                .zip(f4.end_codes.iter())
+                .zip(f4.id_deltas.iter())
+                .zip(f4.id_range_offsets.iter());
+            for (((start, end), delta), range_offset) in segments {
+                if start == 0xFFFF {
+                    continue; // the mandatory terminal segment
+                }
+                let (start, end) = (start as u32, end as u32);
+                if range_offset == 0 {
+                    // gid = code + delta (mod 2^16): exactly one code of the
+                    // segment can land on glyph 0.
+                    let zero_code = (delta as u16).wrapping_neg() as u32;
+                    if zero_code >= start && zero_code <= end {
+                        if zero_code > start {
+                            push(start, zero_code - 1);
+                        }
+                        if zero_code < end {
+                            push(zero_code + 1, end);
+                        }
+                    } else {
+                        push(start, end);
+                    }
+                } else {
+                    // glyphIdArray-indexed segment: the array can hold zeros,
+                    // so look each code up. These segments are few and small.
+                    for code in start..=end {
+                        if matches!(subtable.map_glyph(code), Ok(Some(gid)) if gid != 0) {
+                            push(code, code);
                         }
                     }
                 }
             }
         }
-
-        if hits >= required_hits {
-            verified_ranges.push(range);
+        CmapSubtable::Format12 { .. } => {
+            for (start, end, start_gid) in format12_groups(cmap_data, offset)? {
+                // gid = start_gid + (code - start): only the first code of a
+                // group that starts at glyph 0 maps to .notdef.
+                let first = if start_gid == 0 { start.saturating_add(1) } else { start };
+                push(first, end.min(0x10FFFF));
+            }
         }
-    }
-
-    verified_ranges
-}
-
-/// Analyze CMAP table to discover font coverage when OS/2 provides no info.
-/// This is the fallback when OS/2 ulUnicodeRange bits are all zero.
-#[cfg(all(feature = "std", feature = "parsing"))]
-fn analyze_cmap_coverage(provider: &impl FontTableProvider) -> Option<Vec<UnicodeRange>> {
-    use allsorts::tables::cmap::{Cmap, CmapSubtable};
-
-    let cmap_data = provider.table_data(tag::CMAP).ok()??;
-    let cmap = ReadScope::new(&cmap_data).read::<Cmap<'_>>().ok()?;
-
-    let encoding_record = find_best_cmap_subtable(&cmap)?;
-
-    let cmap_subtable = ReadScope::new(&cmap_data)
-        .offset(encoding_record.offset as usize)
-        .read::<CmapSubtable<'_>>()
-        .ok()?;
-
-    // Standard Unicode blocks to probe
-    let blocks_to_check: &[(u32, u32)] = &[
-        (0x0000, 0x007F), // Basic Latin
-        (0x0080, 0x00FF), // Latin-1 Supplement
-        (0x0100, 0x017F), // Latin Extended-A
-        (0x0180, 0x024F), // Latin Extended-B
-        (0x0250, 0x02AF), // IPA Extensions
-        (0x0300, 0x036F), // Combining Diacritical Marks
-        (0x0370, 0x03FF), // Greek and Coptic
-        (0x0400, 0x04FF), // Cyrillic
-        (0x0500, 0x052F), // Cyrillic Supplement
-        (0x0530, 0x058F), // Armenian
-        (0x0590, 0x05FF), // Hebrew
-        (0x0600, 0x06FF), // Arabic
-        (0x0700, 0x074F), // Syriac
-        (0x0900, 0x097F), // Devanagari
-        (0x0980, 0x09FF), // Bengali
-        (0x0A00, 0x0A7F), // Gurmukhi
-        (0x0A80, 0x0AFF), // Gujarati
-        (0x0B00, 0x0B7F), // Oriya
-        (0x0B80, 0x0BFF), // Tamil
-        (0x0C00, 0x0C7F), // Telugu
-        (0x0C80, 0x0CFF), // Kannada
-        (0x0D00, 0x0D7F), // Malayalam
-        (0x0E00, 0x0E7F), // Thai
-        (0x0E80, 0x0EFF), // Lao
-        (0x1000, 0x109F), // Myanmar
-        (0x10A0, 0x10FF), // Georgian
-        (0x1100, 0x11FF), // Hangul Jamo
-        (0x1200, 0x137F), // Ethiopic
-        (0x13A0, 0x13FF), // Cherokee
-        (0x1780, 0x17FF), // Khmer
-        (0x1800, 0x18AF), // Mongolian
-        (0x2000, 0x206F), // General Punctuation
-        (0x20A0, 0x20CF), // Currency Symbols
-        (0x2100, 0x214F), // Letterlike Symbols
-        (0x2190, 0x21FF), // Arrows
-        (0x2200, 0x22FF), // Mathematical Operators
-        (0x2500, 0x257F), // Box Drawing
-        (0x25A0, 0x25FF), // Geometric Shapes
-        (0x2600, 0x26FF), // Miscellaneous Symbols
-        (0x3000, 0x303F), // CJK Symbols and Punctuation
-        (0x3040, 0x309F), // Hiragana
-        (0x30A0, 0x30FF), // Katakana
-        (0x3100, 0x312F), // Bopomofo
-        (0x3130, 0x318F), // Hangul Compatibility Jamo
-        (0x4E00, 0x9FFF), // CJK Unified Ideographs
-        (0xAC00, 0xD7AF), // Hangul Syllables
-        (0xF900, 0xFAFF), // CJK Compatibility Ideographs
-        (0xFB50, 0xFDFF), // Arabic Presentation Forms-A
-        (0xFE70, 0xFEFF), // Arabic Presentation Forms-B
-        (0xFF00, 0xFFEF), // Halfwidth and Fullwidth Forms
-    ];
-
-    let mut ranges = Vec::new();
-
-    for &(start, end) in blocks_to_check {
-        let test_codepoints = get_verification_codepoints(start, end);
-        let required_hits = (test_codepoints.len() + 1) / 2;
-        // Blocks the font does NOT have are the common case: a Latin face covers a
-        // handful of the ~50 probed here. Stop as soon as the remaining probes
-        // cannot reach `required_hits` rather than testing every codepoint to
-        // confirm a foregone conclusion. Same verdict, fewer cmap lookups.
-        let allowed_misses = test_codepoints.len() - required_hits;
-        let mut hits = 0;
-        let mut misses = 0;
-
-        for cp in test_codepoints {
-            if matches!(cmap_subtable.map_glyph(cp), Ok(Some(gid)) if gid != 0) {
-                hits += 1;
-                if hits >= required_hits {
-                    break;
-                }
-            } else {
-                misses += 1;
-                if misses > allowed_misses {
-                    break;
+        CmapSubtable::Format0 { glyph_id_array, .. } => {
+            for (code, gid) in glyph_id_array.iter().enumerate() {
+                if gid != 0 {
+                    push(code as u32, code as u32);
                 }
             }
         }
-
-        if hits >= required_hits {
-            ranges.push(UnicodeRange { start, end });
+        CmapSubtable::Format6 { first_code, glyph_id_array, .. } => {
+            for (i, gid) in glyph_id_array.iter().enumerate() {
+                if gid != 0 {
+                    let code = *first_code as u32 + i as u32;
+                    push(code, code);
+                }
+            }
+        }
+        CmapSubtable::Format10 { start_char_code, glyph_id_array, .. } => {
+            for (i, gid) in glyph_id_array.iter().enumerate() {
+                if gid != 0 {
+                    let code = *start_char_code + i as u32;
+                    push(code, code);
+                }
+            }
+        }
+        CmapSubtable::Format2 { .. } => {
+            // Legacy mixed 8/16-bit CJK encodings — never a Unicode subtable,
+            // but if it is all the font has, enumerate it.
+            let mut codes: Vec<u32> = Vec::new();
+            subtable
+                .mappings_fn(|code, gid| {
+                    if gid != 0 {
+                        codes.push(code);
+                    }
+                })
+                .ok()?;
+            codes.sort_unstable();
+            for code in codes {
+                push(code, code);
+            }
         }
     }
 
     if ranges.is_empty() {
         None
     } else {
-        Some(ranges)
+        Some(FcFontCache::normalize_unicode_ranges(ranges))
     }
 }
 
-// Helper function to extract unicode ranges (unused, kept for reference)
+/// The `(startCharCode, endCharCode, startGlyphID)` groups of the format-12
+/// subtable at `offset` in the raw cmap table. Layout: format u16, reserved
+/// u16, length u32, language u32, numGroups u32, then the groups.
 #[cfg(all(feature = "std", feature = "parsing"))]
-#[allow(dead_code)]
-fn extract_unicode_ranges(os2_table: &Os2) -> Vec<UnicodeRange> {
-    let mut unicode_ranges = Vec::new();
-
-    let ranges = [
-        os2_table.ul_unicode_range1,
-        os2_table.ul_unicode_range2,
-        os2_table.ul_unicode_range3,
-        os2_table.ul_unicode_range4,
-    ];
-
-    for &(bit, start, end) in UNICODE_RANGE_MAPPINGS {
-        let range_idx = bit / 32;
-        let bit_pos = bit % 32;
-        if range_idx < 4 && (ranges[range_idx] & (1 << bit_pos)) != 0 {
-            unicode_ranges.push(UnicodeRange { start, end });
-        }
+fn format12_groups(cmap_data: &[u8], offset: usize) -> Option<Vec<(u32, u32, u32)>> {
+    let table = cmap_data.get(offset..)?;
+    let u16_at = |at: usize| table.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let u32_at = |at: usize| table.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    if u16_at(0)? != 12 {
+        return None;
     }
-
-    unicode_ranges
+    let num_groups = u32_at(12)? as usize;
+    let mut groups = Vec::with_capacity(num_groups.min(1 << 16));
+    for i in 0..num_groups {
+        let at = 16 + i * 12;
+        groups.push((u32_at(at)?, u32_at(at + 4)?, u32_at(at + 8)?));
+    }
+    Some(groups)
 }
 
 // Helper function to detect if a font is monospace
@@ -4442,3 +4118,216 @@ mod system_alias_tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "std", feature = "parsing"))]
+mod coverage_tests {
+    use super::*;
+    use allsorts::binary::read::ReadScope;
+    use allsorts::font_data::FontData;
+    use allsorts::tables::cmap::{Cmap, CmapSubtable};
+    use allsorts::tables::FontTableProvider;
+
+    const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/InstrumentSerif-Regular.ttf");
+
+    /// Every codepoint up to `max` the face's best subtable maps to a real
+    /// glyph, found the slow way: one `map_glyph` per codepoint.
+    fn brute_force(bytes: &[u8], face: usize, max: u32) -> Vec<UnicodeRange> {
+        let font = ReadScope::new(bytes).read::<FontData<'_>>().expect("font data");
+        let provider = font.table_provider(face).expect("face");
+        let cmap_data = provider.table_data(tag::CMAP).expect("cmap").expect("cmap present");
+        let cmap = ReadScope::new(&cmap_data).read::<Cmap<'_>>().expect("cmap header");
+        let record = find_best_cmap_subtable(&cmap).expect("a Unicode subtable");
+        let subtable = ReadScope::new(&cmap_data)
+            .offset(record.offset as usize)
+            .read::<CmapSubtable<'_>>()
+            .expect("subtable");
+        // allsorts' format-12 `map_glyph` is a linear scan over the groups,
+        // so enumerate those subtables once instead of probing per codepoint.
+        let mut codes: Vec<u32> = Vec::new();
+        if matches!(subtable, CmapSubtable::Format12 { .. }) {
+            subtable
+                .mappings_fn(|cp, gid| {
+                    if gid != 0 && cp <= max {
+                        codes.push(cp);
+                    }
+                })
+                .expect("format-12 mappings");
+            codes.sort_unstable();
+            codes.dedup();
+        } else {
+            for cp in 0..=max {
+                if (0xD800..=0xDFFF).contains(&cp) {
+                    continue;
+                }
+                if matches!(subtable.map_glyph(cp), Ok(Some(gid)) if gid != 0) {
+                    codes.push(cp);
+                }
+            }
+        }
+        let mut out: Vec<UnicodeRange> = Vec::new();
+        for cp in codes {
+            match out.last_mut() {
+                Some(last) if last.end + 1 == cp => last.end = cp,
+                _ => out.push(UnicodeRange { start: cp, end: cp }),
+            }
+        }
+        out
+    }
+
+    fn clipped(ranges: &[UnicodeRange], max: u32) -> Vec<UnicodeRange> {
+        ranges
+            .iter()
+            .filter(|r| r.start <= max)
+            .map(|r| UnicodeRange { start: r.start, end: r.end.min(max) })
+            .collect()
+    }
+
+    #[test]
+    fn format12_groups_are_read_from_the_raw_table() {
+        let mut table = Vec::new();
+        table.extend_from_slice(&12u16.to_be_bytes()); // format
+        table.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        table.extend_from_slice(&(16u32 + 2 * 12).to_be_bytes()); // length
+        table.extend_from_slice(&0u32.to_be_bytes()); // language
+        table.extend_from_slice(&2u32.to_be_bytes()); // numGroups
+        for (start, end, gid) in [(0x20u32, 0x7Eu32, 3u32), (0x1F600, 0x1F64F, 200)] {
+            table.extend_from_slice(&start.to_be_bytes());
+            table.extend_from_slice(&end.to_be_bytes());
+            table.extend_from_slice(&gid.to_be_bytes());
+        }
+        // Embedded at an offset, as inside a real cmap table.
+        let mut cmap = vec![0u8; 40];
+        cmap.extend_from_slice(&table);
+
+        assert_eq!(
+            format12_groups(&cmap, 40),
+            Some(vec![(0x20, 0x7E, 3), (0x1F600, 0x1F64F, 200)])
+        );
+        assert_eq!(format12_groups(&cmap, 0), None, "offset 0 is not a format-12 subtable");
+        assert_eq!(format12_groups(&cmap[..50], 40), None, "a truncated table is rejected");
+    }
+
+    /// The parsed coverage of the bundled fixture is exactly the set of
+    /// codepoints its cmap maps — no block rounding in either direction.
+    #[test]
+    fn fixture_coverage_equals_the_cmap_exactly() {
+        let faces = FcParseFontBytes(FIXTURE, "fixture").expect("the fixture parses");
+        let parsed = &faces[0].0.unicode_ranges;
+        assert!(!parsed.is_empty());
+        assert_eq!(
+            *parsed,
+            FcFontCache::normalize_unicode_ranges(parsed.clone()),
+            "stored coverage is normalized"
+        );
+
+        let exact = brute_force(FIXTURE, 0, 0x10FFFF);
+        assert_eq!(*parsed, exact, "segment walk and per-codepoint lookup disagree");
+
+        // Sanity on the shape: a Latin text face, not a block-rounded one.
+        assert!(crate::fallback::covers(parsed, 'A' as u32));
+        assert!(!crate::fallback::covers(parsed, 0x4E00));
+        let latin_ext_a = UnicodeRange { start: 0x0100, end: 0x017F };
+        let overlap = crate::fallback::overlap_size(parsed, &latin_ext_a);
+        assert!(
+            overlap > 0 && overlap < 128,
+            "the fixture covers part of Latin Extended-A ({overlap} of 128); a block-rounded \
+             coverage would report all or nothing"
+        );
+    }
+
+    fn with_best_subtable<R>(
+        bytes: &[u8],
+        face: usize,
+        f: impl FnOnce(&CmapSubtable<'_>, &[u8], usize) -> R,
+    ) -> Option<R> {
+        let font = ReadScope::new(bytes).read::<FontData<'_>>().ok()?;
+        let provider = font.table_provider(face).ok()?;
+        let cmap_data = provider.table_data(tag::CMAP).ok()??;
+        let cmap = ReadScope::new(&cmap_data).read::<Cmap<'_>>().ok()?;
+        let record = find_best_cmap_subtable(&cmap)?;
+        let subtable = ReadScope::new(&cmap_data)
+            .offset(record.offset as usize)
+            .read::<CmapSubtable<'_>>()
+            .ok()?;
+        Some(f(&subtable, &cmap_data, record.offset as usize))
+    }
+
+    /// Every installed face: each parsed range starts and ends on a mapped
+    /// codepoint and the codepoints just outside it are unmapped. O(ranges)
+    /// per face, so a whole system takes seconds; the fixture test above is
+    /// the full codepoint-by-codepoint reference. Run on demand:
+    /// `cargo test --features parsing --lib every_installed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn every_installed_font_coverage_matches_its_cmap_at_every_boundary() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if crate::utils::is_font_file(&path) {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        for dir in crate::config::font_directories(OperatingSystem::current()) {
+            walk(&dir, &mut files);
+        }
+        // A bounded sample keeps this to seconds on machines with thousands
+        // of downloadable fonts (macOS AssetsV2); set RFC_COVERAGE_CHECK_ALL
+        // to check every file.
+        if std::env::var_os("RFC_COVERAGE_CHECK_ALL").is_none() {
+            files.truncate(400);
+        }
+        let surrogate = |cp: u32| (0xD800..=0xDFFF).contains(&cp);
+        let (mut faces_checked, mut skipped) = (0usize, 0usize);
+        for path in &files {
+            let Ok(bytes) = std::fs::read(path) else { continue };
+            let Some(faces) = FcParseFontBytes(&bytes, &path.to_string_lossy()) else {
+                skipped += 1;
+                continue;
+            };
+            let mut seen_faces = alloc::collections::BTreeSet::new();
+            for (pattern, font) in &faces {
+                if !seen_faces.insert(font.font_index) {
+                    continue;
+                }
+                let where_ = format!("{}#{}", path.display(), font.font_index);
+                let checked = with_best_subtable(&bytes, font.font_index, |subtable, cmap_data, offset| {
+                    // allsorts' format-12 `map_glyph` scans the groups linearly;
+                    // a CJK face has thousands, so look those up by binary search.
+                    let groups = match subtable {
+                        CmapSubtable::Format12 { .. } => format12_groups(cmap_data, offset),
+                        _ => None,
+                    };
+                    let mapped = |cp: u32| match &groups {
+                        Some(groups) => {
+                            let i = groups.partition_point(|g| g.1 < cp);
+                            groups
+                                .get(i)
+                                .is_some_and(|&(start, end, gid)| start <= cp && cp <= end && (gid != 0 || cp != start))
+                        }
+                        None => matches!(subtable.map_glyph(cp), Ok(Some(gid)) if gid != 0),
+                    };
+                    for r in &pattern.unicode_ranges {
+                        assert!(mapped(r.start) && mapped(r.end), "{where_}: {r:?} does not end on mapped codepoints");
+                        if r.start > 0 && !surrogate(r.start - 1) {
+                            assert!(!mapped(r.start - 1), "{where_}: {r:?} starts late");
+                        }
+                        if r.end < 0x10FFFF && !surrogate(r.end + 1) {
+                            assert!(!mapped(r.end + 1), "{where_}: {r:?} ends early");
+                        }
+                    }
+                });
+                if checked.is_some() {
+                    faces_checked += 1;
+                }
+            }
+        }
+        println!("checked {faces_checked} faces in {} files ({skipped} unparsable)", files.len());
+        assert!(faces_checked > 0, "no fonts found to check");
+    }
+}
+
