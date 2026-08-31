@@ -1,54 +1,50 @@
-//! OS-specific font configuration: directories, common families, and font file constants.
+//! OS-specific font configuration.
 //!
-//! All hardcoded data is returned as `&'static` references to avoid allocation.
-//!
-//! The per-OS tables ([`system_font_dirs`], [`font_directories`],
-//! [`common_font_families`]) remain public for direct callers, but the
-//! async registry no longer reads them on its own: it consumes host
-//! knowledge exclusively through an injected [`FcScanConfig`], and
-//! [`FcScanConfig::os_defaults`] is the single place where these tables
-//! become registry behavior.
-
-use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-
-use std::path::{Path, PathBuf};
-
+//! Contains default font directories, generic CSS families, and fallback configuration.
+//! Hardcoded data is returned as `&'static` references to avoid allocation.
 use crate::FcFontCache;
 use crate::OperatingSystem;
 use crate::UnicodeRange;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use std::path::{Path, PathBuf};
 
-/// Generic CSS font family keywords (CSS Fonts Level 4 §2.1.1), as the
-/// author writes them. [`GenericFamily::from_css`] is the parser.
-pub const GENERIC_FAMILIES: &[&str] = &[
-    "serif",
-    "sans-serif",
-    "monospace",
-    "cursive",
-    "fantasy",
-    "system-ui",
-    "ui-serif",
-    "ui-sans-serif",
-    "ui-monospace",
-    "ui-rounded",
-    "emoji",
-    "math",
-    "fangsong",
+/// Generic CSS font family keywords (CSS Fonts Level 4).
+
+/// Style tokens to filter out when guessing family names from filenames.
+/// These are the weight/style/width suffixes commonly appended to font filenames
+/// (e.g. "ArialBold.ttf", "NotoSans-SemiBold.otf"). Used by the scout thread
+/// to extract the base family name from a filename.
+pub const FONT_STYLE_TOKENS: &[&str] = &[
+    "Regular",
+    "Bold",
+    "Italic",
+    "Light",
+    "Medium",
+    "Thin",
+    "Black",
+    "ExtraLight",
+    "ExtraBold",
+    "SemiBold",
+    "DemiBold",
+    "Heavy",
+    "Oblique",
+    "Condensed",
+    "Expanded",
+    // The tokenizer splits compound styles (e.g. "SemiBold" → "Semi" + "Bold"),
+    // so we need the modifier prefixes as standalone style tokens too.
+    "Extra",
+    "Semi",
+    "Demi",
 ];
 
-/// Check whether `family` is a generic CSS font family (case-insensitive,
-/// separators ignored).
+/// Check whether `family` is a generic CSS font family (case-insensitive).
 pub fn is_generic_family(family: &str) -> bool {
     GenericFamily::from_css(family).is_some()
 }
 
 /// A CSS generic font family.
-///
-/// Generic families are not fonts; they are requests the host answers. What
-/// stands behind each one is configuration ([`FcFallbackConfig`]), and
-/// [`GenericFamily::parent`] says which configuration a less common generic
-/// borrows when it has none of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GenericFamily {
     Serif,
@@ -84,9 +80,7 @@ impl GenericFamily {
         GenericFamily::Fangsong,
     ];
 
-    /// Parse a CSS keyword. Case-insensitive; separators are ignored, so
-    /// `"Sans-Serif"`, `"sans serif"` and the normalized `"sansserif"` all
-    /// parse. Anything else — a real family name — is `None`.
+    /// Parse a CSS keyword (case-insensitive, separators ignored).
     pub fn from_css(name: &str) -> Option<Self> {
         let key: String = name
             .chars()
@@ -131,7 +125,6 @@ impl GenericFamily {
     }
 
     /// The generic whose configuration stands in when this one has none.
-    /// The three root generics have no parent.
     pub fn parent(self) -> Option<Self> {
         match self {
             GenericFamily::Serif | GenericFamily::SansSerif | GenericFamily::Monospace => None,
@@ -158,52 +151,29 @@ impl GenericFamily {
     }
 }
 
-/// Preferred families for one script block, optionally only when a specific
-/// generic family was requested.
+/// Preferred families for a Unicode script block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FcScriptFallback {
     /// Characters this preference applies to.
     pub range: UnicodeRange,
-    /// `Some(g)`: only when the stack asked for `g` (or a generic that
-    /// borrows from `g`, see [`GenericFamily::parent`]). `None`: for every
-    /// stack, after any generic-specific preferences.
+    /// Generic family this preference applies to, if any.
     pub generic: Option<GenericFamily>,
     /// Family names, best first.
     pub families: Vec<String>,
 }
 
-/// Everything the chain builder knows about the host, injected.
-///
-/// Mirrors [`FcScanConfig`] for the resolution side: the crate does not
-/// decide which font stands behind `sans-serif` on a box, which font a
-/// Hiragana run should prefer, or what to draw when nothing covers a
-/// character. The embedder does, and this is how it says so.
-///
-/// * [`FcFontCache::default`] carries an empty configuration.
-/// * [`FcFontCache::build`] parses the platform configuration where there
-///   is one (Linux `fonts.conf` aliases) and fills the gaps from
-///   [`FcFallbackConfig::os_defaults`].
-/// * [`FcFontCache::set_fallback_config`] replaces it at any time.
-///
-/// Every family name is matched by normalized equality (case and separators
-/// ignored) against the installed fonts; names that are not installed are
-/// skipped, so listing candidates that may be absent is fine.
+/// Fallback configuration for font resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FcFallbackConfig {
-    /// Base candidates per generic family, best first. A generic without an
-    /// entry borrows its [`parent`](GenericFamily::parent)'s.
+    /// Base candidates per generic family, best first.
     pub generic_families: BTreeMap<GenericFamily, Vec<String>>,
-    /// Substitutions for named families that are not installed, keyed by
-    /// the normalized family name (`"arial"` → `["Liberation Sans"]`).
+    /// Substitutions for named families that are not installed.
     pub substitutions: BTreeMap<String, Vec<String>>,
     /// Per-script preferences, in priority order.
     pub script_fallbacks: Vec<FcScriptFallback>,
-    /// Families used for any character no other font in a chain covers,
-    /// **without** a coverage check: the font whose `.notdef` glyph the
-    /// embedder wants drawn. Empty means "report no font".
+    /// Last resort families used when no other font provides coverage.
     pub last_resort: Vec<String>,
-    /// The generic whose per-script preferences serve a stack that names no
-    /// generic at all (fontconfig appends `sans-serif` to such patterns).
+    /// Default generic family when a stack doesn't specify one.
     pub default_generic: GenericFamily,
 }
 
@@ -266,8 +236,7 @@ fn push_unique(out: &mut Vec<String>, name: &str) {
 }
 
 impl FcFallbackConfig {
-    /// No candidates, no substitutions, no preferences, no last resort. A
-    /// generic family then resolves to the best-styled registered font.
+    /// Returns an empty fallback configuration.
     pub fn empty() -> Self {
         Self {
             generic_families: BTreeMap::new(),
@@ -278,18 +247,14 @@ impl FcFallbackConfig {
         }
     }
 
-    /// The tables this crate used to hard-code, as an explicit opt-in: base
-    /// candidates for `serif`, `sans-serif` and `monospace`, and per-script
-    /// preferences for CJK, Arabic, Hebrew and Thai, per `os`.
+    /// Returns the default OS-specific fallback configuration.
     pub fn os_defaults(os: OperatingSystem) -> Self {
         use blocks::*;
-        use GenericFamily::{Monospace, SansSerif, Serif};
-
+        use GenericFamily::{Monospace, SansSerif, Serif, SystemUi};
         let mut config = Self::empty();
         let mut generic = |g: GenericFamily, list: &[&str]| {
             config.generic_families.insert(g, names(list));
         };
-
         match os {
             OperatingSystem::Windows => {
                 generic(Serif, &["Times New Roman"]);
@@ -351,19 +316,22 @@ impl FcFallbackConfig {
                 );
             }
             OperatingSystem::MacOS | OperatingSystem::IOS => {
-                generic(Serif, &["Times New Roman", "Times", "New York", "Palatino"]);
                 generic(
-                    SansSerif,
+                    SystemUi,
                     &[
                         "San Francisco",
+                        "SFNS",
+                        "SFNSDisplay",
+                        "SFNSText",
+                        "SFUI",
                         ".AppleSystemUIFont",
                         ".SFUIText",
                         ".SFUI-Regular",
-                        "Helvetica Neue",
-                        "Helvetica",
-                        "Lucida Grande",
+                        "System Font",
                     ],
                 );
+                generic(Serif, &["Times New Roman", "Times", "New York", "Palatino"]);
+                generic(SansSerif, &["Helvetica Neue", "Helvetica", "Lucida Grande"]);
                 generic(
                     Monospace,
                     &[
@@ -403,6 +371,7 @@ impl FcFallbackConfig {
                 families: names(list),
             });
         };
+
         // CJK: ideographs are shared by Chinese, Japanese and Korean, so
         // their list keeps the historical order; kana are Japanese and
         // Hangul is Korean, so those blocks put the matching font first.
@@ -419,7 +388,6 @@ impl FcFallbackConfig {
             }
             script(g, HANGUL_SYLLABLES, hangul);
         };
-
         match os {
             OperatingSystem::Windows => {
                 cjk(
@@ -628,10 +596,9 @@ impl FcFallbackConfig {
             .unwrap_or(&[])
     }
 
-    /// Preferred families for characters in `block`: entries for `generic`
-    /// (and the generics it borrows from) first, then generic-agnostic
-    /// entries. `generic = None` returns only the latter. Deduplicated,
-    /// order preserved.
+    /// Returns the preferred fallback families for a given unicode range. 
+    /// Checks the specified generic family first (if any), followed by 
+    /// generic-agnostic fallbacks. Results are deduplicated and keep their order.
     pub fn script_candidates(
         &self,
         generic: Option<GenericFamily>,
@@ -687,10 +654,8 @@ impl FcFallbackConfig {
         }
     }
 
-    /// Every family name a chain for `stack` with script blocks `ranges`
-    /// could contain, in chain order. This is what the async registry
-    /// parses ahead of resolving the chain, so the two agree by
-    /// construction.
+    /// Expands a CSS font stack and unicode ranges into a complete, ordered 
+    /// list of candidate font families to search for.
     pub fn candidate_families(&self, stack: &[String], ranges: &[UnicodeRange]) -> Vec<String> {
         let mut out = Vec::new();
         let mut any_generic = false;
@@ -716,11 +681,8 @@ impl FcFallbackConfig {
         out
     }
 
-    /// Fill what this configuration leaves unsaid from `defaults`: generics
-    /// and substitutions without an entry, script blocks without a
-    /// preference for the same generic, and an empty last resort. Entries
-    /// already present are never reordered or extended — the configured
-    /// authority wins, the defaults are the last resort.
+    /// Merges missing configuration values from `defaults` into this config. 
+    /// Does not overwrite or reorder existing entries.
     pub fn merge_defaults(&mut self, defaults: &FcFallbackConfig) {
         for (generic, families) in &defaults.generic_families {
             self.generic_families
@@ -749,6 +711,25 @@ impl FcFallbackConfig {
     /// Take over parsed platform aliases (`fonts.conf` `<alias><prefer>`):
     /// a generic keyword becomes that generic's base candidates, anything
     /// else a named-family substitution. Keys are normalized family names.
+
+    /// Extract all unique font families listed in this fallback configuration.
+    pub fn extract_all_families(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for families in self.generic_families.values() {
+            families.iter().for_each(|f| push_unique(&mut out, f));
+        }
+        for replacements in self.substitutions.values() {
+            replacements.iter().for_each(|f| push_unique(&mut out, f));
+        }
+        for entry in &self.script_fallbacks {
+            entry.families.iter().for_each(|f| push_unique(&mut out, f));
+        }
+        self.last_resort
+            .iter()
+            .for_each(|f| push_unique(&mut out, f));
+        out
+    }
+
     pub fn absorb_system_aliases(&mut self, aliases: BTreeMap<String, Vec<String>>) {
         for (key, prefs) in aliases {
             match GenericFamily::from_css(&key) {
@@ -763,83 +744,22 @@ impl FcFallbackConfig {
     }
 }
 
-/// Style tokens to filter out when guessing family names from filenames.
-///
-/// These are the weight/style/width suffixes commonly appended to font filenames
-/// (e.g. "ArialBold.ttf", "NotoSans-SemiBold.otf"). Used by the scout thread
-/// to extract the base family name from a filename.
-pub const FONT_STYLE_TOKENS: &[&str] = &[
-    "Regular",
-    "Bold",
-    "Italic",
-    "Light",
-    "Medium",
-    "Thin",
-    "Black",
-    "ExtraLight",
-    "ExtraBold",
-    "SemiBold",
-    "DemiBold",
-    "Heavy",
-    "Oblique",
-    "Condensed",
-    "Expanded",
-    // The tokenizer splits compound styles (e.g. "SemiBold" → "Semi" + "Bold"),
-    // so we need the modifier prefixes as standalone style tokens too.
-    "Extra",
-    "Semi",
-    "Demi",
-];
-
-/// Static system font directories per OS. No allocation.
-///
-/// These are the well-known, fixed paths. User-specific directories
-/// (which require env var resolution) are added by [`font_directories`].
-pub fn system_font_dirs(os: OperatingSystem) -> &'static [&'static str] {
-    match os {
-        OperatingSystem::MacOS => &[
-            "/System/Library/Fonts",
-            "/Library/Fonts",
-            "/System/Library/AssetsV2",
-        ],
-        OperatingSystem::Linux => &["/usr/share/fonts", "/usr/local/share/fonts"],
-        // Android system-font directories are world-readable. Vendor partitions
-        // (`/product/fonts`, `/system_ext/fonts`) carry OEM-specific families
-        // (Samsung One UI, MIUI, EMUI). `/data/fonts` is the user-selected
-        // font directory exposed by recent OEM ROMs.
-        OperatingSystem::Android => &[
-            "/system/fonts",
-            "/product/fonts",
-            "/system_ext/fonts",
-            "/data/fonts",
-        ],
-        // iOS bundles system fonts under sandboxed paths that cannot be
-        // enumerated with a plain `read_dir`. The cache enumerates them via
-        // `CTFontManagerCopyAvailableFontURLs` in `lib.rs::build_inner`; the
-        // returned `CFURL`s point inside `/System/Library/...` paths that are
-        // openable through the CoreText I/O bridge even though the underlying
-        // directory is unreadable.
-        OperatingSystem::IOS => &[],
-        // Windows paths require env var resolution — handled in font_directories()
-        OperatingSystem::Windows => &[],
-        OperatingSystem::Wasm => &[],
-    }
-}
-
+/// Static system font directories per OS.
 /// All font directories (system + user-specific).
-///
-/// Combines the static [`system_font_dirs`] with user-specific paths
-/// resolved from environment variables (`HOME`, `SystemRoot`, etc.).
 pub fn font_directories(os: OperatingSystem) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = system_font_dirs(os).iter().map(PathBuf::from).collect();
-
+    let mut dirs = Vec::new();
     match os {
         OperatingSystem::MacOS => {
+            dirs.push(PathBuf::from("/System/Library/Fonts"));
+            dirs.push(PathBuf::from("/Library/Fonts"));
+            dirs.push(PathBuf::from("/System/Library/AssetsV2"));
             if let Ok(home) = std::env::var("HOME") {
                 dirs.push(PathBuf::from(format!("{}/Library/Fonts", home)));
             }
         }
         OperatingSystem::Linux => {
+            dirs.push(PathBuf::from("/usr/share/fonts"));
+            dirs.push(PathBuf::from("/usr/local/share/fonts"));
             if let Ok(home) = std::env::var("HOME") {
                 dirs.push(PathBuf::from(format!("{}/.fonts", home)));
                 dirs.push(PathBuf::from(format!("{}/.local/share/fonts", home)));
@@ -857,28 +777,20 @@ pub fn font_directories(os: OperatingSystem) -> Vec<PathBuf> {
                 user_profile
             )));
         }
-        // No env-var-resolved user-font dir on iOS (no $HOME inside the sandbox)
-        // or Android (apps own /data/data/<package>/files/fonts but that's a
-        // private app dir, not a fontconfig directory).
-        OperatingSystem::IOS | OperatingSystem::Android => {}
-        OperatingSystem::Wasm => {}
+        OperatingSystem::Android => {
+            dirs.push(PathBuf::from("/system/fonts"));
+            dirs.push(PathBuf::from("/product/fonts"));
+            dirs.push(PathBuf::from("/system_ext/fonts"));
+            dirs.push(PathBuf::from("/data/fonts"));
+        }
+        OperatingSystem::IOS | OperatingSystem::Wasm => {}
     }
 
     dirs
 }
 
 /// Common font families for priority boosting, as human-readable names.
-/// No allocation — returns a static slice.
-///
-/// These are the most commonly needed system fonts per OS. Wrapped into
-/// [`FcScanConfig::os_defaults`], they tell the scout thread which fonts
-/// to parse first so likely-needed families are available sooner. The
-/// scout itself only ever sees the injected [`FcScanConfig`]; this table
-/// is a guess, and embedders that know their actual UI font should
-/// inject that instead.
-///
-/// The names here are the canonical human-readable forms. Use
-/// [`matches_common_family`] for token-based matching against filenames.
+/// These families will be parsed first so likely-needed fonts are available sooner.
 pub fn common_font_families(os: OperatingSystem) -> &'static [&'static str] {
     match os {
         OperatingSystem::MacOS => &[
@@ -970,33 +882,8 @@ pub fn common_font_families(os: OperatingSystem) -> &'static [&'static str] {
     }
 }
 
-/// Pre-tokenize common font families for efficient per-file matching.
-///
-/// Call this once before iterating over font files, then pass the result
-/// to [`matches_common_family_tokens`] for each file.
-pub fn tokenize_common_families(os: OperatingSystem) -> Vec<Vec<String>> {
-    common_font_families(os)
-        .iter()
-        .map(|family| tokenize_lowercase(family))
-        .collect()
-}
-
-/// Host knowledge the registry needs but must not invent: where fonts live
-/// and which families deserve parse priority.
-///
-/// Injected by the embedder via `FcFontRegistry::new_with_config`. This
-/// crate used to decide both tables on its own (via [`font_directories`]
-/// and [`common_font_families`]), which gets it backwards: an embedder
-/// whose detected system UI font was not in the guessed list paid the
-/// first layout in .notdef tofu, because the scout parsed hundreds of
-/// other files before reaching the one family the UI was about to ask
-/// for. The host knows its font locations and its UI font; this crate
-/// does not.
-///
-/// The old tables survive in exactly one place:
-/// [`FcScanConfig::os_defaults`] is the explicitly-chosen fallback that
-/// carries them. `FcFontRegistry::new()` opts into it for you, so
-/// existing callers keep the old behavior unchanged.
+/// Configuration for the font scanner: directories to search and families to prioritize.
+/// Injected by the embedder via `FcFontRegistry::new_with_config`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FcScanConfig {
     /// Directories to scan recursively. Empty = scan nothing.
@@ -1007,38 +894,34 @@ pub struct FcScanConfig {
 }
 
 impl FcScanConfig {
-    /// The tables this crate used to hard-code, as an explicit opt-in:
-    /// [`font_directories`] (system + env-var-resolved user dirs) plus
-    /// [`common_font_families`] for `os`.
+    /// Returns the default OS-specific scan configuration.
     pub fn os_defaults(os: OperatingSystem) -> Self {
         Self {
             font_dirs: font_directories(os),
-            priority_families: common_font_families(os)
-                .iter()
-                .map(|family| family.to_string())
-                .collect(),
+            priority_families: FcFallbackConfig::os_defaults(os).extract_all_families(),
         }
     }
-
-    /// Scan nothing, prioritize nothing. For embedders that supply every
-    /// directory themselves or work from memory fonts only.
+    /// Returns an empty scan configuration.
     pub fn empty() -> Self {
         Self {
             font_dirs: Vec::new(),
             priority_families: Vec::new(),
         }
     }
-
-    /// Pre-tokenize [`FcScanConfig::priority_families`] for per-file
-    /// matching, mirroring [`tokenize_common_families`]. Pass the result
-    /// to [`matches_common_family_tokens`] or the scout's
-    /// `assign_scout_priority`.
+    /// Pre-tokenizes priority families for faster matching against filenames.
     pub fn priority_token_sets(&self) -> Vec<Vec<String>> {
         self.priority_families
             .iter()
             .map(|family| tokenize_lowercase(family))
             .collect()
     }
+}
+
+/// Pre-tokenize common font families for efficient per-file matching.
+/// Call this once before iterating over font files, then pass the result
+/// to [`matches_common_family_tokens`] for each file.
+pub fn tokenize_common_families(os: OperatingSystem) -> Vec<Vec<String>> {
+    FcScanConfig::os_defaults(os).priority_token_sets()
 }
 
 /// Check if a set of filename tokens matches any pre-tokenized common family.
@@ -1098,203 +981,9 @@ pub fn tokenize_font_stem(stem: &str) -> Vec<String> {
 /// - `"Helvetica Neue Bold Italic.ttf"` → `"helveticaneue"`
 pub fn guess_family_from_filename(path: &Path) -> String {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
     tokenize_font_stem(stem).join("")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── Generic families ─────────────────────────────────────────────────
-
-    #[test]
-    fn generic_families_recognized() {
-        assert!(is_generic_family("sans-serif"));
-        assert!(is_generic_family("Sans-Serif")); // case-insensitive
-        assert!(is_generic_family("monospace"));
-        assert!(is_generic_family("SERIF"));
-        assert!(!is_generic_family("Arial"));
-        assert!(!is_generic_family("Noto Sans"));
-    }
-
-    // ── Constants ────────────────────────────────────────────────────────
-
-    #[test]
-    fn font_style_tokens_covers_common_styles() {
-        for token in &[
-            "Regular", "Bold", "Italic", "Light", "Medium", "Thin", "Black", "Oblique", "SemiBold",
-        ] {
-            assert!(
-                FONT_STYLE_TOKENS.contains(token),
-                "missing style token: {}",
-                token
-            );
-        }
-    }
-
-    // ── system_font_dirs ────────────────────────────────────────────────
-
-    #[test]
-    fn system_font_dirs_static_and_nonempty() {
-        assert!(!system_font_dirs(OperatingSystem::MacOS).is_empty());
-        assert!(!system_font_dirs(OperatingSystem::Linux).is_empty());
-        assert!(system_font_dirs(OperatingSystem::Wasm).is_empty());
-    }
-
-    // ── common_font_families ────────────────────────────────────────────
-
-    #[test]
-    fn common_font_families_nonempty_for_desktop() {
-        assert!(!common_font_families(OperatingSystem::MacOS).is_empty());
-        assert!(!common_font_families(OperatingSystem::Linux).is_empty());
-        assert!(!common_font_families(OperatingSystem::Windows).is_empty());
-        assert!(common_font_families(OperatingSystem::Wasm).is_empty());
-    }
-
-    // ── FcScanConfig ────────────────────────────────────────────────────
-
-    #[test]
-    fn os_defaults_carry_the_legacy_tables() {
-        for os in [
-            OperatingSystem::Linux,
-            OperatingSystem::Windows,
-            OperatingSystem::MacOS,
-        ] {
-            let config = FcScanConfig::os_defaults(os);
-
-            assert!(!config.font_dirs.is_empty(), "no dirs for {:?}", os);
-            assert!(
-                !config.priority_families.is_empty(),
-                "no families for {:?}",
-                os
-            );
-
-            // os_defaults must be exactly the old hard-coded behavior:
-            // same dirs, same families, same token sets.
-            assert_eq!(config.font_dirs, font_directories(os));
-            let legacy: Vec<String> = common_font_families(os)
-                .iter()
-                .map(|f| f.to_string())
-                .collect();
-            assert_eq!(config.priority_families, legacy);
-            assert_eq!(config.priority_token_sets(), tokenize_common_families(os));
-        }
-    }
-
-    #[test]
-    fn empty_scan_config_scans_and_prioritizes_nothing() {
-        let config = FcScanConfig::empty();
-        assert!(config.font_dirs.is_empty());
-        assert!(config.priority_families.is_empty());
-        assert!(config.priority_token_sets().is_empty());
-    }
-
-    // ── guess_family_from_filename ──────────────────────────────────────
-
-    #[test]
-    fn guess_family_strips_style_suffixes() {
-        assert_eq!(
-            guess_family_from_filename(Path::new("ArialBold.ttf")),
-            "arial"
-        );
-        assert_eq!(
-            guess_family_from_filename(Path::new("NotoSansJP-Regular.otf")),
-            "notosansjp"
-        );
-        assert_eq!(
-            guess_family_from_filename(Path::new("Helvetica Neue Bold Italic.ttf")),
-            "helveticaneue"
-        );
-    }
-
-    #[test]
-    fn guess_family_handles_underscores() {
-        assert_eq!(
-            guess_family_from_filename(Path::new("Liberation_Sans_Bold.ttf")),
-            "liberationsans"
-        );
-    }
-
-    #[test]
-    fn guess_family_handles_compound_styles() {
-        assert_eq!(
-            guess_family_from_filename(Path::new("LiberationSans-BoldItalic.ttf")),
-            "liberationsans"
-        );
-        assert_eq!(
-            guess_family_from_filename(Path::new("DejaVuSansMono-ExtraBold.ttf")),
-            "dejavusansmono"
-        );
-        assert_eq!(
-            guess_family_from_filename(Path::new("SFMono-SemiBold.otf")),
-            "sfmono"
-        );
-    }
-
-    // ── token-based matching ────────────────────────────────────────────
-
-    #[test]
-    fn matches_common_family_macos() {
-        let common = tokenize_common_families(OperatingSystem::MacOS);
-
-        // "SFNSDisplay" → tokens ["sfns", "display"] → matches "SFNS"
-        let tokens = tokenize_all("SFNSDisplay");
-        assert!(matches_common_family_tokens(&tokens, &common));
-
-        // "HelveticaNeue" → tokens ["helvetica", "neue"] → matches "Helvetica Neue"
-        let tokens = tokenize_all("HelveticaNeue");
-        assert!(matches_common_family_tokens(&tokens, &common));
-
-        // "Arial" → matches "Arial"
-        let tokens = tokenize_all("Arial");
-        assert!(matches_common_family_tokens(&tokens, &common));
-
-        // "SomeRandomFont" → no match
-        let tokens = tokenize_all("SomeRandomFont");
-        assert!(!matches_common_family_tokens(&tokens, &common));
-    }
-
-    #[test]
-    fn matches_common_family_linux() {
-        let common = tokenize_common_families(OperatingSystem::Linux);
-
-        let tokens = tokenize_all("DejaVuSans");
-        assert!(matches_common_family_tokens(&tokens, &common));
-
-        let tokens = tokenize_all("NotoSansCJK");
-        assert!(matches_common_family_tokens(&tokens, &common));
-
-        let tokens = tokenize_all("UbuntuMono-Regular");
-        assert!(matches_common_family_tokens(&tokens, &common));
-    }
-
-    #[test]
-    fn matches_common_family_windows() {
-        let common = tokenize_common_families(OperatingSystem::Windows);
-
-        let tokens = tokenize_all("SegoeUI-Regular");
-        assert!(matches_common_family_tokens(&tokens, &common));
-
-        let tokens = tokenize_all("Consolas");
-        assert!(matches_common_family_tokens(&tokens, &common));
-    }
-
-    // ── tokenize_font_stem ──────────────────────────────────────────────
-
-    #[test]
-    fn tokenize_font_stem_filters_styles() {
-        assert_eq!(tokenize_font_stem("ArialBold"), vec!["arial"]);
-        assert_eq!(
-            tokenize_font_stem("NotoSansJP-Regular"),
-            vec!["noto", "sans", "jp"]
-        );
-        // "SFMono" stays as one token (consecutive uppercase → no CamelCase split)
-        assert_eq!(tokenize_font_stem("SFMono-SemiBold"), vec!["sfmono"]);
-    }
-
-    /// Helper: tokenize a stem into all lowercase tokens (including style tokens).
-    fn tokenize_all(stem: &str) -> Vec<String> {
-        tokenize_lowercase(stem)
-    }
-}
+#[path = "config_test.rs"]
+mod tests;
