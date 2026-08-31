@@ -35,7 +35,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use rust_fontconfig::config::FcScanConfig;
 use rust_fontconfig::registry::FcFontRegistry;
+use rust_fontconfig::OperatingSystem;
+use std::sync::{Arc, OnceLock};
 
 /// A unique, self-cleaning scratch directory.
 struct TempDir(PathBuf);
@@ -66,17 +69,31 @@ impl Drop for TempDir {
 /// Fails loudly rather than skipping: a machine with no system fonts at all
 /// would make every assertion below vacuous, which is exactly the
 /// silently-passing font test this whole change is meant to prevent.
-fn scan_to_completion(tag: &str) -> std::sync::Arc<FcFontRegistry> {
-    let registry = FcFontRegistry::new();
+/// The system's main font directory only: enough fonts for persistence to
+/// mean something, few enough for a CI runner. Scanning every directory
+/// (macOS's AssetsV2 alone holds thousands of downloadable fonts) three
+/// times in parallel blew a 60 s budget on the macOS and Windows runners.
+fn bounded_scan_config() -> FcScanConfig {
+    let mut config = FcScanConfig::os_defaults(OperatingSystem::current());
+    config.font_dirs.truncate(1);
+    config.priority_families.clear();
+    config
+}
+
+fn scan_to_completion(tag: &str) -> Arc<FcFontRegistry> {
+    let registry = FcFontRegistry::new_with_config(bounded_scan_config());
+    // The tests below save through the path-explicit seam; do not touch the
+    // real cache directory as a side effect.
+    registry.set_persist_on_complete(false);
     registry.spawn_scout_and_builders();
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(180);
     while !registry.is_build_complete() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
         registry.is_build_complete(),
-        "[{tag}] the font scan did not complete within 60s; cannot test persistence \
+        "[{tag}] the font scan did not complete within 180s; cannot test persistence \
          of a scan that never finished"
     );
     assert!(
@@ -85,6 +102,13 @@ fn scan_to_completion(tag: &str) -> std::sync::Arc<FcFontRegistry> {
          system with no installed fonts — failing loudly instead of passing vacuously."
     );
     registry
+}
+
+/// One scan per test process, shared by every test that only needs a
+/// scanned registry.
+fn scanned() -> Arc<FcFontRegistry> {
+    static SCANNED: OnceLock<Arc<FcFontRegistry>> = OnceLock::new();
+    SCANNED.get_or_init(|| scan_to_completion("shared")).clone()
 }
 
 /// The core regression: a completed scan writes a manifest, and a SECOND,
@@ -99,7 +123,7 @@ fn completed_scan_persists_and_reloads() {
     let manifest = tmp.manifest();
     assert!(!manifest.exists(), "temp manifest must not pre-exist");
 
-    let registry = scan_to_completion("roundtrip");
+    let registry = scanned();
     let scanned = registry.list().len();
 
     // The real code path (`persist_cache_on_build_complete`) writes to
@@ -148,7 +172,7 @@ fn reloaded_cache_resolves_the_same_families() {
     let tmp = TempDir::new("resolve");
     let manifest = tmp.manifest();
 
-    let registry = scan_to_completion("resolve");
+    let registry = scanned();
     let sample: Vec<_> = registry
         .list()
         .into_iter()
@@ -189,7 +213,7 @@ fn save_leaves_no_temp_files_and_replaces_atomically() {
     let tmp = TempDir::new("atomic");
     let manifest = tmp.manifest();
 
-    let registry = scan_to_completion("atomic");
+    let registry = scanned();
     registry.save_to_disk_cache_at(&manifest).expect("first save");
     let first = std::fs::read(&manifest).expect("read first manifest");
 
@@ -251,13 +275,13 @@ fn build_completion_writes_the_real_manifest_without_any_explicit_save() {
 
     if std::env::var_os(CHILD_ENV).is_some() {
         // ---- child: scan, and DO NOT call save ----
-        let registry = FcFontRegistry::new();
+        let registry = FcFontRegistry::new_with_config(bounded_scan_config());
         registry.spawn_scout_and_builders();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(180);
         while !registry.is_build_complete() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(registry.is_build_complete(), "child: scan did not complete in 60s");
+        assert!(registry.is_build_complete(), "child: scan did not complete in 180s");
         assert!(!registry.list().is_empty(), "child: scan found zero fonts");
 
         let path = rust_fontconfig::disk_cache::get_font_cache_path()
