@@ -3762,10 +3762,13 @@ fn find_best_cmap_subtable<'a>(
 ) -> Option<allsorts::tables::cmap::EncodingRecord> {
     use allsorts::tables::cmap::{PlatformId, EncodingId};
 
-    cmap.find_subtable(PlatformId::UNICODE, EncodingId(3))
-        .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(4)))
-        .or_else(|| cmap.find_subtable(PlatformId::WINDOWS, EncodingId(1)))
+    // Full-repertoire subtables first (they carry the astral planes: emoji,
+    // CJK extensions), BMP-only ones after — the order FreeType and
+    // fontconfig use.
+    cmap.find_subtable(PlatformId::UNICODE, EncodingId(4))
         .or_else(|| cmap.find_subtable(PlatformId::WINDOWS, EncodingId(10)))
+        .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(3)))
+        .or_else(|| cmap.find_subtable(PlatformId::WINDOWS, EncodingId(1)))
         .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(0)))
         .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(1)))
 }
@@ -3819,13 +3822,16 @@ fn coverage_from_subtable(
 
     match subtable {
         CmapSubtable::Format4(f4) => {
+            let seg_count = f4.start_codes.len();
+            let glyph_ids: Vec<u16> = f4.glyph_id_array.iter().collect();
             let segments = f4
                 .start_codes
                 .iter()
                 .zip(f4.end_codes.iter())
                 .zip(f4.id_deltas.iter())
-                .zip(f4.id_range_offsets.iter());
-            for (((start, end), delta), range_offset) in segments {
+                .zip(f4.id_range_offsets.iter())
+                .enumerate();
+            for (i, (((start, end), delta), range_offset)) in segments {
                 if start == 0xFFFF {
                     continue; // the mandatory terminal segment
                 }
@@ -3845,10 +3851,18 @@ fn coverage_from_subtable(
                         push(start, end);
                     }
                 } else {
-                    // glyphIdArray-indexed segment: the array can hold zeros,
-                    // so look each code up. These segments are few and small.
+                    // glyphIdArray-indexed segment (OpenType cmap §format 4):
+                    // the value for `code` sits at
+                    // idRangeOffset/2 + (code - start) - (segCount - i) in
+                    // glyphIdArray; 0 there means missing, otherwise idDelta
+                    // is added. Indexed directly: a CJK BMP subtable has
+                    // thousands of these codes, and a per-code lookup through
+                    // the subtable is a linear scan over its segments.
+                    let base = (range_offset as usize / 2).wrapping_sub(seg_count - i);
                     for code in start..=end {
-                        if matches!(subtable.map_glyph(code), Ok(Some(gid)) if gid != 0) {
+                        let index = base.wrapping_add((code - start) as usize);
+                        let Some(&value) = glyph_ids.get(index) else { continue };
+                        if value != 0 && value.wrapping_add(delta as u16) != 0 {
                             push(code, code);
                         }
                     }
