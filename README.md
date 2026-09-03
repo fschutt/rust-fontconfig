@@ -32,7 +32,7 @@ Now for the more practical reasons:
 
 ```toml
 [dependencies]
-rust-fontconfig = { version = "4.4", features = ["parsing"] }
+rust-fontconfig = { version = "5.0", features = ["parsing"] }
 ```
 
 The default build (`std` only) discovers system fonts via **filename
@@ -44,14 +44,14 @@ accurate family names, weights, Unicode coverage and
 
 | Feature | Default | Description |
 |---------|:-------:|-------------|
-| `std` | ✅ | Filesystem scanning + mmap-backed font loading. Currently required — the crate is std-only as of v4.1. |
+| `std` | ✅ | Filesystem scanning + mmap-backed font loading. Currently required - the crate is std-only as of v4.1. |
 | `parsing` | | Parse font tables via allsorts (accurate metadata; WOFF/WOFF2/TTC/OTF/TTF). Implies `std`. |
 | `multithreading` | | Parallel font scanning/parsing via rayon. |
 | `cache` | | Persist the parsed cache to disk (serde + bincode + dirs). |
 | `async-registry` | | `FcFontRegistry` for incremental/background font discovery. Implies `parsing`. |
 | `ffi` | | C API bindings. Implies `parsing` + `async-registry`. |
 
-> **WASM:** `wasm32-*` targets build out of the box — `mmapio` and `rayon` are
+> **WASM:** `wasm32-*` targets build out of the box - `mmapio` and `rayon` are
 > excluded automatically via `cfg`. Build with `--features parsing`.
 
 ## Usage
@@ -170,8 +170,8 @@ let cache = FcFontCache::build().with_fallback_config(config);
 
 // The scripts hint bounds what the chain precomputes: `Some(&[])` builds no
 // script tier at all (ASCII-only documents pull in no CJK fonts), `None` uses
-// `DEFAULT_UNICODE_FALLBACK_SCRIPTS`, and a list of blocks — usually derived
-// from the document's text — builds exactly those.
+// `DEFAULT_UNICODE_FALLBACK_SCRIPTS`, and a list of blocks - usually derived
+// from the document's text - builds exactly those.
 let chain = cache.resolve_font_chain_with_scripts(
     &["sans-serif".to_string()],
     FcWeight::Normal,
@@ -184,10 +184,10 @@ let chain = cache.resolve_font_chain_with_scripts(
 
 A chain resolves a character in three tiers, first hit wins: the CSS stack
 (a generic's per-script preferred fonts before its base fonts), then the
-coverage-gated group for the character's script block — configured
+coverage-gated group for the character's script block - configured
 preferences first, then registered fonts ranked by coverage of *that* block,
 style, and dedication to the script (a font that is mostly this script beats
-one that merely includes it; breadth of coverage is never a bonus) — then
+one that merely includes it; breadth of coverage is never a bonus) - then
 the configured last resort. `resolve_char` and `query_for_text` read only
 the chain: no lock, no cache access per character.
 
@@ -362,7 +362,8 @@ cl.exe /I./include /Fe:font_example.exe example.c rust_fontconfig.lib
 
 ## Performance
 
-- cache building: ~90ms for ~530 fonts
+- cache building (cold start, multithreaded): ~1.2s for ~760 fonts
+- cache building (from disk cache): ~12ms
 - cache query: ~4µs
 
 ## Features
