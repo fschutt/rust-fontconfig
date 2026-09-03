@@ -143,13 +143,7 @@ fn main() {
 
 ### Controlling fallback
 
-Everything the chain builder knows about the host is injected through an
-`FcFallbackConfig`: which families stand behind each generic, which fonts to
-prefer for a script, what to substitute for a missing named family, and what
-to draw when nothing covers a character. `FcFontCache::build()` parses the
-platform configuration where there is one (Linux `fonts.conf` aliases) and
-fills the gaps from `FcFallbackConfig::os_defaults`; `FcFontCache::default()`
-starts empty.
+`FcFallbackConfig` controls fallback behavior: CSS generic mappings, per-script preferences, missing family substitutions, and last-resort fonts. `FcFontCache::build()` automatically uses platform defaults (and Linux `fonts.conf`), while `FcFontCache::default()` starts empty.
 
 ```rust
 use rust_fontconfig::{
@@ -169,10 +163,8 @@ config.last_resort = vec!["Noto Sans".to_string()];
 
 let cache = FcFontCache::build().with_fallback_config(config);
 
-// The scripts hint bounds what the chain precomputes: `Some(&[])` builds no
-// script tier at all (ASCII-only documents pull in no CJK fonts), `None` uses
-// `DEFAULT_UNICODE_FALLBACK_SCRIPTS`, and a list of blocks - usually derived
-// from the document's text - builds exactly those.
+// `scripts_hint` limits which Unicode blocks are precomputed in the chain.
+// `None` builds the default 7 fallback scripts; `Some(&[])` builds none.
 let chain = cache.resolve_font_chain_with_scripts(
     &["sans-serif".to_string()],
     FcWeight::Normal,
@@ -183,19 +175,14 @@ let chain = cache.resolve_font_chain_with_scripts(
 );
 ```
 
-A chain resolves a character in three tiers, first hit wins: the CSS stack
-(a generic's per-script preferred fonts before its base fonts), then the
-coverage-gated group for the character's script block - configured
-preferences first, then registered fonts ranked by coverage of *that* block,
-style, and dedication to the script (a font that is mostly this script beats
-one that merely includes it; breadth of coverage is never a bonus) - then
-the configured last resort. `resolve_char` and `query_for_text` read only
-the chain: no lock, no cache access per character.
+Font fallback resolves in three tiers (first hit wins):
+1. **CSS stack**: Generics and their per-script preferred fonts.
+2. **Script block**: Configured script preferences, then installed fonts ranked by coverage of that specific block, style match, and dedication (narrow coverage beats pan-Unicode fonts).
+3. **Last resort**: The configured fallback for uncovered characters.
 
-For the async registry, `FcFontRegistry::new_with_configs(scan, fallback)`
-injects both the scan side and the resolution side; the families it parses
-ahead of a request are exactly `config.candidate_families(stack, scripts)`,
-so what is prefetched and what a chain can contain agree by construction.
+Text resolution (`resolve_char`, `query_for_text`) reads only the precomputed chain, requiring no locks or cache access per character.
+
+For the async registry, use `FcFontRegistry::new_with_configs(scan, fallback)`.
 
 ### The Desktop's Configured Font
 
