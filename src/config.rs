@@ -596,8 +596,8 @@ impl FcFallbackConfig {
             .unwrap_or(&[])
     }
 
-    /// Returns the preferred fallback families for a given unicode range. 
-    /// Checks the specified generic family first (if any), followed by 
+    /// Returns the preferred fallback families for a given unicode range.
+    /// Checks the specified generic family first (if any), followed by
     /// generic-agnostic fallbacks. Results are deduplicated and keep their order.
     pub fn script_candidates(
         &self,
@@ -654,7 +654,7 @@ impl FcFallbackConfig {
         }
     }
 
-    /// Expands a CSS font stack and unicode ranges into a complete, ordered 
+    /// Expands a CSS font stack and unicode ranges into a complete, ordered
     /// list of candidate font families to search for.
     pub fn candidate_families(&self, stack: &[String], ranges: &[UnicodeRange]) -> Vec<String> {
         let mut out = Vec::new();
@@ -681,7 +681,7 @@ impl FcFallbackConfig {
         out
     }
 
-    /// Merges missing configuration values from `defaults` into this config. 
+    /// Merges missing configuration values from `defaults` into this config.
     /// Does not overwrite or reorder existing entries.
     pub fn merge_defaults(&mut self, defaults: &FcFallbackConfig) {
         for (generic, families) in &defaults.generic_families {

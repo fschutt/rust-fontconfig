@@ -17,8 +17,7 @@ use alloc::vec::Vec;
 use crate::config::{FcFallbackConfig, GenericFamily};
 use crate::{
     FcFontCache, FcFontCacheInner, FcPattern, FcWeight, FontId, FontMatch, FontMatchNoFallback,
-    PatternMatch, ResolvedFontRun, TraceMsg, UnicodeRange,
-    DEFAULT_UNICODE_FALLBACK_SCRIPTS,
+    PatternMatch, ResolvedFontRun, TraceMsg, UnicodeRange, DEFAULT_UNICODE_FALLBACK_SCRIPTS,
 };
 
 /// How many faces of one family a chain keeps (Regular, Bold, Italic, …
