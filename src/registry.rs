@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;

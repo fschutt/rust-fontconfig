@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::config;
 use crate::registry::FcFontRegistry;
 use crate::scoring::{assign_scout_priority, FcBuildJob};
+#[cfg(target_os = "ios")]
 use crate::utils::is_font_file;
 use crate::FcParseFont;
 #[cfg(target_os = "ios")]
