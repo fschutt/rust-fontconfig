@@ -1586,9 +1586,7 @@ pub extern "C" fn fc_registry_new() -> *mut Arc<FcFontRegistry> {
     })
 }
 
-/// Spawn the Scout thread and Builder pool. Returns immediately.
-/// The scout enumerates font directories (~5-20ms), builders parse font files
-/// in priority order in the background.
+/// Spawn the background scout and builder threads.
 #[cfg(feature = "async-registry")]
 #[no_mangle]
 pub extern "C" fn fc_registry_spawn(registry: *const Arc<FcFontRegistry>) {
@@ -1603,15 +1601,8 @@ pub extern "C" fn fc_registry_spawn(registry: *const Arc<FcFontRegistry>) {
     })
 }
 
-/// Block until the requested font families are loaded, then return
-/// resolved font chains. Each element in `family_stacks` is a
-/// null-terminated CSS font-family stack (array of C strings).
-///
-/// Returns an array of FcFontChain pointers (one per stack).
-/// The caller must free each chain with fc_font_chain_free() and the
-/// array itself with fc_registry_chains_free().
-///
-/// Hard timeout: 5 seconds.
+/// Block until font families are loaded (5s timeout), then return resolved font chains.
+/// Free elements with `fc_font_chain_free` and array with `fc_registry_chains_free`.
 #[cfg(feature = "async-registry")]
 #[no_mangle]
 pub extern "C" fn fc_registry_request_fonts(
