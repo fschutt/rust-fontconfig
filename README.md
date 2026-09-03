@@ -104,7 +104,7 @@ fn main() {
 
 ### Font Fallback Chain for CSS font-family
 
-The new API separates font chain resolution from text querying:
+The API separates font chain resolution from text querying:
 
 1. **`resolve_font_chain()`** - Create a fallback chain from CSS font-family (without text)
 2. **`chain.resolve_text()`** - Query which fonts to use for specific text
