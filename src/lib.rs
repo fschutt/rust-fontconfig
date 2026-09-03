@@ -66,13 +66,6 @@
 
 #![allow(non_snake_case)]
 
-// As of v4.1 this crate is std-only. The v4.0 `no_std` path is gone —
-// it never supported the registry / multi-thread parsing anyway, and
-// the shared-state `FcFontCache` refactor depends on `std::sync::RwLock`
-// which is unavailable without std. Keeping the `alloc::` import paths
-// means the existing call sites in this file and submodules keep
-// compiling — in std builds `alloc` is just `core::alloc`'s companion
-// crate already linked by the standard library.
 extern crate alloc;
 
 use alloc::collections::btree_map::BTreeMap;
@@ -93,7 +86,6 @@ use std::path::PathBuf;
 
 #[cfg(feature = "std")]
 pub mod config;
-#[cfg(feature = "std")]
 pub mod fallback;
 pub mod utils;
 #[cfg(feature = "std")]
@@ -118,7 +110,7 @@ pub mod scoring;
 #[cfg(all(target_os = "ios", feature = "std", feature = "parsing"))]
 mod mobile_ios;
 
-/// Operating system type for generic font family resolution
+/// Operating system type for generic font family resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperatingSystem {
     Windows,
@@ -130,7 +122,7 @@ pub enum OperatingSystem {
 }
 
 impl OperatingSystem {
-    /// Detect the current operating system at compile time
+    /// Detect the current operating system at compile time.
     pub fn current() -> Self {
         #[cfg(target_os = "windows")]
         return OperatingSystem::Windows;
@@ -161,8 +153,7 @@ impl OperatingSystem {
         return OperatingSystem::Linux; // Default fallback
     }
 
-    /// Built-in `serif` candidates for this OS, script-specific entries for
-    /// `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
+    /// Built-in `serif` candidates for this OS, script-specific entries for.
     #[cfg(feature = "std")]
     #[deprecated(
         since = "5.0.0",
@@ -172,8 +163,7 @@ impl OperatingSystem {
         FcFallbackConfig::os_defaults(*self).expand_generic(GenericFamily::Serif, unicode_ranges)
     }
 
-    /// Built-in `sans-serif` candidates for this OS, script-specific entries
-    /// for `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
+    /// Built-in `sans-serif` candidates for this OS, script-specific entries.
     #[cfg(feature = "std")]
     #[deprecated(
         since = "5.0.0",
@@ -184,8 +174,7 @@ impl OperatingSystem {
             .expand_generic(GenericFamily::SansSerif, unicode_ranges)
     }
 
-    /// Built-in `monospace` candidates for this OS, script-specific entries
-    /// for `unicode_ranges` first. The data lives in [`FcFallbackConfig::os_defaults`].
+    /// Built-in `monospace` candidates for this OS, script-specific entries.
     #[cfg(feature = "std")]
     #[deprecated(
         since = "5.0.0",
@@ -197,7 +186,6 @@ impl OperatingSystem {
     }
 
     /// Expand one CSS family entry against the built-in tables for this OS.
-    /// A named family expands to itself.
     #[cfg(feature = "std")]
     #[deprecated(
         since = "5.0.0",
@@ -213,10 +201,6 @@ impl OperatingSystem {
 }
 
 /// Expand a CSS font stack against the built-in per-OS tables.
-///
-/// Kept for 4.x callers. Resolution no longer goes through this: the cache
-/// resolves with its injected [`FcFallbackConfig`], and
-/// [`FcFallbackConfig::os_defaults`] is the explicit opt-in to these tables.
 #[cfg(feature = "std")]
 #[deprecated(
     since = "5.0.0",
@@ -230,7 +214,7 @@ pub fn expand_font_families(
     FcFallbackConfig::os_defaults(os).candidate_families(families, unicode_ranges)
 }
 
-/// UUID to identify a font (collections are broken up into separate fonts)
+/// UUID to identify a font (collections are broken up into separate fonts).
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct FontId(pub u128);
@@ -257,7 +241,7 @@ impl core::fmt::Display for FontId {
 }
 
 impl FontId {
-    /// Generate a new unique FontId using an atomic counter
+    /// Generate a new unique FontId using an atomic counter.
     pub fn new() -> Self {
         use core::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -266,26 +250,17 @@ impl FontId {
     }
 }
 
-/// Whether a field is required to match (yes / no / don't care)
-///
-/// The discriminants are ABI: they are the values of `FcPatternMatch` in
-/// `ffi/rust_fontconfig.h` (`FC_MATCH_TRUE = 0`, `FC_MATCH_FALSE = 1`,
-/// `FC_MATCH_DONT_CARE = 2`) and cross the C boundary by value. They are
-/// pinned explicitly because reordering the variants once silently swapped
-/// them, so every C caller asking for `FC_MATCH_FALSE` got `True`. The
-/// declaration order (which is what `serde` encodes) is unchanged, so
-/// persisted manifests are unaffected. `tests/tests.rs` parses the header
-/// and asserts the values agree.
+/// Whether a field is required to match (yes / no / don't care).
 #[derive(Debug, Default, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub enum PatternMatch {
-    /// Default: don't particularly care whether the requirement matches
+    /// Default: don't particularly care whether the requirement matches.
     #[default]
     DontCare = 2,
-    /// Requirement has to be true for the selected font
+    /// Requirement has to be true for the selected font.
     True = 0,
-    /// Requirement has to be false for the selected font
+    /// Requirement has to be false for the selected font.
     False = 1,
 }
 
@@ -303,7 +278,7 @@ impl PatternMatch {
     }
 }
 
-/// Font weight values as defined in CSS specification
+/// Font weight values as defined in CSS specification.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
@@ -485,7 +460,7 @@ impl Default for FcWeight {
     }
 }
 
-/// CSS font-stretch values
+/// CSS font-stretch values.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
@@ -531,7 +506,7 @@ impl FcStretch {
         }
     }
 
-    /// Follows CSS spec for stretch matching
+    /// Follows CSS spec for stretch matching.
     pub fn find_best_match(&self, available: &[FcStretch]) -> Option<FcStretch> {
         if available.is_empty() {
             return None;
@@ -604,7 +579,7 @@ impl Default for FcStretch {
     }
 }
 
-/// Unicode range representation for font matching
+/// Unicode range representation for font matching.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
@@ -613,14 +588,7 @@ pub struct UnicodeRange {
     pub end: u32,
 }
 
-/// The default set of Unicode-block fallback scripts that
-/// [`FcFontCache::resolve_font_chain`] pulls in when no explicit
-/// `scripts_hint` is supplied.
-///
-/// Keeping this exposed lets callers that *do* want the default
-/// behaviour build the set explicitly — typically by union-ing it
-/// with a detected-from-document set before calling
-/// [`FcFontCache::resolve_font_chain_with_scripts`].
+/// The default set of Unicode-block fallback scripts that.
 pub const DEFAULT_UNICODE_FALLBACK_SCRIPTS: &[UnicodeRange] = &[
     UnicodeRange {
         start: 0x0400,
@@ -667,7 +635,7 @@ impl UnicodeRange {
     }
 }
 
-/// Check if any range covers CJK Unified Ideographs, Hiragana, Katakana, or Hangul
+/// Check if any range covers CJK Unified Ideographs, Hiragana, Katakana, or Hangul.
 pub fn has_cjk_ranges(ranges: &[UnicodeRange]) -> bool {
     const BLOCKS: [UnicodeRange; 4] = [
         UnicodeRange {
@@ -690,7 +658,7 @@ pub fn has_cjk_ranges(ranges: &[UnicodeRange]) -> bool {
     ranges.iter().any(|r| BLOCKS.iter().any(|b| r.overlaps(b)))
 }
 
-/// Check if any range covers the Arabic block
+/// Check if any range covers the Arabic block.
 pub fn has_arabic_ranges(ranges: &[UnicodeRange]) -> bool {
     ranges.iter().any(|r| {
         r.overlaps(&UnicodeRange {
@@ -700,7 +668,7 @@ pub fn has_arabic_ranges(ranges: &[UnicodeRange]) -> bool {
     })
 }
 
-/// Check if any range covers the Cyrillic block
+/// Check if any range covers the Cyrillic block.
 pub fn has_cyrillic_ranges(ranges: &[UnicodeRange]) -> bool {
     ranges.iter().any(|r| {
         r.overlaps(&UnicodeRange {
@@ -710,7 +678,7 @@ pub fn has_cyrillic_ranges(ranges: &[UnicodeRange]) -> bool {
     })
 }
 
-/// Check if any range covers the Hebrew block
+/// Check if any range covers the Hebrew block.
 pub fn has_hebrew_ranges(ranges: &[UnicodeRange]) -> bool {
     ranges.iter().any(|r| {
         r.overlaps(&UnicodeRange {
@@ -720,7 +688,7 @@ pub fn has_hebrew_ranges(ranges: &[UnicodeRange]) -> bool {
     })
 }
 
-/// Check if any range covers the Thai block
+/// Check if any range covers the Thai block.
 pub fn has_thai_ranges(ranges: &[UnicodeRange]) -> bool {
     ranges.iter().any(|r| {
         r.overlaps(&UnicodeRange {
@@ -730,7 +698,7 @@ pub fn has_thai_ranges(ranges: &[UnicodeRange]) -> bool {
     })
 }
 
-/// Log levels for trace messages
+/// Log levels for trace messages.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub enum TraceLevel {
     Debug,
@@ -739,7 +707,7 @@ pub enum TraceLevel {
     Error,
 }
 
-/// Reason for font matching failure or success
+/// Reason for font matching failure or success.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MatchReason {
     NameMismatch {
@@ -770,7 +738,7 @@ pub enum MatchReason {
     Success,
 }
 
-/// Trace message for debugging font matching
+/// Trace message for debugging font matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceMsg {
     pub level: TraceLevel,
@@ -817,9 +785,6 @@ pub enum FcLcdFilter {
 }
 
 /// Per-font rendering configuration from system font config (Linux fonts.conf).
-///
-/// All fields are `Option<T>` -- `None` means "use system default".
-/// On non-Linux platforms, this is always all-None (no per-font overrides).
 #[derive(Debug, Default, Clone)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct FcFontRenderConfig {
@@ -837,13 +802,9 @@ pub struct FcFontRenderConfig {
 }
 
 /// Helper newtype to provide Eq/Ord for Option<f64> via total-order bit comparison.
-/// This allows FcFontRenderConfig to be used inside FcPattern which derives Eq + Ord.
 impl Eq for FcFontRenderConfig {}
 
-// Equality and ordering all go through `Ord::cmp`, which compares the `f64`
-// fields by bit pattern. One definition keeps the three consistent (a derived
-// `PartialEq`/`PartialOrd` next to a hand-written `Ord` disagreed on NaN and
-// tripped clippy's `derive_ord_xor_partial_ord`).
+// Manual PartialOrd/Ord for f64 field bit pattern consistency.
 impl PartialEq for FcFontRenderConfig {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == core::cmp::Ordering::Equal
@@ -885,7 +846,7 @@ impl Ord for FcFontRenderConfig {
     }
 }
 
-/// Font pattern for matching
+/// Font pattern for matching.
 #[derive(Default, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
@@ -976,7 +937,7 @@ impl core::fmt::Debug for FcPattern {
     }
 }
 
-/// Font metadata from the OS/2 table
+/// Font metadata from the OS/2 table.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 pub struct FcFontMetadata {
@@ -1000,7 +961,7 @@ pub struct FcFontMetadata {
 }
 
 impl FcPattern {
-    /// Check if this pattern would match the given character
+    /// Check if this pattern would match the given character.
     pub fn contains_char(&self, c: char) -> bool {
         if self.unicode_ranges.is_empty() {
             return true; // No ranges specified means match all characters
@@ -1016,7 +977,7 @@ impl FcPattern {
     }
 }
 
-/// Font match result with UUID
+/// Font match result with UUID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontMatch {
     pub id: FontId,
@@ -1024,52 +985,41 @@ pub struct FontMatch {
     pub fallbacks: Vec<FontMatchNoFallback>,
 }
 
-/// Font match result with UUID (without fallback)
+/// Font match result with UUID (without fallback).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontMatchNoFallback {
     pub id: FontId,
     pub unicode_ranges: Vec<UnicodeRange>,
 }
 
-/// A run of text that uses the same font
-/// Returned by FontFallbackChain::query_for_text()
+/// A run of text that uses the same font.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFontRun {
-    /// The text content of this run
+    /// The text content of this run.
     pub text: String,
-    /// Start byte index in the original text
+    /// Start byte index in the original text.
     pub start_byte: usize,
-    /// End byte index in the original text (exclusive)
+    /// End byte index in the original text (exclusive).
     pub end_byte: usize,
-    /// The font to use for this run (None if no font found)
+    /// The font to use for this run (None if no font found).
     pub font_id: Option<FontId>,
-    /// Which CSS font-family this came from
+    /// Which CSS font-family this came from.
     pub css_source: String,
 }
 
-/// Path to a font file
-///
-/// `bytes_hash` is a deterministic 64-bit hash of the file's full
-/// byte contents (see [`crate::utils::content_hash_u64`]). All faces
-/// of a given `.ttc` file share the same `bytes_hash`, and two
-/// different paths pointing at the same file contents also do —
-/// so the cache can share a single `Arc<[u8]>` across them via
-/// [`FcFontCache::get_font_bytes`]. A value of `0` means "hash
-/// not computed" (e.g. built from a filename-only scan, or loaded
-/// from a legacy v1 disk cache); callers must treat `0` as opaque
-/// and fall back to unshared reads.
+/// Path to a font file.
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
 #[cfg_attr(feature = "cache", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct FcFontPath {
     pub path: String,
     pub font_index: usize,
-    /// 64-bit content hash of the file's bytes. 0 = not computed.
+    /// 64-bit content hash of the file's bytes.
     #[cfg_attr(feature = "cache", serde(default))]
     pub bytes_hash: u64,
 }
 
-/// In-memory font data
+/// In-memory font data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcFont {
@@ -1078,17 +1028,7 @@ pub struct FcFont {
     pub id: String, // For identification in tests
 }
 
-/// Owned font-source descriptor, returned by
-/// [`FcFontCache::get_font_by_id`].
-///
-/// In v4.0 this was a borrowed enum (`FontSource<'a>` with refs into
-/// the pattern map). With v4.1's shared-state cache, the map lives
-/// behind an `RwLock`, so returning a reference would require the
-/// caller to hold a read guard for the full lifetime of the result —
-/// which bleeds the locking strategy into every call site. The owned
-/// variant clones the small `FcFont` / `FcFontPath` struct and
-/// releases the lock immediately. Bytes/mmap are not cloned — those
-/// go through `get_font_bytes` which hands out `Arc<FontBytes>`.
+/// Owned font-source descriptor, returned by.
 #[derive(Debug, Clone)]
 pub enum OwnedFontSource {
     /// Font loaded from memory (small metadata + owned `Vec<u8>`).
@@ -1098,25 +1038,11 @@ pub enum OwnedFontSource {
 }
 
 /// A handle to font bytes returned by [`FcFontCache::get_font_bytes`].
-///
-/// On disk, an `Mmap` is used so untouched pages don't count toward
-/// process RSS. In-memory fonts (`FcFont`) come back as `Owned` since
-/// they're already on the heap.
-///
-/// `FontBytes` derefs to `[u8]` and implements `AsRef<[u8]>`, so any
-/// existing API that wants `&[u8]` (allsorts, ttf-parser, …) can
-/// accept it without code changes.
-///
-/// Both variants are `Send + Sync` (mmaps and `Arc<[u8]>` are both
-/// safe to share across threads).
 #[cfg(feature = "std")]
 pub enum FontBytes {
-    /// Heap-owned bytes. Used for `FontSource::Memory` and as a
-    /// fallback when mmap is unavailable.
+    /// Heap-owned bytes.
     Owned(std::sync::Arc<[u8]>),
-    /// File-backed mmap. Read-only; pages are demand-loaded by the
-    /// kernel. Absent on wasm targets, where `mmapio` is unavailable
-    /// (the optional dep is gated to `cfg(not(target_family="wasm"))`).
+    /// File-backed mmap.
     #[cfg(not(target_family = "wasm"))]
     Mmapped(mmapio::Mmap),
 }
@@ -1163,9 +1089,7 @@ impl core::fmt::Debug for FontBytes {
     }
 }
 
-/// Open a font file as an mmap-backed [`FontBytes`]. Falls back to a
-/// heap read if mmap fails (e.g. the file is on a network share that
-/// doesn't support mmap, or we're on a target without `std`-mmap).
+/// Open a font file as an mmap-backed [`FontBytes`].
 #[cfg(feature = "std")]
 fn open_font_bytes_mmap(path: &str) -> Option<std::sync::Arc<FontBytes>> {
     use std::fs::File;
@@ -1174,10 +1098,7 @@ fn open_font_bytes_mmap(path: &str) -> Option<std::sync::Arc<FontBytes>> {
     #[cfg(not(target_family = "wasm"))]
     {
         if let Ok(file) = File::open(path) {
-            // Safety: `Mmap::map` requires that the file is not
-            // mutated while mapped. For system fonts that's the
-            // overwhelming common case; if a user replaces the file
-            // we accept reading the snapshot we mapped earlier.
+            // Safety: Mmap requires file is not mutated. For system fonts this is fine.
             if let Ok(mmap) = unsafe { mmapio::MmapOptions::new().map(&file) } {
                 return Some(Arc::new(FontBytes::Mmapped(mmap)));
             }
@@ -1188,17 +1109,16 @@ fn open_font_bytes_mmap(path: &str) -> Option<std::sync::Arc<FontBytes>> {
 }
 
 /// A named font to be added to the font cache from memory.
-/// This is the primary way to supply custom fonts to the application.
 #[derive(Debug, Clone)]
 pub struct NamedFont {
-    /// Human-readable name for this font (e.g., "My Custom Font")
+    /// Human-readable name for this font (e.g., "My Custom Font").
     pub name: String,
-    /// The raw font file bytes (TTF, OTF, WOFF, WOFF2, TTC)
+    /// The raw font file bytes (TTF, OTF, WOFF, WOFF2, TTC).
     pub bytes: Vec<u8>,
 }
 
 impl NamedFont {
-    /// Create a new named font from bytes
+    /// Create a new named font from bytes.
     pub fn new(name: impl Into<String>, bytes: Vec<u8>) -> Self {
         Self {
             name: name.into(),
@@ -1208,39 +1128,12 @@ impl NamedFont {
 }
 
 /// Font cache, initialized at startup.
-///
-/// Thread-safe, shared font cache.
-///
-/// As of v4.1 the cache internally owns its state via
-/// `Arc<RwLock<FcFontCacheInner>>`: cloning an `FcFontCache` returns
-/// a handle that shares the same underlying data. Writes by one holder
-/// (typically the background builder inside `FcFontRegistry`) become
-/// immediately visible to every other holder (layout engines,
-/// shape-time resolvers, etc.).
-///
-/// Before 4.1 the clone deep-copied every map, so external holders
-/// were frozen at the moment they took the snapshot — the mismatch
-/// between "live registry cache" and "frozen font manager cache"
-/// was the root of the silent-text regression when lazy scout mode
-/// was enabled. The shared-state design eliminates that entire class
-/// of staleness bugs by construction.
 pub struct FcFontCache {
     pub(crate) shared: std::sync::Arc<FcFontCacheShared>,
 }
 
-/// Shared interior of `FcFontCache`. Always accessed through an
-/// `Arc` — never referenced directly by external callers.
-// Internal lock wrapper for the cache state. Two implementations selected by feature:
-//
-// DEFAULT (general builds): backed by std `RwLock`. `read`/`write`/`lock` return
-// `Result<_, Infallible>` for a uniform call site (a poisoned lock is recovered via
-// `into_inner` — a memoisation cache is still valid to read after a panic).
-//
-// `single-thread-unsafe-locks` feature: a bare `UnsafeCell` with NO atomics; `read`/`write`/
-// `lock` hand out a guard immediately. UNSOUND in a multi-threaded program — enable ONLY for a
-// known single-threaded environment. Exists for the azul remill-lifted web backend
-// (single-threaded wasm), where std's queue-based RwLock `lock_contended` path spins forever
-// (no other thread ever unparks it) and hangs the layout solver.
+/// Shared interior of `FcFontCache`.
+// Internal lock wrapper: `RwLock` by default, or `UnsafeCell` under `single-thread-unsafe-locks` (WASM).
 
 #[cfg(not(feature = "single-thread-unsafe-locks"))]
 pub struct StLock<T> {
@@ -1370,56 +1263,32 @@ impl<'a, T> core::ops::DerefMut for StWriteGuard<'a, T> {
 
 pub(crate) struct FcFontCacheShared {
     /// Main pattern/metadata state, guarded by a reader-writer lock.
-    /// Builder threads take the write lock to insert a parsed font;
-    /// all query paths take the read lock.
     pub(crate) state: StLock<FcFontCacheInner>,
-    /// Font fallback chain cache. Not part of the RwLock-guarded
-    /// state because cache insertions happen under `&self` on read
-    /// paths (they're a memoisation, not observable state).
+    /// Font fallback chain cache.
     pub(crate) chain_cache: StLock<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
     /// Shared file-bytes cache: content-hash → weak [`FontBytes`].
-    ///
-    /// [`FcFontCache::get_font_bytes`] populates this so that multiple
-    /// FontIds backed by the same file (e.g. every face of a `.ttc`)
-    /// return the same `Arc<FontBytes>` — and therefore the same mmap
-    /// — instead of each allocating their own buffer. We hold `Weak`
-    /// references so the mmap unmap as soon as no parsed font holds
-    /// it alive.
     pub(crate) shared_bytes: StLock<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
 }
 
-/// The actual font-pattern state, held behind the RwLock in
-/// `FcFontCacheShared`. Private — all access goes through
-/// `FcFontCache` methods which lock transparently.
+/// The actual font-pattern state, held behind the RwLock in.
 #[derive(Default, Debug)]
 pub(crate) struct FcFontCacheInner {
-    /// Disk font path -> the ids of its faces. Duplicate detection on
-    /// insert and `lookup_paths_cached`.
+    /// Disk font path -> the ids of its faces.
     pub(crate) by_path: BTreeMap<String, Vec<FontId>>,
-    /// On-disk font paths
+    /// On-disk font paths.
     pub(crate) disk_fonts: BTreeMap<FontId, FcFontPath>,
-    /// In-memory fonts
+    /// In-memory fonts.
     pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
-    /// Metadata cache (patterns stored by ID for quick lookup)
+    /// Metadata cache (patterns stored by ID for quick lookup).
     pub(crate) metadata: BTreeMap<FontId, FcPattern>,
     /// Normalized family/name -> the fonts that carry it.
-    ///
-    /// The one way a specific family name is looked up (see
-    /// `fallback::faces_for_family`). Built at insertion, so a lookup is a
-    /// single map probe and a miss costs nothing; the linear scan it
-    /// replaced measured ~0.52 ms per lookup from azul, ~150 lookups per
-    /// CSS stack.
     pub(crate) family_index: BTreeMap<String, alloc::vec::Vec<FontId>>,
-    /// What generic families, missing named families, script blocks and
-    /// uncovered characters resolve to. Injected; see [`FcFallbackConfig`].
+    /// What generic families, missing named families, script blocks and.
     pub(crate) fallback_config: FcFallbackConfig,
 }
 
 impl FcFontCacheInner {
     /// Record `id` under the normalized spellings of its family and name.
-    /// Called by the `insert_*` paths under the write lock. Only
-    /// `normalize_family_name` runs here — no Unicode tables — so it is
-    /// safe on every target, including the azul web lift.
     pub(crate) fn index_pattern_family(&mut self, pattern: &FcPattern, id: FontId) {
         for key in [pattern.family.as_deref(), pattern.name.as_deref()]
             .into_iter()
@@ -1434,20 +1303,7 @@ impl FcFontCacheInner {
         }
     }
 
-    /// Register a font backed by a file. The one place a pattern enters the
-    /// state: `patterns`, `metadata`, the family index and the file map
-    /// stay consistent by construction.
-    ///
-    /// Coverage is normalized (sorted, disjoint) on the way in; everything
-    /// that reads it — `fallback::covers`, `fallback::overlap_size` — relies
-    /// on that to binary-search.
-    ///
-    /// Returns the id the font is registered under: `id` when it was
-    /// inserted, or the existing id when the same face of the same file with
-    /// the same pattern is already registered — a directory scanned twice, a
-    /// manifest loaded on top of a scan — so a font is one record no matter
-    /// how many roads lead to it, and two different files that happen to
-    /// carry identical name tables stay two records.
+    /// Register a font backed by a file.
     pub(crate) fn insert_disk_font(
         &mut self,
         mut pattern: FcPattern,
@@ -1473,10 +1329,7 @@ impl FcFontCacheInner {
         id
     }
 
-    /// Register a font held in memory. See [`insert_disk_font`](Self::insert_disk_font).
-    /// Returns the id the font is registered under: `id`, or the existing id
-    /// when a memory font with the same pattern, face index and bytes (by
-    /// content hash) is already registered.
+    /// Register a font held in memory.
     pub(crate) fn insert_memory_font(
         &mut self,
         mut pattern: FcPattern,
@@ -1502,12 +1355,7 @@ impl FcFontCacheInner {
 }
 
 impl Clone for FcFontCache {
-    /// Shallow clone — the returned handle shares the same underlying
-    /// state as `self`. Writes through either are visible to both.
-    /// This is the whole point of the v4.1 redesign; callers that need
-    /// an isolated frozen copy must explicitly request one (e.g. via
-    /// `snapshot_state`, which is intentionally not provided because
-    /// we no longer have a use case for it).
+    /// Shallow clone — the returned handle shares the same underlying.
     fn clone(&self) -> Self {
         Self {
             shared: std::sync::Arc::clone(&self.shared),
@@ -1545,8 +1393,7 @@ impl FcFontCache {
         self.state_read().fallback_config.clone()
     }
 
-    /// Replace the fallback configuration. Every memoized chain is dropped,
-    /// so the next `resolve_font_chain` reflects it.
+    /// Replace the fallback configuration.
     pub fn set_fallback_config(&self, config: FcFallbackConfig) -> &Self {
         self.state_write().fallback_config = config;
         self.clear_chain_cache();
@@ -1559,7 +1406,7 @@ impl FcFontCache {
         self
     }
 
-    /// Drop every memoized chain. Called on every insert and config change.
+    /// Drop every memoized chain.
     pub(crate) fn clear_chain_cache(&self) {
         match self.shared.chain_cache.lock() {
             Ok(mut memo) => memo.clear(),
@@ -1567,8 +1414,7 @@ impl FcFontCache {
         }
     }
 
-    /// The configured candidates for `family`: a generic keyword's base
-    /// candidates, or a named family's substitutions.
+    /// The configured candidates for `family`: a generic keyword's base.
     #[deprecated(
         since = "5.0.0",
         note = "read `fallback_config().generic_candidates(..)` / `substitutions_for(..)`"
@@ -1581,8 +1427,7 @@ impl FcFontCache {
         }
     }
 
-    /// Expand a CSS stack through this cache's configuration, filling gaps
-    /// from the built-in tables for `os`.
+    /// Expand a CSS stack through this cache's configuration, filling gaps.
     #[deprecated(
         since = "5.0.0",
         note = "use `fallback_config().candidate_families(families, ranges)`"
@@ -1598,9 +1443,7 @@ impl FcFontCache {
         config.candidate_families(families, unicode_ranges)
     }
 
-    /// Acquire a read guard on the cache's state. Panics if the lock
-    /// was poisoned by a panic inside the write guard — same
-    /// contract as `RwLock::read().expect(..)`.
+    /// Acquire a read guard on the cache's state.
     #[inline]
     pub(crate) fn state_read(&self) -> StReadGuard<'_, FcFontCacheInner> {
         // [az-web-lift] StLock::read() is Infallible (never poisons/spins).
@@ -1610,8 +1453,7 @@ impl FcFontCache {
         }
     }
 
-    /// Acquire a write guard on the cache's state. Panics on
-    /// poisoning, same as `state_read`.
+    /// Acquire a write guard on the cache's state.
     #[inline]
     pub(crate) fn state_write(&self) -> StWriteGuard<'_, FcFontCacheInner> {
         // [az-web-lift] StLock::write() is Infallible (never poisons/spins).
@@ -1622,13 +1464,8 @@ impl FcFontCache {
     }
 
     /// Adds in-memory font files.
-    ///
-    /// Note: takes `&self` — the shared cache handles interior
-    /// mutability via the RwLock.
     pub fn with_memory_fonts(&self, fonts: Vec<(FcPattern, FcFont)>) -> &Self {
-        // Auto-detect Unicode coverage for any naively-registered font
-        // (empty `unicode_ranges`) BEFORE taking the write lock, so we don't
-        // hold it across font parsing. See `populate_memory_font_ranges`.
+        // Auto-detect Unicode coverage for naively-registered fonts before locking.
         let fonts: Vec<(FcPattern, FcFont)> = fonts
             .into_iter()
             .map(|(pattern, font)| (Self::populate_memory_font_ranges(pattern, &font), font))
@@ -1649,30 +1486,14 @@ impl FcFontCache {
         self
     }
 
-    /// Fill in a memory font's `unicode_ranges` from its raw bytes when the
-    /// caller left them empty.
-    ///
-    /// A normal caller of [`FcFontCache::with_memory_fonts`] just hands over
-    /// a name and the font bytes — they don't hand-compute the cmap. But
-    /// [`FontFallbackChain::resolve_char`] deliberately skips any font that
-    /// reports *no* coverage (it refuses to assume a blank range list means
-    /// "covers everything"). Without this step a naively-registered bundled
-    /// font could never be selected for any character — the exact bug that
-    /// bites headless / wasm / embedder-bundled-font setups.
-    ///
-    /// With the `parsing` feature we reuse the *same* OS/2 + cmap detection
-    /// pipeline the on-disk builder uses (via [`FcParseFontBytes`] →
-    /// `parse_font_faces`). Without `parsing` the pattern is returned
-    /// unchanged and the caller must populate `unicode_ranges` themselves.
+    /// Fill in a memory font's `unicode_ranges` from its raw bytes when the.
     #[cfg(all(feature = "std", feature = "parsing"))]
     fn populate_memory_font_ranges(mut pattern: FcPattern, font: &FcFont) -> FcPattern {
         if !pattern.unicode_ranges.is_empty() {
             return pattern;
         }
         if let Some(faces) = FcParseFontBytes(&font.bytes, &font.id) {
-            // A `.ttc` yields several faces; pick the one matching this
-            // font's index, else fall back to the first parsed face. All
-            // patterns of a single face share the same `unicode_ranges`.
+            // Pick face matching index, else fallback to first.
             let ranges = faces
                 .iter()
                 .find(|(_, f)| f.font_index == font.font_index)
@@ -1686,27 +1507,20 @@ impl FcFontCache {
         pattern
     }
 
-    /// Without the `parsing` feature there is no cmap/OS2 parser available,
-    /// so the caller-provided pattern is stored verbatim.
+    /// Without the `parsing` feature there is no cmap/OS2 parser available,.
     #[cfg(not(all(feature = "std", feature = "parsing")))]
     fn populate_memory_font_ranges(pattern: FcPattern, _font: &FcFont) -> FcPattern {
         pattern
     }
 
-    /// Register a newly-parsed on-disk font. Called by the builder
-    /// thread inside `FcFontRegistry`. Allocates a fresh `FontId`,
-    /// inserts the pattern + path + metadata in one write lock, and
-    /// invalidates the chain cache so subsequent resolutions pick
-    /// up the new font.
+    /// Register a newly-parsed on-disk font.
     pub fn insert_builder_font(&self, pattern: FcPattern, path: FcFontPath) {
         let id = FontId::new();
         {
             let mut state = self.state_write();
             state.insert_disk_font(pattern, id, path);
         }
-        // Invalidate chain cache so callers see the new font on the
-        // next resolve. Scoped after the state write to keep lock
-        // nesting shallow.
+        // Invalidate chain cache so callers see the new font.
         self.clear_chain_cache();
     }
 
@@ -1716,11 +1530,7 @@ impl FcFontCache {
         self.shared.chain_cache.lock().map(|c| c.len()).unwrap_or(0)
     }
 
-    /// Insert a *fast-probed* pattern into the cache and return its
-    /// fresh `FontId`. Used by [`FcFontRegistry::request_fonts_fast`]
-    /// when a cmap probe discovers a font that covers some subset of
-    /// the requested codepoints. The pattern's `family` is guessed from
-    /// the filename, so that guess is what the family index carries.
+    /// Insert a *fast-probed* pattern into the cache and return its.
     pub fn insert_fast_pattern(&self, pattern: FcPattern, path: FcFontPath) -> FontId {
         let id = {
             let mut state = self.state_write();
@@ -1730,9 +1540,7 @@ impl FcFontCache {
         id
     }
 
-    /// Every `FontId` registered from the file at `path` (one per face and
-    /// name), or `None` if nothing is. A map probe; `request_fonts_fast` uses
-    /// it to reuse fast-probed faces across layout passes.
+    /// Every `FontId` registered from the file at `path` (one per face and.
     pub fn lookup_paths_cached(&self, path: &str) -> Option<Vec<FontId>> {
         self.state_read()
             .by_path
@@ -1742,11 +1550,6 @@ impl FcFontCache {
     }
 
     /// Get font data for a given font ID.
-    ///
-    /// Returns owned values (not references) because the underlying
-    /// maps live behind an RwLock — a reference could not outlive
-    /// the read guard. In-memory fonts come back as cloned `FcFont`
-    /// instances; disk fonts return their `FcFontPath`.
     pub fn get_font_by_id(&self, id: &FontId) -> Option<OwnedFontSource> {
         let state = self.state_read();
         if let Some(font) = state.memory_fonts.get(id) {
@@ -1758,40 +1561,12 @@ impl FcFontCache {
         None
     }
 
-    /// Get metadata for a font ID. Returns an owned `FcPattern`
-    /// (cloned out of the shared map) because we can't return a
-    /// reference across the RwLock boundary.
+    /// Get metadata for a font ID.
     pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
         self.state_read().metadata.get(id).cloned()
     }
 
     /// Get the font bytes for `id` as a shared [`FontBytes`].
-    ///
-    /// On disk the returned `Arc<FontBytes>` wraps an mmap of the file
-    /// (`FontBytes::Mmapped`). Untouched pages of the file never count
-    /// toward the process's RSS — for a font where layout shapes only
-    /// a handful of glyphs, this is the difference between paying for
-    /// the whole 4 MiB `.ttc` and paying for the cmap + a few glyf
-    /// pages.
-    ///
-    /// In-memory fonts (`FontSource::Memory`) come back as
-    /// `FontBytes::Owned`, since the bytes are already on the heap.
-    ///
-    /// Multiple `FontId`s backed by the same file content (every face
-    /// of a `.ttc`, or two paths with identical bytes) return the
-    /// *same* `Arc<FontBytes>` thanks to a content-hash → `Weak`
-    /// cache. Bytes get unmapped automatically when the last consumer
-    /// drops the Arc.
-    ///
-    /// `FontBytes` derefs to `[u8]`, so callers that only need
-    /// `&[u8]` (allsorts, ttf-parser, …) can pass it through without
-    /// thinking about the backing.
-    ///
-    /// Failure modes: returns `None` if the path is unknown, or the
-    /// file no longer exists / cannot be opened, or the mmap call
-    /// fails. Callers may retry with a fresh `get_font_bytes` if they
-    /// suspect the file was replaced underneath them; the next call
-    /// re-opens cleanly.
     #[cfg(feature = "std")]
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<FontBytes>> {
         use std::sync::Arc;
@@ -1802,7 +1577,8 @@ impl FcFontCache {
             OwnedFontSource::Disk(path) => {
                 let hash = path.bytes_hash;
                 if hash != 0 {
-                    if let Ok(guard) = self.shared.shared_bytes.lock() {
+                    let guard = self.shared.shared_bytes.lock().unwrap();
+                    {
                         if let Some(weak) = guard.get(&hash) {
                             if let Some(arc) = weak.upgrade() {
                                 return Some(arc);
@@ -1813,7 +1589,8 @@ impl FcFontCache {
 
                 let arc = open_font_bytes_mmap(&path.path)?;
                 if hash != 0 {
-                    if let Ok(mut guard) = self.shared.shared_bytes.lock() {
+                    let mut guard = self.shared.shared_bytes.lock().unwrap();
+                    {
                         // Overwrite any stale weak ref that failed to upgrade.
                         guard.insert(hash, Arc::downgrade(&arc));
                     }
@@ -1841,8 +1618,7 @@ impl FcFontCache {
         Self::build_inner(None)
     }
 
-    /// Filename-only scan: discovers fonts on disk, guesses metadata from
-    /// the filename using [`config::tokenize_font_stem`].
+    /// Filename-only scan: discovers fonts on disk, guesses metadata from.
     #[cfg(all(feature = "std", not(feature = "parsing")))]
     fn build_from_filenames() -> Self {
         let cache = Self::default();
@@ -1873,35 +1649,9 @@ impl FcFontCache {
     }
 
     /// Builds a font cache with only specific font families (and their fallbacks).
-    ///
-    /// This is a performance optimization for applications that know ahead of time
-    /// which fonts they need. Instead of scanning all system fonts (which can be slow
-    /// on systems with many fonts), only fonts matching the specified families are loaded.
-    ///
-    /// Generic family names like "sans-serif", "serif", "monospace" are expanded
-    /// to OS-specific font names (e.g., "sans-serif" on macOS becomes "Helvetica Neue",
-    /// "San Francisco", etc.).
-    ///
-    /// **Note**: This will NOT automatically load fallback fonts for scripts not covered
-    /// by the requested families. If you need Arabic, CJK, or emoji support, either:
-    /// - Add those families explicitly to the filter
-    /// - Use `with_memory_fonts()` to add bundled fonts
-    /// - Use `build()` to load all system fonts
-    ///
-    /// # Arguments
-    /// * `families` - Font family names to load (e.g., ["Arial", "sans-serif"])
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Only load Arial and sans-serif fallback fonts
-    /// let cache = FcFontCache::build_with_families(&["Arial", "sans-serif"]);
-    /// ```
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn build_with_families(families: &[impl AsRef<str>]) -> Self {
-        // Expand generic families to OS-specific names. This runs BEFORE the
-        // cache exists, so only the built-in lists are available here — the
-        // filter is a superset selector (which files to parse), not the
-        // final resolution, which goes config-first at query time.
+        // Expand generic families to OS-specific names using built-in lists.
         let os = OperatingSystem::current();
         let mut target_families: Vec<String> = Vec::new();
 
@@ -1920,10 +1670,6 @@ impl FcFontCache {
     }
 
     /// Inner build function that handles both filtered and unfiltered font loading.
-    ///
-    /// # Arguments
-    /// * `family_filter` - If Some, only load fonts matching these family names.
-    ///                     If None, load all fonts.
     #[cfg(all(feature = "std", feature = "parsing"))]
     fn build_inner(family_filter: Option<&[String]>) -> Self {
         let cache = FcFontCache::default();
@@ -2026,10 +1772,7 @@ impl FcFontCache {
             }
         }
 
-        // iOS: the app sandbox denies a plain `read_dir` on `/System/Library/...`,
-        // but `CTFontManagerCopyAvailableFontURLs` returns sandbox-mediated
-        // `CFURL`s that *are* openable. We enumerate via CoreText, then feed
-        // each URL into the same `FcParseFont` path the desktop arms use.
+        // iOS: Enumerate fonts via CoreText to bypass sandbox read_dir restrictions.
         #[cfg(target_os = "ios")]
         {
             let font_files = crate::mobile_ios::copy_available_font_urls();
@@ -2042,10 +1785,7 @@ impl FcFontCache {
             }
         }
 
-        // Android: system fonts live at world-readable paths. Vendor partitions
-        // (`/product/fonts`, `/system_ext/fonts`) carry OEM-specific families
-        // on Samsung One UI / MIUI / EMUI; `/data/fonts` is the per-user font
-        // dir on recent ROMs.
+        // Android: Enumerate world-readable system and vendor font directories.
         #[cfg(target_os = "android")]
         {
             let font_dirs = vec![
@@ -2068,7 +1808,7 @@ impl FcFontCache {
         cache
     }
 
-    /// Check if a font ID is a memory font (preferred over disk fonts)
+    /// Check if a font ID is a memory font (preferred over disk fonts).
     pub fn is_memory_font(&self, id: &FontId) -> bool {
         self.state_read().memory_fonts.contains_key(id)
     }
@@ -2082,8 +1822,7 @@ impl FcFontCache {
             .collect()
     }
 
-    /// Visit every registered font without cloning. The read lock is held
-    /// for the duration, so `f` must not call back into this cache.
+    /// Visit every registered font without cloning.
     pub fn for_each_pattern<F: FnMut(&FcPattern, &FontId)>(&self, mut f: F) {
         let state = self.state_read();
         for (id, pattern) in &state.metadata {
@@ -2100,32 +1839,7 @@ impl FcFontCache {
         self.state_read().metadata.len()
     }
 
-    /// Like [`FcFontCache::query`], but **total**: it returns `None` only when the
-    /// cache holds no fonts at all.
-    ///
-    /// This is the `fc-match` contract. `fc-match` never fails — fontconfig
-    /// substitutes through its config chain, which is why `fc-match Cantarell`
-    /// answers with e.g. `NotoSans-Regular.ttf` on a machine that has no
-    /// Cantarell. [`FcFontCache::query`] deliberately does NOT do that: it is the
-    /// honest "was this exact request satisfiable?" answer, and a caller that
-    /// wants to report an unresolved family needs it.
-    ///
-    /// A *rendering* caller must use this one instead. Handing a renderer `None`
-    /// means one of two things, and both are bugs the caller usually discovers
-    /// far from here: text silently vanishes, or the caller invents its own
-    /// fallback whose font is not registered where the renderer later looks it
-    /// up by hash — so layout succeeds and rendering cannot resolve what layout
-    /// produced.
-    ///
-    /// Resolution order, mirroring fontconfig's own relaxation:
-    ///   1. the pattern exactly as given;
-    ///   2. the same pattern with `name`/`family` cleared — keeps weight, slant,
-    ///      monospace and the requested unicode coverage, so a Bold request does
-    ///      not silently become Regular;
-    ///   3. coverage only — the last-resort "any font that can draw this text".
-    ///
-    /// Each step is a strictly wider query than the last, so this never returns a
-    /// *worse* match than `query` would have.
+    /// Like [`FcFontCache::query`], but **total**: it returns `None` only when the.
     pub fn query_with_fallback(
         &self,
         pattern: &FcPattern,
@@ -2155,18 +1869,11 @@ impl FcFontCache {
         self.query(&bare, trace)
     }
 
-    /// Queries a font from the in-memory cache, returns the first found font (early return)
-    /// Memory fonts are always preferred over disk fonts with the same match quality.
-    ///
-    /// This is FALLIBLE by design — see [`FcFontCache::query_with_fallback`] for the
-    /// `fc-match`-style total variant that a renderer should use.
+    /// Queries a font from the in-memory cache, returns the first found font (early return).
     pub fn query(&self, pattern: &FcPattern, trace: &mut Vec<TraceMsg>) -> Option<FontMatch> {
         let state = self.state_read();
 
-        // Memory fonts first, then the one ranking every path shares
-        // (`fallback::RankKey`): style closeness, then how much of the
-        // requested coverage the font misses, narrower before wider, name.
-        // Breadth of coverage is never a bonus.
+        // Sort by memory vs disk, then fallback::RankKey (style, coverage, width, name).
         let mut matches: Vec<(bool, fallback::RankKey, FontId, &FcPattern)> = Vec::new();
 
         for (id, metadata) in &state.metadata {
@@ -2195,7 +1902,7 @@ impl FcFontCache {
         self.state_read().memory_fonts.get(id).cloned()
     }
 
-    /// Check if a pattern matches the query, with detailed tracing
+    /// Check if a pattern matches the query, with detailed tracing.
     fn trace_path(k: &FcPattern) -> String {
         k.name
             .as_ref()
@@ -2355,9 +2062,7 @@ impl FcFontCache {
         true
     }
 
-    /// Extract tokens from a font name
-    /// E.g., "NotoSansJP" -> ["Noto", "Sans", "JP"]
-    /// E.g., "Noto Sans CJK JP" -> ["Noto", "Sans", "CJK", "JP"]
+    /// Extract tokens from a font name.
     pub fn extract_font_name_tokens(name: &str) -> Vec<String> {
         let mut tokens = Vec::new();
         let mut current_token = String::new();
@@ -2390,9 +2095,7 @@ impl FcFontCache {
         tokens
     }
 
-    /// Total coverage of `ranges` in codepoints (widths summed; callers
-    /// pass a normalized, disjoint set).
-    /// Find fallback fonts for a given pattern
+    /// Total coverage of `ranges` in codepoints (widths summed; callers.
     // Helper to calculate total unicode coverage
     pub fn calculate_unicode_coverage(ranges: &[UnicodeRange]) -> u64 {
         ranges
@@ -2402,17 +2105,6 @@ impl FcFontCache {
     }
 
     /// Coalesce ranges into a sorted, **disjoint** set.
-    ///
-    /// [`FcFontCache::calculate_unicode_coverage`] sums `end - start + 1` with no
-    /// overlap handling, and that sum ranks fallback candidates. A font's coverage
-    /// is built from two sources whose block boundaries do not align — the OS/2
-    /// `ulUnicodeRange` bit mappings and the cmap block probe — so merging them
-    /// naively double-counts the overlap and inflates the score. That is exactly
-    /// how a CJK megafont wins a Latin run it has no business winning.
-    ///
-    /// Touching ranges (`prev.end + 1 == next.start`) are merged as well: they
-    /// describe the same contiguous coverage, and leaving them split would make
-    /// one set compare unequal to another purely by which source produced it.
     pub fn normalize_unicode_ranges(mut ranges: Vec<UnicodeRange>) -> Vec<UnicodeRange> {
         if ranges.len() < 2 {
             return ranges;
@@ -2434,8 +2126,7 @@ impl FcFontCache {
         out
     }
 
-    /// Calculate how well a font's Unicode ranges cover the requested ranges
-    /// Returns a compatibility score (higher is better, 0 means no overlap)
+    /// Calculate how well a font's Unicode ranges cover the requested ranges.
     pub fn calculate_unicode_compatibility(
         requested: &[UnicodeRange],
         available: &[UnicodeRange],
@@ -2531,9 +2222,6 @@ impl FcFontCache {
                 }
             } else {
                 // orig == DontCare: prefer "normal" fonts over styled ones.
-                // When the caller doesn't specify italic/bold/etc., a font
-                // that IS italic/bold should score slightly worse than one
-                // that isn't, so Regular is chosen over Italic by default.
                 if cand == PatternMatch::True {
                     score += dontcare_penalty / 3;
                 }
@@ -2541,10 +2229,7 @@ impl FcFontCache {
         }
 
         // ── Name-based "base font" detection ──
-        // The shorter the font name relative to its family, the more "basic" the
-        // variant.  E.g. "System Font" (the base) should score better than
-        // "System Font Regular Italic" (a variant) when the user hasn't
-        // explicitly requested italic.
+        // Shorter font names relative to their family imply a more "basic" variant.
         if let (Some(name), Some(family)) = (&candidate.name, &candidate.family) {
             let name_lower = name.to_ascii_lowercase();
             let family_lower = family.to_ascii_lowercase();
@@ -2575,8 +2260,6 @@ impl FcFontCache {
         }
 
         // ── Subfamily "Regular" bonus ──
-        // Fonts whose OpenType subfamily is exactly "Regular" are the canonical
-        // base variant and should be strongly preferred.
         if let Some(ref subfamily) = candidate.metadata.font_subfamily {
             let sf_lower = subfamily.to_ascii_lowercase();
             if sf_lower == "regular" {
@@ -2612,31 +2295,18 @@ fn FcScanDirectories() -> Option<(
 }
 
 /// Deepest chain of `<include>`s [`FcSystemConfig::parse_tree`] follows.
-/// Cycles are caught by the visited set; this bounds pathological trees.
 #[cfg(all(feature = "std", feature = "parsing"))]
 const MAX_INCLUDE_DEPTH: usize = 64;
 
-/// What a fontconfig configuration tree says, as far as this crate reads
-/// it: where fonts live, per-family rendering settings, and `<alias>`
-/// preferences. Produced by [`FcSystemConfig::parse_tree`] from a root
-/// file and everything it includes.
-///
-/// The parser has no OS dependency and is compiled and tested everywhere;
-/// only [`FcSystemConfig::from_system`]'s default location is a Linux
-/// convention. `FcFontCache::build` and `FcFontRegistry::new` consult it
-/// where it exists and fill the gaps from the built-in tables.
+/// What a fontconfig configuration tree says, as far as this crate reads.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FcSystemConfig {
-    /// `<dir>` entries, resolved (prefixes and `~` expanded), in order,
-    /// each once.
+    /// `<dir>` entries, resolved (prefixes and `~` expanded), in order,.
     pub font_dirs: Vec<PathBuf>,
     /// `<match target="font">` rendering settings keyed by family.
     pub render_configs: BTreeMap<String, FcFontRenderConfig>,
-    /// `<alias><family>X</family><prefer>…</prefer></alias>` entries keyed by
-    /// the normalized family name (`"sansserif"`, `"arial"`), preferred
-    /// families in configured order, appended across files in include
-    /// order and deduplicated.
+    /// `<alias><family>X</family><prefer>…</prefer></alias>` entries keyed by.
     pub aliases: BTreeMap<String, Vec<String>>,
     /// Every configuration file that was read, in the order it was read.
     pub files: Vec<PathBuf>,
@@ -2644,9 +2314,7 @@ pub struct FcSystemConfig {
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 impl FcSystemConfig {
-    /// The platform configuration: `$FONTCONFIG_FILE` when set and
-    /// non-empty, else `/etc/fonts/fonts.conf`. `None` when that file does
-    /// not exist — the normal case on every OS but Linux.
+    /// The platform configuration: `$FONTCONFIG_FILE` when set and.
     pub fn from_system() -> Option<Self> {
         let root = std::env::var("FONTCONFIG_FILE")
             .ok()
@@ -2659,22 +2327,7 @@ impl FcSystemConfig {
         Self::parse_tree(&root)
     }
 
-    /// Parse `root` and everything it includes, the way fontconfig does:
-    /// includes are followed in document order, depth first; an included
-    /// directory contributes its `[0-9]*.conf` files in name order; every
-    /// file is read at most once (a cycle is simply ignored); missing
-    /// includes are skipped.
-    ///
-    /// Relative `<include>` paths resolve like fontconfig's
-    /// `FcConfigGetFilename`: against each directory of `$FONTCONFIG_PATH`,
-    /// then against the directory of `root` — so the stock
-    /// `<include ignore_missing="yes">conf.d</include>` finds
-    /// `/etc/fonts/conf.d` no matter where the process runs. `prefix="xdg"`
-    /// resolves against `$XDG_CONFIG_HOME` (includes) or `$XDG_DATA_HOME`
-    /// (dirs), `prefix="relative"` against the including file's directory,
-    /// `prefix="cwd"` / `"default"` against the working directory.
-    ///
-    /// `None` if `root` cannot be read.
+    /// Parse `root` and everything it includes, the way fontconfig does:.
     pub fn parse_tree(root: &std::path::Path) -> Option<Self> {
         use std::collections::VecDeque;
 
@@ -2791,12 +2444,7 @@ impl FcSystemConfig {
     }
 }
 
-/// Parse `<alias><family>NAME</family><prefer><family>...</family>...</prefer></alias>`
-/// blocks from a fontconfig XML file into `aliases`.
-///
-/// Keys are normalized with [`crate::utils::normalize_family_name`];
-/// preferred families keep their configured order, appended across files
-/// in include order (fontconfig semantics), deduplicated.
+/// Parse `<alias><family>NAME</family><prefer><family>...</family>...</prefer></alias>`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn ParseFontsConfAliases(input: &str, aliases: &mut BTreeMap<String, Vec<String>>) {
     use xmlparser::Token::*;
@@ -3003,17 +2651,7 @@ fn ParseFontsConf(
     Some(())
 }
 
-/// Parses `<match target="font">` blocks from fonts.conf XML and returns
-/// a map from family name to per-font rendering configuration.
-///
-/// Example fonts.conf snippet that this handles:
-/// ```xml
-/// <match target="font">
-///   <test name="family"><string>Inconsolata</string></test>
-///   <edit name="antialias" mode="assign"><bool>true</bool></edit>
-///   <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
-/// </match>
-/// ```
+/// Parses `<match target="font">` blocks from fonts.conf XML and returns.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn ParseFontsConfRenderConfig(input: &str, configs: &mut BTreeMap<String, FcFontRenderConfig>) {
     use xmlparser::Token::*;
@@ -3022,13 +2660,13 @@ fn ParseFontsConfRenderConfig(input: &str, configs: &mut BTreeMap<String, FcFont
     // Parser state machine
     #[derive(Clone, Copy, PartialEq)]
     enum State {
-        /// Outside any relevant block
+        /// Outside any relevant block.
         Idle,
-        /// Inside <match target="font">
+        /// Inside <match target="font">.
         InMatchFont,
-        /// Inside <test name="family"> within a match block
+        /// Inside <test name="family"> within a match block.
         InTestFamily,
-        /// Inside <edit name="..."> within a match block
+        /// Inside <edit name="..."> within a match block.
         InEdit,
     }
 
@@ -3273,7 +2911,6 @@ fn parse_lcdfilter_const(value: &str) -> Option<FcLcdFilter> {
 }
 
 /// Intermediate parsed data from a single font face within a font file.
-/// Used to share parsing logic between `FcParseFont` and `FcParseFontBytesInner`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 struct ParsedFontFace {
     pattern: FcPattern,
@@ -3281,10 +2918,6 @@ struct ParsedFontFace {
 }
 
 /// Parse all font table data from a single font face and return the extracted patterns.
-///
-/// This is the shared core of `FcParseFont` and `FcParseFontBytesInner`:
-/// TTC detection, font table parsing, OS/2/head/post reading, unicode range extraction,
-/// CMAP verification, monospace detection, metadata extraction, and pattern creation.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
     use allsorts::{
@@ -3332,17 +2965,7 @@ fn parse_font_faces(font_bytes: &[u8]) -> Option<Vec<ParsedFontFace>> {
             detected_monospace = Some(post_table.header.is_fixed_pitch != 0);
         }
 
-        // Get font properties from OS/2 table.
-        //
-        // OS/2 is OPTIONAL in TrueType - only OpenType requires it - and plenty
-        // of real fonts ship without one, including the base-14 PDF font subsets
-        // printpdf embeds. This used to be `.ok()??`, which turned "no OS/2" into
-        // "not a font" and made the whole face invisible to the cache even though
-        // allsorts parses it perfectly well.
-        //
-        // Nothing below actually needs OS/2: `head.macStyle` already gave us bold
-        // and italic, `post`/`hmtx` cover monospace, and coverage has been
-        // cmap-authoritative since 4.4.8. So treat it as the hint it is.
+        // OS/2 table is optional; get properties if present.
         let os2_data = provider.table_data(tag::OS_2).ok().flatten();
         let os2_table = os2_data
             .as_deref()
@@ -3521,10 +3144,7 @@ pub(crate) fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPa
 
     let faces = parse_font_faces(&font_bytes[..])?;
     let path_str = filepath.to_string_lossy().to_string();
-    // Hash once per file — every face of a .ttc shares this value,
-    // so the shared-bytes cache can return the same Arc<[u8]> for
-    // all of them. Use the cheap sampled variant so the scout doesn't
-    // page-fault the full file into RSS just to produce a dedup key.
+    // Hash once per file using cheap sampled hash to avoid full file page-fault.
     let bytes_hash = crate::utils::content_dedup_hash_u64(&font_bytes[..]);
 
     Some(
@@ -3545,34 +3165,12 @@ pub(crate) fn FcParseFont(filepath: &PathBuf) -> Option<Vec<(FcPattern, FcFontPa
 }
 
 /// Coverage info returned by a fast-probe parse.
-///
-/// Produced by [`FcParseFontFaceFast`] / [`FcProbeCoverage`] — the
-/// v4.2 "cheap cmap-only" entry point. Unlike `parse_font_faces`,
-/// this path does **not** read NAME, OS/2, POST, HHEA, HMTX, HEAD's
-/// style metadata, or anything else. It only reads the table
-/// directory, `head.macStyle` (2 bytes), and the cmap subtable that
-/// matches the codepoints we care about. ~1 ms/face on warm FS
-/// cache vs ~13 ms for the full parse.
-///
-/// The `pattern.unicode_ranges` is populated from the *actual* cmap
-/// contents (one `UnicodeRange` per covered codepoint in the input
-/// set) rather than the OS/2 `ulUnicodeRange` bitfield. That's more
-/// precise (OS/2 bits lie on many fonts — they're hints, not ground
-/// truth) and means `FontFallbackChain::resolve_char`'s coverage
-/// check matches what the shaper can actually render.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[derive(Debug, Clone)]
 pub struct FastCoverage {
-    /// Metadata pattern with `unicode_ranges` populated from the
-    /// codepoints this face covered from the request set. `name` /
-    /// `family` fields are left empty — callers already have the
-    /// filename-guessed family in [`FcFontRegistry.known_paths`];
-    /// we avoid the NAME table read entirely.
+    /// Metadata pattern with `unicode_ranges` populated from the.
     pub pattern: FcPattern,
-    /// Subset of the input codepoints that this face covers (maps
-    /// to a non-zero gid via the best cmap subtable). May be empty
-    /// if the face covers none, in which case callers should fall
-    /// through to the next candidate path.
+    /// Subset of the input codepoints that this face covers (maps.
     pub covered: alloc::collections::BTreeSet<char>,
     /// `head.macStyle.bold` (bit 0).
     pub is_bold: bool,
@@ -3581,21 +3179,6 @@ pub struct FastCoverage {
 }
 
 /// Fast per-face coverage probe.
-///
-/// Opens the provided font bytes as a `FontData` (detects TTC
-/// collections), walks the given face, reads `head.macStyle` for
-/// bold/italic flags, picks the best cmap subtable, and records
-/// which of the requested codepoints have a non-zero gid.
-///
-/// Cost: table-dir parse + head (54 bytes) + cmap (5-100 KiB,
-/// faulted in from mmap). No heap allocation besides the
-/// covered-codepoints set and the returned `FcPattern`.
-///
-/// Returns `None` only if the font bytes are structurally bad or
-/// the face index is out of range — empty coverage returns
-/// `Some` with `covered.is_empty()`, so the caller can distinguish
-/// "this face doesn't have the char we want" (try next face) from
-/// "this file is corrupt" (give up on the whole file).
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[allow(non_snake_case)]
 pub fn FcParseFontFaceFast(
@@ -3639,9 +3222,7 @@ pub fn FcParseFontFaceFast(
             covered.insert(*ch);
         }
     }
-    // The face's full coverage from the subtable's segments — the same exact
-    // set the scan path stores — so a fast-probed face is not left claiming
-    // only the characters that happened to be asked for so far.
+    // Full coverage from subtable segments, matching scan path storage.
     let covered_ranges =
         coverage_from_subtable(&cmap_subtable, &cmap_data, encoding_record.offset as usize)
             .unwrap_or_default();
@@ -3676,10 +3257,7 @@ pub fn FcParseFontFaceFast(
     })
 }
 
-/// Count the number of faces inside a TTC, or `1` for a single-face
-/// font file. Used by [`FcFontRegistry::request_fonts_fast`] to
-/// iterate every face in a `.ttc` without paying the full-parse
-/// cost (the TTC header is 12 bytes).
+/// Count the number of faces inside a TTC, or `1` for a single-face.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[allow(non_snake_case)]
 pub fn FcCountFontFaces(font_bytes: &[u8]) -> usize {
@@ -3694,30 +3272,6 @@ pub fn FcCountFontFaces(font_bytes: &[u8]) -> usize {
 }
 
 /// Parse font bytes and extract font patterns for in-memory fonts.
-///
-/// This is the public API for parsing in-memory font data to create
-/// `(FcPattern, FcFont)` tuples that can be added to an `FcFontCache`
-/// via `with_memory_fonts()`.
-///
-/// # Arguments
-/// * `font_bytes` - The raw bytes of a TrueType/OpenType font file
-/// * `font_id` - An identifier string for this font (used internally)
-///
-/// # Returns
-/// A vector of `(FcPattern, FcFont)` tuples, one for each font face in the file.
-/// Returns `None` if the font could not be parsed.
-///
-/// # Example
-/// ```ignore
-/// use rust_fontconfig::{FcFontCache, FcParseFontBytes};
-///
-/// let font_bytes = include_bytes!("path/to/font.ttf");
-/// let mut cache = FcFontCache::default();
-///
-/// if let Some(fonts) = FcParseFontBytes(font_bytes, "MyFont") {
-///     cache.with_memory_fonts(fonts);
-/// }
-/// ```
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[allow(non_snake_case)]
 pub fn FcParseFontBytes(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPattern, FcFont)>> {
@@ -3725,7 +3279,6 @@ pub fn FcParseFontBytes(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPatte
 }
 
 /// Internal implementation for parsing font bytes.
-/// Delegates to `parse_font_faces` for shared parsing logic and wraps results as `FcFont`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFontBytesInner(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPattern, FcFont)>> {
     let faces = parse_font_faces(font_bytes)?;
@@ -3778,9 +3331,7 @@ fn FcScanDirectoriesInner(paths: &[(Option<String>, String)]) -> Vec<(FcPattern,
     }
 }
 
-/// Font files under `dir`: see [`crate::utils::collect_font_files`] (cycle-safe,
-/// extension-filtered). The scan used to open and mmap every regular file
-/// under its roots — on macOS that is all of `/System/Library/AssetsV2`.
+/// Font files under `dir`: see [`crate::utils::collect_font_files`] (cycle-safe,.
 #[cfg(feature = "std")]
 #[allow(non_snake_case)]
 fn FcCollectFontFilesRecursive(dir: PathBuf) -> Vec<PathBuf> {
@@ -3819,8 +3370,6 @@ fn FcParseFontFiles(files_to_parse: &[PathBuf]) -> Vec<(FcPattern, FcFontPath)> 
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 /// Takes a path & prefix and resolves them to a usable path, or `None` if they're unsupported/unavailable.
-///
-/// Behaviour is based on: https://www.freedesktop.org/software/fontconfig/fontconfig-user.html
 fn process_path(
     prefix: &Option<String>,
     mut path: PathBuf,
@@ -3909,16 +3458,13 @@ fn get_name_string(name_data: &[u8], name_id: u16) -> Option<String> {
 }
 
 /// Find the best Unicode CMAP subtable from a font provider.
-/// Tries multiple platform/encoding combinations in priority order.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn find_best_cmap_subtable<'a>(
     cmap: &allsorts::tables::cmap::Cmap<'a>,
 ) -> Option<allsorts::tables::cmap::EncodingRecord> {
     use allsorts::tables::cmap::{EncodingId, PlatformId};
 
-    // Full-repertoire subtables first (they carry the astral planes: emoji,
-    // CJK extensions), BMP-only ones after — the order FreeType and
-    // fontconfig use.
+    // Full-repertoire subtables first, BMP-only ones after.
     cmap.find_subtable(PlatformId::UNICODE, EncodingId(4))
         .or_else(|| cmap.find_subtable(PlatformId::WINDOWS, EncodingId(10)))
         .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(3)))
@@ -3927,17 +3473,7 @@ fn find_best_cmap_subtable<'a>(
         .or_else(|| cmap.find_subtable(PlatformId::UNICODE, EncodingId(1)))
 }
 
-/// Exact coverage of a font face: every codepoint its best Unicode cmap
-/// subtable maps to a real glyph, as a normalized (sorted, disjoint) range
-/// list. This is the same source fontconfig builds its `FcCharSet` from.
-/// OS/2's `ulUnicodeRange` bits are not consulted: fonts get them wrong in
-/// both directions, and a block-level hint cannot say which characters of a
-/// block are missing.
-///
-/// Cost is proportional to the subtable's segment count (format 4) or group
-/// count (format 12) — hundreds to a few thousand entries — with no
-/// per-codepoint lookups except inside format-4 segments that index the
-/// glyphIdArray, which can contain holes.
+/// Exact coverage of a font face: every codepoint its best Unicode cmap.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn cmap_coverage(provider: &impl FontTableProvider) -> Option<Vec<UnicodeRange>> {
     use allsorts::binary::read::ReadScope;
@@ -3953,8 +3489,7 @@ fn cmap_coverage(provider: &impl FontTableProvider) -> Option<Vec<UnicodeRange>>
     coverage_from_subtable(&subtable, &cmap_data, record.offset as usize)
 }
 
-/// See [`cmap_coverage`]. `cmap_data` and `offset` locate the raw subtable,
-/// needed for format 12 whose groups allsorts does not expose.
+/// See [`cmap_coverage`].
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn coverage_from_subtable(
     subtable: &allsorts::tables::cmap::CmapSubtable<'_>,
@@ -4005,13 +3540,7 @@ fn coverage_from_subtable(
                         push(start, end);
                     }
                 } else {
-                    // glyphIdArray-indexed segment (OpenType cmap §format 4):
-                    // the value for `code` sits at
-                    // idRangeOffset/2 + (code - start) - (segCount - i) in
-                    // glyphIdArray; 0 there means missing, otherwise idDelta
-                    // is added. Indexed directly: a CJK BMP subtable has
-                    // thousands of these codes, and a per-code lookup through
-                    // the subtable is a linear scan over its segments.
+                    // glyphIdArray-indexed segment (OpenType cmap format 4).
                     let base = (range_offset as usize / 2).wrapping_sub(seg_count - i);
                     for code in start..=end {
                         let index = base.wrapping_add((code - start) as usize);
@@ -4093,9 +3622,7 @@ fn coverage_from_subtable(
     }
 }
 
-/// The `(startCharCode, endCharCode, startGlyphID)` groups of the format-12
-/// subtable at `offset` in the raw cmap table. Layout: format u16, reserved
-/// u16, length u32, language u32, numGroups u32, then the groups.
+/// The `(startCharCode, endCharCode, startGlyphID)` groups of the format-12.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn format12_groups(cmap_data: &[u8], offset: usize) -> Option<Vec<(u32, u32, u32)>> {
     let table = cmap_data.get(offset..)?;
@@ -4171,13 +3698,6 @@ fn detect_monospace(
 }
 
 /// Guess font metadata from a filename using the existing tokenizer.
-///
-/// Uses [`config::tokenize_font_stem`] and [`config::FONT_STYLE_TOKENS`]
-/// to extract the family name and detect style hints from the filename.
-///
-/// Only compiled for the filename-only (`not(parsing)`) scan path — its
-/// sole caller is [`FcFontCache::build_from_filenames`]. With `parsing`
-/// on, allsorts reads real metadata and this fallback is unused.
 #[cfg(all(feature = "std", not(feature = "parsing")))]
 fn pattern_from_filename(path: &std::path::Path) -> Option<FcPattern> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -4358,8 +3878,7 @@ mod coverage_tests {
 
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/InstrumentSerif-Regular.ttf");
 
-    /// Every codepoint up to `max` the face's best subtable maps to a real
-    /// glyph, found the slow way: one `map_glyph` per codepoint.
+    /// Every codepoint up to `max` the face's best subtable maps to a real.
     fn brute_force(bytes: &[u8], face: usize, max: u32) -> Vec<UnicodeRange> {
         let font = ReadScope::new(bytes)
             .read::<FontData<'_>>()
@@ -4454,8 +3973,7 @@ mod coverage_tests {
         );
     }
 
-    /// The parsed coverage of the bundled fixture is exactly the set of
-    /// codepoints its cmap maps — no block rounding in either direction.
+    /// The parsed coverage of the bundled fixture is exactly the set of.
     #[test]
     fn fixture_coverage_equals_the_cmap_exactly() {
         let faces = FcParseFontBytes(FIXTURE, "fixture").expect("the fixture parses");
@@ -4505,11 +4023,7 @@ mod coverage_tests {
         Some(f(&subtable, &cmap_data, record.offset as usize))
     }
 
-    /// Every installed face: each parsed range starts and ends on a mapped
-    /// codepoint and the codepoints just outside it are unmapped. O(ranges)
-    /// per face, so a whole system takes seconds; the fixture test above is
-    /// the full codepoint-by-codepoint reference. Run on demand:
-    /// `cargo test --features parsing --lib every_installed -- --ignored --nocapture`
+    /// Every installed face: each parsed range starts and ends on a mapped.
     #[test]
     #[ignore]
     fn every_installed_font_coverage_matches_its_cmap_at_every_boundary() {
@@ -4530,9 +4044,7 @@ mod coverage_tests {
         for dir in crate::config::font_directories(OperatingSystem::current()) {
             walk(&dir, &mut files);
         }
-        // A bounded sample keeps this to seconds on machines with thousands
-        // of downloadable fonts (macOS AssetsV2); set RFC_COVERAGE_CHECK_ALL
-        // to check every file.
+        // Bounded sample to keep tests fast (set RFC_COVERAGE_CHECK_ALL for all files).
         if std::env::var_os("RFC_COVERAGE_CHECK_ALL").is_none() {
             files.truncate(400);
         }
