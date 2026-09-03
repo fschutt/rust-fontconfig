@@ -32,7 +32,7 @@ Now for the more practical reasons:
 
 ```toml
 [dependencies]
-rust-fontconfig = { version = "5.0", features = ["parsing"] }
+rust-fontconfig = { version = "5.1", features = ["parsing"] }
 ```
 
 The default build (`std` only) discovers system fonts via **filename
@@ -50,6 +50,7 @@ accurate family names, weights, Unicode coverage and
 | `cache` | | Persist the parsed cache to disk (serde + bincode + dirs). |
 | `async-registry` | | `FcFontRegistry` for incremental/background font discovery. Implies `parsing`. |
 | `ffi` | | C API bindings. Implies `parsing` + `async-registry`. |
+| `desktop-detect` | | Ask the running desktop for its configured fonts (`gsettings`, `kdeglobals`). The only code here that starts a process. |
 
 > **WASM:** `wasm32-*` targets build out of the box - `mmapio` and `rayon` are
 > excluded automatically via `cfg`. Build with `--features parsing`.
@@ -195,6 +196,31 @@ For the async registry, `FcFontRegistry::new_with_configs(scan, fallback)`
 injects both the scan side and the resolution side; the families it parses
 ahead of a request are exactly `config.candidate_families(stack, scripts)`,
 so what is prefetched and what a chain can contain agree by construction.
+
+### The Desktop's Configured Font
+
+Desktops store their font choice as a string - `'Cantarell 11'` on GNOME,
+`Noto Sans,10,-1,5,50,0,0,0,0,0` on KDE. `FcDesktopFont` parses both forms,
+and `prefer` puts the result at the front of a generic's candidates so the
+built-in list still answers when that font is not installed:
+
+```rust
+let ui = FcDesktopFont::parse(&value_from_your_desktop)?;
+cache.modify_fallback_config(|c| {
+    c.prefer_for(&[GenericFamily::SystemUi, GenericFamily::UiSansSerif], ui.family);
+});
+```
+
+Parsing does no I/O. Asking the desktop does, so it sits behind the
+off-by-default `desktop-detect` feature - with it on, `FcDesktopFonts::detect()`
+spawns `gsettings` and reads `kdeglobals` on Linux and returns `ui`,
+`document` and `monospace`. Which generic each of those maps to is your
+decision, not the crate's. Nothing else here ever starts a process: a default
+build makes no OS calls beyond reading font files and `fonts.conf`.
+
+Under Flatpak, `gsettings` reports the sandbox's values rather than the
+host's - read the XDG Settings Portal yourself there and hand the string to
+`FcDesktopFont::parse`.
 
 ### Character-by-Character Font Resolution
 

@@ -578,6 +578,51 @@ impl FcFallbackConfig {
         config
     }
 
+    /// Replace the preferred families for `generic`.
+    ///
+    /// The previous list is discarded, so `generic` resolves to `families` or
+    /// to nothing. Use [`prefer`](Self::prefer) to keep the old list as a
+    /// fallback for the case where `families` is not installed.
+    pub fn set_generic(&mut self, generic: GenericFamily, families: Vec<String>) -> &mut Self {
+        self.generic_families.insert(generic, families);
+        self
+    }
+
+    /// Put `family` first among `generic`'s candidates, keeping the rest.
+    ///
+    /// This is the shape a desktop preference wants: the configured font wins
+    /// when it is installed, and the built-in list still answers when it is
+    /// not. An entry equal to `family` (ASCII case-insensitive) is moved to
+    /// the front rather than duplicated.
+    ///
+    /// A generic with no list of its own inherits one from its
+    /// [`parent`](GenericFamily::parent); preferring a family gives it a list
+    /// of its own, so the inherited candidates are copied in behind `family`.
+    pub fn prefer(&mut self, generic: GenericFamily, family: impl Into<String>) -> &mut Self {
+        let family = family.into();
+        let mut list = match self.generic_families.remove(&generic) {
+            Some(list) => list,
+            None => self.generic_candidates(generic).to_vec(),
+        };
+        list.retain(|f| !f.eq_ignore_ascii_case(&family));
+        list.insert(0, family);
+        self.generic_families.insert(generic, list);
+        self
+    }
+
+    /// [`prefer`](Self::prefer) `family` for every generic in `generics`.
+    pub fn prefer_for(
+        &mut self,
+        generics: &[GenericFamily],
+        family: impl Into<String>,
+    ) -> &mut Self {
+        let family = family.into();
+        for generic in generics {
+            self.prefer(*generic, family.clone());
+        }
+        self
+    }
+
     /// Base candidates for `generic`, borrowing from its
     /// [`parent`](GenericFamily::parent) when it has no entry of its own.
     pub fn generic_candidates(&self, generic: GenericFamily) -> &[String] {

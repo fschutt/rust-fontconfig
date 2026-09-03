@@ -86,10 +86,14 @@ use std::path::PathBuf;
 
 #[cfg(feature = "std")]
 pub mod config;
+#[cfg(feature = "std")]
+pub mod desktop;
 pub mod fallback;
 pub mod utils;
 #[cfg(feature = "std")]
 pub use config::{FcFallbackConfig, FcScriptFallback, GenericFamily};
+#[cfg(feature = "std")]
+pub use desktop::{FcDesktopFont, FcDesktopFonts};
 #[cfg(feature = "std")]
 use fallback::FontChainCacheKey;
 #[cfg(feature = "std")]
@@ -1403,6 +1407,28 @@ impl FcFontCache {
     /// Builder-style [`set_fallback_config`](Self::set_fallback_config).
     pub fn with_fallback_config(self, config: FcFallbackConfig) -> Self {
         self.set_fallback_config(config);
+        self
+    }
+
+    /// Edit the fallback configuration in place.
+    ///
+    /// One write lock for the whole edit, so concurrent callers cannot lose
+    /// each other's changes the way a
+    /// [`fallback_config`](Self::fallback_config) → mutate →
+    /// [`set_fallback_config`](Self::set_fallback_config) round trip can. The
+    /// memoized chains are dropped once, after `f` returns.
+    ///
+    /// ```no_run
+    /// # use rust_fontconfig::*;
+    /// # fn f(cache: &FcFontCache, ui_family: String) {
+    /// cache.modify_fallback_config(|c| {
+    ///     c.prefer_for(&[GenericFamily::SystemUi, GenericFamily::UiSansSerif], ui_family);
+    /// });
+    /// # }
+    /// ```
+    pub fn modify_fallback_config(&self, f: impl FnOnce(&mut FcFallbackConfig)) -> &Self {
+        f(&mut self.state_write().fallback_config);
+        self.clear_chain_cache();
         self
     }
 
