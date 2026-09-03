@@ -21,8 +21,6 @@ use alloc::vec::Vec;
 use crate::FcWeight;
 
 /// Style keywords Pango accepts, lowercased and stripped of `-`.
-/// Peeled off the end of a description before what remains is taken as the
-/// family list.
 const PANGO_STYLE_KEYWORDS: &[&str] = &[
     // style
     "normal",
@@ -75,7 +73,7 @@ const PANGO_STYLE_KEYWORDS: &[&str] = &[
     "west",
 ];
 
-/// Numeric weight for a Pango weight keyword, on the CSS scale.
+/// Maps a Pango weight keyword to the CSS scale.
 fn pango_weight(key: &str) -> Option<u16> {
     Some(match key {
         "thin" => 100,
@@ -116,11 +114,11 @@ pub struct FcDesktopFont {
     pub family: String,
     /// Every family in the description, in order.
     pub families: Vec<String>,
-    /// [`FcWeight::Normal`] when the description names no weight.
+    /// The parsed weight (defaults to Normal).
     pub weight: FcWeight,
-    /// The description asked for italic.
+    /// Whether italic style was requested.
     pub italic: bool,
-    /// The description asked for oblique.
+    /// Whether oblique style was requested.
     pub oblique: bool,
     /// Point size, if specified. Absolute 'px' sizes are ignored.
     pub size_pt: Option<f32>,
@@ -154,7 +152,7 @@ impl FcDesktopFont {
     pub fn parse(input: &str) -> Option<Self> {
         let input = input.trim();
         let input = input.trim_matches('\'').trim_matches('"').trim();
-        // `@wght=700,wdth=100` — font variations, not part of the family.
+        // Strip font variations.
         let input = input.split('@').next().unwrap_or(input).trim();
         if input.is_empty() {
             return None;
@@ -166,7 +164,7 @@ impl FcDesktopFont {
         let mut oblique = false;
         let mut size_pt = None;
 
-        // Size, if the last token is one.
+        // Extract size from the last token.
         if let Some(last) = tokens.last() {
             let (number, is_px) = match last.strip_suffix("px") {
                 Some(n) => (n, true),
@@ -184,11 +182,11 @@ impl FcDesktopFont {
             }
         }
 
-        // Style options, peeled off the end while a family would remain.
+        // Extract style options from the end.
         while tokens.len() > 1 {
             let key = key_of(tokens[tokens.len() - 1]);
             if let Some(rest) = key.strip_prefix("weight") {
-                // `Weight=380`, a numeric weight.
+                // Numeric weight.
                 if let Ok(value) = rest.parse::<u16>() {
                     weight = FcWeight::from_u16(value);
                     tokens.pop();
@@ -243,11 +241,7 @@ impl FcDesktopFont {
         Self::parse(inner)
     }
 
-    /// Parse a Qt font description: `family,pointSize,pixelSize,styleHint,weight,italic,...`.
-    ///
-    /// This is what KDE writes into `kdeglobals` (`[General] font=`, `fixed=`)
-    /// and what `QFont::toString` produces. Fields after the ones named are
-    /// ignored, and missing fields are allowed.
+    /// Parses a Qt `QFont` description (e.g. `family,pointSize,pixelSize,styleHint,weight,italic,...`).
     ///
     /// ```
     /// # use rust_fontconfig::{FcDesktopFont, FcWeight};
@@ -290,13 +284,13 @@ impl FcDesktopFont {
     }
 }
 
-/// Qt weights are 0-99 in the legacy format and 1-1000 in the current one.
+/// Normalizes Qt weights (0-99 or 1-1000).
 fn qt_weight(value: f32) -> u16 {
     let value = value.round().clamp(0.0, 1000.0) as u16;
     if value > 99 {
         return value;
     }
-    // Qt's legacy anchors: Light 25, Normal 50, DemiBold 63, Bold 75, Black 87.
+    // Qt legacy anchors.
     match value {
         0..=12 => 100,
         13..=24 => 200,
@@ -310,7 +304,7 @@ fn qt_weight(value: f32) -> u16 {
     }
 }
 
-/// Split a comma-separated family list, dropping empty entries.
+/// Splits a comma-separated family list.
 fn split_families(input: &str) -> Vec<String> {
     input
         .split(',')
@@ -320,10 +314,7 @@ fn split_families(input: &str) -> Vec<String> {
         .collect()
 }
 
-/// What a desktop was asked for its font choices.
-///
-/// Every field is `None` when the desktop did not answer. Which generic each
-/// role belongs to is the embedder's decision — see the module docs.
+/// Desktop font configurations for UI, document, and monospace roles.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FcDesktopFonts {
     /// The UI font.
@@ -365,7 +356,7 @@ impl FcDesktopFonts {
 }
 
 impl FcDesktopFonts {
-    /// Fill this set's empty roles from `other`, preserving existing values.
+    /// Fills empty roles from `other`.
     pub fn fill_from(&mut self, other: Self) -> &mut Self {
         if self.ui.is_none() {
             self.ui = other.ui;
@@ -382,11 +373,7 @@ impl FcDesktopFonts {
 
 #[cfg(feature = "desktop-detect")]
 impl FcDesktopFonts {
-    /// Ask the running desktop for its configured fonts.
-    /// Spawns processes on Linux to consult the XDG Settings Portal, GNOME, and KDE configurations.
-    ///
-    /// Other platforms return [`FcDesktopFonts::default`].
-    /// Supply custom fonts using [`FcDesktopFont::new`].
+    /// Detects the running desktop's configured fonts (Linux only).
     pub fn detect() -> Self {
         #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
         {
@@ -410,8 +397,7 @@ impl FcDesktopFonts {
         }
     }
 
-    /// The XDG Settings Portal via `gdbus`.
-    /// Reports host settings from within Flatpak/Snap sandboxes.
+    /// Queries the XDG Settings Portal via `gdbus`.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_xdg_portal() -> Self {
         Self {
@@ -421,8 +407,7 @@ impl FcDesktopFonts {
         }
     }
 
-    /// GNOME and other desktops using the `org.gnome.desktop.interface` schema.
-    /// Uses `gsettings`. Reports sandbox-local values inside Flatpak/Snap.
+    /// Queries GNOME settings via `gsettings`.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_gsettings() -> Self {
         Self {
