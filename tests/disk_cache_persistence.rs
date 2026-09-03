@@ -49,7 +49,10 @@ impl TempDir {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("rfc-cache-test-{tag}-{}-{nanos}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "rfc-cache-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         TempDir(dir)
     }
@@ -214,10 +217,14 @@ fn save_leaves_no_temp_files_and_replaces_atomically() {
     let manifest = tmp.manifest();
 
     let registry = scanned();
-    registry.save_to_disk_cache_at(&manifest).expect("first save");
+    registry
+        .save_to_disk_cache_at(&manifest)
+        .expect("first save");
     let first = std::fs::read(&manifest).expect("read first manifest");
 
-    registry.save_to_disk_cache_at(&manifest).expect("second save");
+    registry
+        .save_to_disk_cache_at(&manifest)
+        .expect("second save");
     let second = std::fs::read(&manifest).expect("read second manifest");
     assert_eq!(
         first.len(),
@@ -270,8 +277,7 @@ fn save_leaves_no_temp_files_and_replaces_atomically() {
 #[test]
 fn build_completion_writes_the_real_manifest_without_any_explicit_save() {
     const CHILD_ENV: &str = "RFC_DISK_CACHE_AUTOSAVE_CHILD";
-    const TEST_NAME: &str =
-        "build_completion_writes_the_real_manifest_without_any_explicit_save";
+    const TEST_NAME: &str = "build_completion_writes_the_real_manifest_without_any_explicit_save";
 
     if std::env::var_os(CHILD_ENV).is_some() {
         // ---- child: scan, and DO NOT call save ----
@@ -281,7 +287,10 @@ fn build_completion_writes_the_real_manifest_without_any_explicit_save() {
         while !registry.is_build_complete() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(registry.is_build_complete(), "child: scan did not complete in 180s");
+        assert!(
+            registry.is_build_complete(),
+            "child: scan did not complete in 180s"
+        );
         assert!(!registry.list().is_empty(), "child: scan found zero fonts");
 
         let path = rust_fontconfig::disk_cache::get_font_cache_path()
@@ -328,9 +337,16 @@ fn build_completion_writes_the_real_manifest_without_any_explicit_save() {
     // Belt and braces: the manifest must be under one of the redirected roots,
     // proving the child wrote a NEW file rather than finding a pre-existing one.
     let candidates = [
-        home.join("Library").join("Caches").join("rfc").join("fonts").join("manifest.bin"),
+        home.join("Library")
+            .join("Caches")
+            .join("rfc")
+            .join("fonts")
+            .join("manifest.bin"),
         xdg.join("rfc").join("fonts").join("manifest.bin"),
-        home.join(".cache").join("rfc").join("fonts").join("manifest.bin"),
+        home.join(".cache")
+            .join("rfc")
+            .join("fonts")
+            .join("manifest.bin"),
     ];
     let found: Vec<_> = candidates.iter().filter(|p| p.exists()).collect();
     assert!(
