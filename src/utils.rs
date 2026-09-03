@@ -3,23 +3,10 @@ use alloc::string::String;
 /// Known font file extensions (lowercase).
 pub const FONT_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "dfont"];
 
-/// Size (in bytes) of the head/tail samples taken by
-/// [`content_dedup_hash_u64`]. The full hash spans the file size plus
-/// these two samples, so collisions are only possible for files that
-/// agree on size *and* both head + tail windows — adequate for
-/// deduping the same `.ttc` read under different paths without
-/// incurring a full-file walk through mmapped pages.
+/// Size (in bytes) of the head/tail samples taken by `content_dedup_hash_u64`.
 pub const CONTENT_DEDUP_SAMPLE_BYTES: usize = 4096;
 
-/// Deterministic 64-bit "cheap" content hash derived from
-/// `(file_size, first 4 KiB, last 4 KiB)`.
-///
-/// Same guarantees as [`content_hash_u64`] — stable across process
-/// runs, usable for the on-disk font cache — but avoids materialising
-/// every page of a multi-megabyte `.ttc` into RSS just to compute a
-/// dedup key. Callers typically have the scout's mmap open and have
-/// already faulted-in the header tables anyway, so the head sample is
-/// free; the tail sample costs at most one extra page fault.
+/// Deterministic 64-bit "cheap" content hash derived from `(file_size, first 4 KiB, last 4 KiB)`.
 pub fn content_dedup_hash_u64(bytes: &[u8]) -> u64 {
     let len = bytes.len();
     let head_len = len.min(CONTENT_DEDUP_SAMPLE_BYTES);
@@ -45,17 +32,6 @@ pub fn content_dedup_hash_u64(bytes: &[u8]) -> u64 {
 }
 
 /// Deterministic 64-bit content hash over an arbitrary byte slice.
-///
-/// Walks every byte — for large font files (`.ttc` can be tens of
-/// MiB) this materialises the whole mmap into RSS, so production
-/// callers that just want a dedup key should prefer the cheaper
-/// [`content_dedup_hash_u64`]. This variant stays as a building
-/// block and for tests that need strict equality.
-///
-/// Not cryptographic. Stable across process runs and across builds —
-/// unlike `std::collections::hash_map::DefaultHasher`, which is
-/// randomised per-process — so hashes can be persisted to the disk
-/// cache. Processes 8 bytes per iteration, trivial no-dep impl.
 pub fn content_hash_u64(bytes: &[u8]) -> u64 {
     // Golden-ratio multiplier; used by xxhash and others as a simple
     // avalanche-friendly constant.
@@ -84,8 +60,6 @@ pub fn content_hash_u64(bytes: &[u8]) -> u64 {
 }
 
 /// Normalize a family/font name for comparison: lowercase, strip all non-alphanumeric characters.
-///
-/// This ensures consistent matching regardless of spaces, hyphens, underscores, or casing.
 pub fn normalize_family_name(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric())
@@ -105,12 +79,7 @@ pub fn is_font_file(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Every font file (by extension, see [`FONT_EXTENSIONS`]) under `root`,
-/// breadth-first. Symbolic links to directories are followed, but each
-/// directory is visited once by canonical path, so a link cycle
-/// (`~/.fonts/loop -> ..` is a classic) terminates instead of overflowing
-/// the stack, and the walk stops at depth 32. Both scanners — the
-/// synchronous `FcFontCache::build` and the registry's scout — use this.
+/// Breadth-first walk of a directory yielding paths to files with recognized font extensions.
 #[cfg(feature = "std")]
 pub fn collect_font_files(root: &std::path::Path) -> alloc::vec::Vec<std::path::PathBuf> {
     use std::collections::{BTreeSet, VecDeque};
@@ -143,32 +112,5 @@ pub fn collect_font_files(root: &std::path::Path) -> alloc::vec::Vec<std::path::
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn font_extensions_covers_common_formats() {
-        for ext in &["ttf", "otf", "ttc", "woff", "woff2"] {
-            assert!(FONT_EXTENSIONS.contains(ext), "missing extension: {}", ext);
-        }
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn is_font_file_recognizes_fonts() {
-        use std::path::Path;
-        assert!(is_font_file(Path::new("Arial.ttf")));
-        assert!(is_font_file(Path::new("NotoSans.otf")));
-        assert!(is_font_file(Path::new("Font.TTC"))); // case insensitive
-        assert!(is_font_file(Path::new("web.woff2")));
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn is_font_file_rejects_non_fonts() {
-        use std::path::Path;
-        assert!(!is_font_file(Path::new("readme.txt")));
-        assert!(!is_font_file(Path::new("image.png")));
-        assert!(!is_font_file(Path::new("no_extension")));
-    }
-}
+#[path = "utils_test.rs"]
+mod utils_test;
