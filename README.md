@@ -187,39 +187,17 @@ For the async registry, use `FcFontRegistry::new_with_configs(scan, fallback)`.
 
 ### The Desktop's Configured Font
 
-Desktops store their font choice as a string - `'Cantarell 11'` on GNOME,
-`Noto Sans,10,-1,5,50,0,0,0,0,0` on KDE. `FcDesktopFont` parses both forms,
-and `prefer` puts the result at the front of a generic's candidates so the
-built-in list still answers when that font is not installed:
+Enable the `desktop-detect` feature to read the user's system font preferences (`FcDesktopFonts::detect()`). On Linux, this queries the XDG Settings Portal, GNOME (`gsettings`), and KDE (`kdeglobals`). On macOS/Windows, this returns nothing by default (you must supply your own `FcDesktopFont::new`).
 
 ```rust
-let ui = FcDesktopFont::parse(&value_from_your_desktop)?;
-cache.modify_fallback_config(|c| {
-    c.prefer_for(&[GenericFamily::SystemUi, GenericFamily::UiSansSerif], ui.family);
-});
+if let Some(ui) = rust_fontconfig::FcDesktopFonts::detect().ui {
+    cache.modify_fallback_config(|c| {
+        c.prefer_for(&[GenericFamily::SystemUi, GenericFamily::UiSansSerif], ui.family);
+    });
+}
 ```
 
-Parsing does no I/O. Asking the desktop does, so it sits behind the
-off-by-default `desktop-detect` feature. With it on, `FcDesktopFonts::detect()`
-returns `ui`, `document` and `monospace` from, in order:
-
-| Source | Command | |
-|---|---|---|
-| XDG Settings Portal | `gdbus call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.ReadOne org.gnome.desktop.interface font-name` | the only one that is right inside a Flatpak or Snap sandbox |
-| GNOME | `gsettings get org.gnome.desktop.interface font-name` | reports the sandbox's own values when sandboxed |
-| KDE | reads `$XDG_CONFIG_HOME/kdeglobals` | tried first when `$XDG_CURRENT_DESKTOP` names KDE |
-
-Each source fills only the roles still unset, so KDE's missing document font
-comes from GNOME's if that answers. macOS does not let the user change the UI
-font, and Windows keeps its choice in a binary `LOGFONT` behind a Win32 call
-this crate will not make - on both, `detect()` returns nothing and you pass
-`FcDesktopFont::new(family)` in yourself.
-
-Which generic each role maps to is your decision, not the crate's. Nothing
-else here ever starts a process: a default build makes no OS calls beyond
-reading font files and `fonts.conf`. There is no `fc-match` step either -
-since 5.0 the `fonts.conf` tree is parsed directly, so the cache already
-knows what `fc-match` would have said.
+The parsed desktop configuration can simply be prepended to the generic fallbacks (via `prefer_for`), ensuring built-in fallbacks still work if the user's font is missing.
 
 ### Character-by-Character Font Resolution
 
