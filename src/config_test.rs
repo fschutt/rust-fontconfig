@@ -4,7 +4,7 @@ mod tests {
     use crate::OperatingSystem;
     use std::path::Path;
 
-    /// Verifies that generic CSS font families like "sans-serif" are correctly parsed, 
+    /// Verifies that generic CSS font families like "sans-serif" are correctly parsed,
     /// including case-insensitive checks.
     #[test]
     fn generic_families_recognized() {
@@ -33,10 +33,26 @@ mod tests {
     /// Verifies that desktop operating systems return a non-empty list of priority font families.
     #[test]
     fn common_font_families_nonempty_for_desktop() {
-        assert!(!crate::config::FcScanConfig::os_defaults(OperatingSystem::MacOS).priority_families.is_empty());
-        assert!(!crate::config::FcScanConfig::os_defaults(OperatingSystem::Linux).priority_families.is_empty());
-        assert!(!crate::config::FcScanConfig::os_defaults(OperatingSystem::Windows).priority_families.is_empty());
-        assert!(crate::config::FcScanConfig::os_defaults(OperatingSystem::Wasm).priority_families.is_empty());
+        assert!(
+            !crate::config::FcScanConfig::os_defaults(OperatingSystem::MacOS)
+                .priority_families
+                .is_empty()
+        );
+        assert!(
+            !crate::config::FcScanConfig::os_defaults(OperatingSystem::Linux)
+                .priority_families
+                .is_empty()
+        );
+        assert!(
+            !crate::config::FcScanConfig::os_defaults(OperatingSystem::Windows)
+                .priority_families
+                .is_empty()
+        );
+        assert!(
+            crate::config::FcScanConfig::os_defaults(OperatingSystem::Wasm)
+                .priority_families
+                .is_empty()
+        );
     }
 
     /// Checks that the OS-specific fallback configuration correctly maps to the expected
