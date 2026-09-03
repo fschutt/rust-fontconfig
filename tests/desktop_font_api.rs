@@ -45,8 +45,7 @@ fn style_keywords_are_read_and_kept_out_of_the_family() {
     assert!(!f.italic);
     assert_eq!(f.size_pt, None);
 
-    // Stretch and variant are recognized so they cannot leak into the family,
-    // even though they are not reported.
+    // Stretch/variant tokens are recognized but not reported.
     let f = FcDesktopFont::parse("Ubuntu Condensed Small-Caps 10").unwrap();
     assert_eq!(f.family, "Ubuntu");
 }
@@ -62,8 +61,7 @@ fn a_numeric_weight_is_read() {
 
 #[test]
 fn a_family_that_ends_in_a_keyword_survives_when_nothing_follows() {
-    // Peeling stops while one token is left, so the family wins the tie —
-    // the same ambiguity Pango itself has.
+    // Tie-breaks resolve to the family name (matching Pango).
     let f = FcDesktopFont::parse("Book Antiqua 11").unwrap();
     assert_eq!(f.family, "Book Antiqua");
     assert_eq!(f.weight, FcWeight::Normal);
@@ -74,8 +72,7 @@ fn a_family_that_ends_in_a_keyword_survives_when_nothing_follows() {
 
 #[test]
 fn a_family_that_ends_in_digits_keeps_them() {
-    // The bug in the usual `trim_end_matches(char::is_numeric)` approach:
-    // only a whitespace-separated trailing token is a size.
+    // Only whitespace-separated trailing tokens act as sizes.
     let f = FcDesktopFont::parse("M+ 1c 11").unwrap();
     assert_eq!(f.family, "M+ 1c");
     assert_eq!(f.size_pt, Some(11.0));
@@ -97,8 +94,7 @@ fn variations_and_pixel_sizes_are_stripped() {
     let f = FcDesktopFont::parse("Inter 11 @wght=700").unwrap();
     assert_eq!(f.family, "Inter");
 
-    // A `px` size is absolute, not points, so it is dropped rather than
-    // reported as if it were points.
+    // Absolute 'px' sizes are dropped.
     let f = FcDesktopFont::parse("Cantarell 16px").unwrap();
     assert_eq!(f.family, "Cantarell");
     assert_eq!(f.size_pt, None);
@@ -124,12 +120,12 @@ fn the_kdeglobals_format_is_read() {
 
 #[test]
 fn qt_legacy_and_css_weight_scales_are_told_apart() {
-    // 75 on Qt's 0-99 scale is Bold.
+    // Qt scale (75 = Bold).
     let f = FcDesktopFont::parse_qt("Noto Sans,10,-1,5,75,1,0,0,0,0").unwrap();
     assert_eq!(f.weight, FcWeight::Bold);
     assert!(f.italic);
 
-    // 700 is already the CSS scale.
+    // CSS scale (700 = Bold).
     let f = FcDesktopFont::parse_qt("Noto Sans,10,-1,5,700,0,0,0,0,0").unwrap();
     assert_eq!(f.weight, FcWeight::Bold);
 }
@@ -177,7 +173,7 @@ fn prefer_moves_an_existing_entry_instead_of_duplicating_it() {
 #[test]
 fn preferring_for_an_inheriting_generic_copies_the_inherited_list_in_behind() {
     let mut config = FcFallbackConfig::os_defaults(OperatingSystem::Linux);
-    // Linux has no system-ui list of its own; it inherits sans-serif's.
+    // Inherits sans-serif.
     let inherited = config.generic_candidates(GenericFamily::SystemUi).to_vec();
     assert_eq!(
         inherited,
@@ -188,7 +184,7 @@ fn preferring_for_an_inheriting_generic_copies_the_inherited_list_in_behind() {
     let after = config.generic_candidates(GenericFamily::SystemUi);
     assert_eq!(after[0], "Cantarell");
     assert_eq!(&after[1..], &inherited[..]);
-    // sans-serif is untouched.
+    // Sans-serif remains untouched.
     assert_ne!(
         config.generic_candidates(GenericFamily::SansSerif)[0],
         "Cantarell"
@@ -217,7 +213,7 @@ fn prefer_for_covers_every_named_generic() {
     for g in [GenericFamily::SystemUi, GenericFamily::UiSansSerif] {
         assert_eq!(config.generic_candidates(g)[0], "Cantarell");
     }
-    // The document generic is deliberately untouched.
+    // Document generic remains untouched.
     assert_ne!(
         config.generic_candidates(GenericFamily::SansSerif)[0],
         "Cantarell"
@@ -263,7 +259,7 @@ menuFont=Noto Sans,10,-1,5,50,0,0,0,0,0
     assert_eq!(fonts.ui.as_ref().unwrap().family, "Noto Sans");
     assert_eq!(fonts.monospace.as_ref().unwrap().family, "Hack");
     assert_eq!(fonts.monospace.as_ref().unwrap().size_pt, Some(9.0));
-    // No `document-font-name` equivalent in kdeglobals.
+    // KDE lacks document-font-name.
     assert!(fonts.document.is_none());
 }
 
@@ -278,9 +274,7 @@ fn an_empty_kdeglobals_yields_nothing() {
 
 #[test]
 fn the_gvariant_wrappers_the_tools_print_are_unwrapped() {
-    // gsettings get org.gnome.desktop.interface font-name
-    // gdbus call ... Settings.ReadOne   -> one variant layer
-    // gdbus call ... Settings.Read      -> two
+    // Variant layers for gsettings/gdbus outputs.
     for raw in [
         "'Cantarell 11'\n",
         "(<'Cantarell 11'>,)\n",
@@ -305,7 +299,7 @@ fn unquoted_gvariant_text_is_parsed_as_is() {
 fn fill_from_keeps_what_is_already_set() {
     use rust_fontconfig::FcDesktopFonts;
 
-    // KDE answers ui + monospace but never document; GNOME fills the rest.
+    // KDE provides ui/monospace; GNOME fills the document fallback.
     let mut fonts = FcDesktopFonts::from_kdeglobals_str(
         "[General]\nfont=Noto Sans,10,-1,5,50,0,0,0,0,0\nfixed=Hack,9\n",
     );

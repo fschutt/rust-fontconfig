@@ -396,11 +396,7 @@ impl FcDesktopFonts {
 }
 
 impl FcDesktopFonts {
-    /// Fill this set's empty roles from `other`, keeping what is already set.
-    ///
-    /// Sources answer partially — `kdeglobals` has no document font — so
-    /// [`detect`](Self::detect) layers them instead of taking the first one
-    /// that answers at all.
+    /// Fill this set's empty roles from `other`, preserving existing values.
     pub fn fill_from(&mut self, other: Self) -> &mut Self {
         if self.ui.is_none() {
             self.ui = other.ui;
@@ -418,26 +414,10 @@ impl FcDesktopFonts {
 #[cfg(feature = "desktop-detect")]
 impl FcDesktopFonts {
     /// Ask the running desktop for its configured fonts.
+    /// Spawns processes on Linux to consult the XDG Settings Portal, GNOME, and KDE configurations.
     ///
-    /// **This talks to the system.** Nothing in this crate calls it for you —
-    /// `FcFontCache::build` and `FcFontRegistry::new` never spawn a process.
-    ///
-    /// On Linux it consults, in order, filling only what is still unset:
-    ///
-    /// | Source | How | Notes |
-    /// |---|---|---|
-    /// | [XDG Settings Portal](Self::from_xdg_portal) | `gdbus call --session --dest org.freedesktop.portal.Desktop …` | The one that is right inside a Flatpak or Snap sandbox |
-    /// | [GNOME](Self::from_gsettings) | `gsettings get org.gnome.desktop.interface font-name` | Reports the sandbox's own values when sandboxed, hence the order |
-    /// | [KDE](Self::from_kdeglobals) | reads `$XDG_CONFIG_HOME/kdeglobals` | Tried first when `$XDG_CURRENT_DESKTOP` names KDE |
-    ///
-    /// Every other platform answers with [`FcDesktopFonts::default`]: macOS
-    /// does not let the user change the UI font, and Windows keeps its choice
-    /// in a binary `LOGFONT` that needs a Win32 call this crate will not make.
-    /// Use [`FcDesktopFont::new`] with what your own code found there.
-    ///
-    /// There is no `fc-match` step: since 5.0 the `fonts.conf` tree is parsed
-    /// directly, so `FcFontCache::build` already knows what `fc-match` would
-    /// have said.
+    /// Other platforms return [`FcDesktopFonts::default`].
+    /// Supply custom fonts using [`FcDesktopFont::new`].
     pub fn detect() -> Self {
         #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
         {
@@ -461,18 +441,8 @@ impl FcDesktopFonts {
         }
     }
 
-    /// The XDG Settings Portal, over `gdbus`.
-    ///
-    /// ```text
-    /// gdbus call --session --dest org.freedesktop.portal.Desktop \
-    ///   --object-path /org/freedesktop/portal/desktop \
-    ///   --method org.freedesktop.portal.Settings.ReadOne \
-    ///   org.gnome.desktop.interface font-name
-    /// ```
-    ///
-    /// This is the only source that reports the *host's* settings from inside
-    /// a Flatpak or Snap sandbox. Portals older than version 2 have no
-    /// `ReadOne`, so `Read` is tried as well.
+    /// The XDG Settings Portal via `gdbus`.
+    /// Reports host settings from within Flatpak/Snap sandboxes.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_xdg_portal() -> Self {
         Self {
@@ -482,15 +452,8 @@ impl FcDesktopFonts {
         }
     }
 
-    /// GNOME and anything else on the `org.gnome.desktop.interface` schema.
-    ///
-    /// ```text
-    /// gsettings get org.gnome.desktop.interface font-name
-    /// ```
-    ///
-    /// Inside a sandbox this answers with the sandbox's own values, not the
-    /// host's — [`from_xdg_portal`](Self::from_xdg_portal) is asked first for
-    /// that reason.
+    /// GNOME and other desktops using the `org.gnome.desktop.interface` schema.
+    /// Uses `gsettings`. Reports sandbox-local values inside Flatpak/Snap.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_gsettings() -> Self {
         Self {
@@ -500,10 +463,8 @@ impl FcDesktopFonts {
         }
     }
 
-    /// KDE's `kdeglobals`, under `$XDG_CONFIG_HOME` (or `~/.config`).
-    ///
-    /// Reads `[General] font` and `[General] fixed`. KDE stores no document
-    /// font, so that role stays `None`.
+    /// KDE's `kdeglobals` configuration.
+    /// Reads `[General] font` and `[General] fixed`.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_kdeglobals() -> Self {
         let path = match std::env::var_os("XDG_CONFIG_HOME") {
