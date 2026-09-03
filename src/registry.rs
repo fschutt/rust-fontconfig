@@ -14,7 +14,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::config::{FcFallbackConfig, FcScanConfig};
-use crate::heapdbg::*;
 use crate::scoring::{
     family_exists_in_patterns, find_family_paths, find_incomplete_paths, FcBuildJob, Priority,
 };
@@ -36,15 +35,15 @@ pub struct FcFontRegistry {
     pub cache: FcFontCache,
 
     // ── Populated by Scout (fast, Phase 1) ──
-    /// Maps guessed lowercase family name → file paths
+    /// Maps guessed lowercase family name → file paths.
     // [az-web-lift] queue RwLock spins in lock_contended in single-threaded lifted wasm
     // (Mutex is Leaf-stubbed and fine; only the pure-Rust queue RwLock is lifted). StLock = no-atomic single-threaded bypass. See lib.rs.
     pub known_paths: crate::StLock<BTreeMap<String, Vec<PathBuf>>>,
 
     // ── Priority queue for Builder ──
+    /// Pending font files discovered by the scout thread, waiting to be parsed by builders.
     pub build_queue: Mutex<Vec<FcBuildJob>>,
     /// Notified when new jobs are added to `build_queue` or on shutdown.
-    /// Builder threads wait on this (paired with `build_queue`).
     pub queue_condvar: Condvar,
 
     // ── Deduplication ──
@@ -55,11 +54,12 @@ pub struct FcFontRegistry {
 
     // ── Progress notification ──
     /// Notified when any progress occurs: font completed, scan done, build done.
-    /// The main thread waits on this (paired with `completed_paths`).
     pub progress: Condvar,
 
     // ── Status ──
+    /// True when the scout thread has finished enumerating files.
     pub scan_complete: AtomicBool,
+    /// True when the scout is done and the build queue is fully exhausted.
     pub build_complete: AtomicBool,
     /// Jobs popped from `build_queue` whose parse has not finished yet.
     pub in_flight: std::sync::atomic::AtomicUsize,
@@ -158,12 +158,12 @@ impl FcFontRegistry {
         self.persist_on_complete.store(persist, Ordering::Release);
     }
 
-    /// Enable/disable lazy scout mode. Must be called before `spawn_scout_and_builders`.
+    /// Enable/disable lazy scout mode.
     pub fn set_scout_lazy(&self, lazy: bool) {
         self.lazy_scout.store(lazy, Ordering::Release);
     }
 
-    /// Register in-memory (bundled) fonts. These are available immediately.
+    /// Register in-memory (bundled) fonts.
     pub fn register_memory_fonts(&self, fonts: Vec<NamedFont>) {
         for named_font in fonts {
             let Some(parsed) = FcParseFontBytes(&named_font.bytes, &named_font.name) else {
@@ -173,10 +173,7 @@ impl FcFontRegistry {
         }
     }
 
-    /// Spawn the Scout thread and Builder pool. Returns immediately.
-    ///
-    /// This is a no-op when the `single-thread-unsafe-locks` feature is enabled
-    /// to avoid undefined behavior, as the underlying locks are disabled.
+    /// Spawn the Scout thread and Builder pool.
     pub fn spawn_scout_and_builders(self: &Arc<Self>) {
         #[cfg(feature = "single-thread-unsafe-locks")]
         {
@@ -218,20 +215,11 @@ impl FcFontRegistry {
         }
     }
 
-    /// Block the calling thread until all requested font families are loaded
-    /// (or confirmed to not exist on the system).
-    ///
-    /// This is called by the layout engine before the first layout pass.
-    /// It boosts the priority of any not-yet-loaded fonts to Critical and
-    /// waits for the Builder to process them.
-    ///
-    /// Hard timeout: 5 seconds.
+    /// Block until requested font families are loaded (5s timeout).
     pub fn request_fonts(&self, family_stacks: &[Vec<String>]) -> Vec<FontFallbackChain> {
         let deadline = Instant::now() + Duration::from_secs(5);
 
-        rfc_probe_heap("rf_start");
 
-        // 1. Collect all candidate families we might need to resolve these stacks.
         let mut needed_families: Vec<String> = Vec::new();
         let config = self.cache.fallback_config();
 
@@ -245,18 +233,13 @@ impl FcFontRegistry {
             }
         }
 
-        rfc_probe_heap("rf_after_expand");
 
-        // Fast path: if cache is fully loaded or build is complete, resolve immediately.
         if self.cache_loaded.load(Ordering::Acquire) || self.build_complete.load(Ordering::Acquire)
         {
             let result = self.resolve_chains(family_stacks);
-            rfc_probe_heap("rf_after_resolve_fast");
             return result;
         }
-        rfc_probe_heap("rf_not_fast_path");
 
-        // 2. Wait for Scout to finish.
         if !self.scan_complete.load(Ordering::Acquire) {
             let Ok(mut completed) = self.completed_paths.lock() else {
                 return self.resolve_chains(family_stacks);
@@ -279,7 +262,6 @@ impl FcFontRegistry {
             }
         }
 
-        // 3. Check which families are completely missing from the cache
         let missing: Vec<String> = {
             let state = self.cache.state_read();
             needed_families
@@ -289,9 +271,7 @@ impl FcFontRegistry {
                 .collect()
         };
 
-        rfc_probe_heap_extra("rf_after_missing", missing.len() as u64);
 
-        // 4. Find font files that match needed families but haven't been fully parsed yet.
         let incomplete_paths = self
             .known_paths
             .read()
@@ -300,20 +280,15 @@ impl FcFontRegistry {
             .map(|(known, completed)| find_incomplete_paths(&needed_families, &known, &completed))
             .unwrap_or_default();
 
-        rfc_probe_heap_extra("rf_after_incomplete", incomplete_paths.len() as u64);
 
-        // 5. If nothing is missing AND all files are processed, resolve immediately.
         if missing.is_empty() && incomplete_paths.is_empty() {
             let r = self.resolve_chains(family_stacks);
-            rfc_probe_heap("rf_step5_fast_return");
             return r;
         }
 
-        // 6. Boost all relevant paths to Critical priority
         let wait_paths: HashSet<PathBuf> = if let (Ok(known_paths), Ok(mut queue)) =
             (self.known_paths.read(), self.build_queue.lock())
         {
-            // Paths for completely missing families
             let missing_paths: Vec<_> = missing
                 .iter()
                 .flat_map(|fam| {
@@ -344,7 +319,6 @@ impl FcFontRegistry {
         } else {
             incomplete_paths.iter().map(|(p, _)| p.clone()).collect()
         };
-        rfc_probe_heap_extra("rf_after_push_queue", wait_paths.len() as u64);
         self.queue_condvar.notify_all();
 
         // 7. Wait for all wait_paths to be completed.
@@ -376,11 +350,9 @@ impl FcFontRegistry {
             }
         }
 
-        rfc_probe_heap("rf_after_wait");
 
         // 8. Resolve chains from the now-populated registry
         let r = self.resolve_chains(family_stacks);
-        rfc_probe_heap("rf_after_resolve_slow");
         r
     }
 
@@ -391,9 +363,7 @@ impl FcFontRegistry {
         self.cache.get_metadata_by_id(id)
     }
 
-    /// Get font bytes for a given font ID — disk-backed fonts come
-    /// back as a shared mmap; in-memory fonts as `Owned`. See
-    /// [`FcFontCache::get_font_bytes`] for the lifetime semantics.
+    /// Get font bytes for a given font ID — disk-backed fonts come.
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<crate::FontBytes>> {
         self.cache.get_font_bytes(id)
     }
@@ -432,7 +402,7 @@ impl FcFontRegistry {
             .resolve_font_chain(font_families, weight, italic, oblique, &mut trace)
     }
 
-    /// On-demand font-chain resolution for layout. Only parses needed families.
+    /// On-demand font-chain resolution for layout.
     #[cfg(feature = "std")]
     pub fn request_and_resolve_with_scripts(
         &self,
@@ -456,8 +426,7 @@ impl FcFontRegistry {
         )
     }
 
-    /// Get a shared handle on the cache. Writes by builder threads
-    /// are immediately visible to all readers.
+    /// Get a shared handle on the cache.
     pub fn shared_cache(&self) -> FcFontCache {
         self.cache.clone()
     }
@@ -517,7 +486,7 @@ impl FcFontRegistry {
         self.cache.chain_cache_len()
     }
 
-    /// Fast-path font resolution: resolve font fallback chains by cmap-probing candidate files directly.
+    /// Resolve font fallback chains by cmap-probing candidate files directly.
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub fn request_fonts_fast(
         &self,
@@ -757,7 +726,7 @@ impl FcFontRegistry {
         chains
     }
 
-    // ── Internal methods ────────────────────────────────────────────────────
+    // Internal methods
 
     /// Insert a parsed font into the cache (called by Builder threads).
     pub fn insert_font(&self, pattern: FcPattern, path: FcFontPath) {
