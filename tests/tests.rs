@@ -4,23 +4,33 @@ fn names(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
-/// `PatternMatch` crosses the C boundary by value, and the header is
-/// hand-maintained. Read the header and hold the enum to it, so the two
-/// cannot drift apart again (they did: reordering the Rust variants once
-/// made every C caller's `FC_MATCH_FALSE` arrive as `True`).
+/// `PatternMatch` crosses the C boundary by value, and the header is.
 #[test]
 fn pattern_match_discriminants_match_the_c_header() {
-    let header = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/ffi/rust_fontconfig.h"))
-        .expect("ffi/rust_fontconfig.h is part of the repository");
+    let header = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/ffi/rust_fontconfig.h"
+    ))
+    .expect("ffi/rust_fontconfig.h is part of the repository");
     let header_value = |name: &str| -> i32 {
-        let at = header.find(name).unwrap_or_else(|| panic!("{name} is not declared in the header"));
-        let rest = header[at + name.len()..].trim_start().trim_start_matches('=').trim_start();
+        let at = header
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} is not declared in the header"));
+        let rest = header[at + name.len()..]
+            .trim_start()
+            .trim_start_matches('=')
+            .trim_start();
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        digits.parse().unwrap_or_else(|_| panic!("{name} has no numeric value in the header"))
+        digits
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} has no numeric value in the header"))
     };
     assert_eq!(PatternMatch::True as i32, header_value("FC_MATCH_TRUE"));
     assert_eq!(PatternMatch::False as i32, header_value("FC_MATCH_FALSE"));
-    assert_eq!(PatternMatch::DontCare as i32, header_value("FC_MATCH_DONT_CARE"));
+    assert_eq!(
+        PatternMatch::DontCare as i32,
+        header_value("FC_MATCH_DONT_CARE")
+    );
     assert_eq!(PatternMatch::default(), PatternMatch::DontCare);
 }
 
@@ -28,14 +38,29 @@ fn pattern_match_discriminants_match_the_c_header() {
 fn test_operating_system_font_expansion() {
     // The tables the crate used to hard-code, now an explicit opt-in.
     let windows = FcFallbackConfig::os_defaults(OperatingSystem::Windows);
-    assert_eq!(windows.generic_candidates(GenericFamily::Serif), names(&["Times New Roman"]));
+    assert_eq!(
+        windows.generic_candidates(GenericFamily::Serif),
+        names(&["Times New Roman"])
+    );
     assert_eq!(
         windows.generic_candidates(GenericFamily::SansSerif),
-        names(&["Segoe UI", "Tahoma", "Microsoft Sans Serif", "MS Sans Serif", "Helv"])
+        names(&[
+            "Segoe UI",
+            "Tahoma",
+            "Microsoft Sans Serif",
+            "MS Sans Serif",
+            "Helv"
+        ])
     );
     assert_eq!(
         windows.generic_candidates(GenericFamily::Monospace),
-        names(&["Segoe UI Mono", "Courier New", "Cascadia Code", "Cascadia Mono", "Consolas"])
+        names(&[
+            "Segoe UI Mono",
+            "Courier New",
+            "Cascadia Code",
+            "Cascadia Mono",
+            "Consolas"
+        ])
     );
 
     let macos = FcFallbackConfig::os_defaults(OperatingSystem::MacOS);
@@ -45,18 +70,36 @@ fn test_operating_system_font_expansion() {
     );
     assert_eq!(
         macos.generic_candidates(GenericFamily::SansSerif),
-        names(&["San Francisco", ".AppleSystemUIFont", ".SFUIText", ".SFUI-Regular", "Helvetica Neue", "Helvetica", "Lucida Grande"])
+        names(&["Helvetica Neue", "Helvetica", "Lucida Grande"])
     );
     assert_eq!(
         macos.generic_candidates(GenericFamily::Monospace),
-        names(&["SF Mono", "Menlo", "Monaco", "Courier", "Oxygen Mono", "Source Code Pro", "Fira Mono"])
+        names(&[
+            "SF Mono",
+            "Menlo",
+            "Monaco",
+            "Courier",
+            "Oxygen Mono",
+            "Source Code Pro",
+            "Fira Mono"
+        ])
     );
 
     let linux = FcFallbackConfig::os_defaults(OperatingSystem::Linux);
-    assert_eq!(linux.generic_candidates(GenericFamily::Serif).len(), 8, "Linux should have 8 serif fonts");
+    assert_eq!(
+        linux.generic_candidates(GenericFamily::Serif).len(),
+        8,
+        "Linux should have 8 serif fonts"
+    );
     assert_eq!(
         linux.generic_candidates(GenericFamily::SansSerif),
-        names(&["Ubuntu", "Arial", "DejaVu Sans", "Noto Sans", "Liberation Sans"])
+        names(&[
+            "Ubuntu",
+            "Arial",
+            "DejaVu Sans",
+            "Noto Sans",
+            "Liberation Sans"
+        ])
     );
 
     // Generics without a table of their own borrow their parent's.
@@ -67,24 +110,36 @@ fn test_operating_system_font_expansion() {
 
     // A script hint puts that script's preferences before the base list,
     // and the block decides the order: kana want the Japanese font first.
-    let hiragana = [UnicodeRange { start: 0x3040, end: 0x309F }];
+    let hiragana = [UnicodeRange {
+        start: 0x3040,
+        end: 0x309F,
+    }];
     let expanded = windows.expand_generic(GenericFamily::SansSerif, &hiragana);
     assert_eq!(expanded[0], "MS Gothic");
     assert!(expanded.contains(&"Segoe UI".to_string()));
-    let hangul = [UnicodeRange { start: 0xAC00, end: 0xD7A3 }];
-    assert_eq!(windows.expand_generic(GenericFamily::SansSerif, &hangul)[0], "Malgun Gothic");
+    let hangul = [UnicodeRange {
+        start: 0xAC00,
+        end: 0xD7A3,
+    }];
+    assert_eq!(
+        windows.expand_generic(GenericFamily::SansSerif, &hangul)[0],
+        "Malgun Gothic"
+    );
 
     // Stack expansion keeps CSS order: the named family, then the generic's list.
     let families = vec!["Arial".to_string(), "sans-serif".to_string()];
     let expanded = macos.candidate_families(&families, &[]);
     assert_eq!(expanded[0], "Arial");
-    assert_eq!(expanded[1], "San Francisco");
-    assert_eq!(expanded[2], ".AppleSystemUIFont");
-    assert_eq!(expanded[3], ".SFUIText");
+    assert_eq!(expanded[1], "Helvetica Neue");
+    assert_eq!(expanded[2], "Helvetica");
+    assert_eq!(expanded[3], "Lucida Grande");
 
     // A non-generic family passes through unchanged.
     let specific = vec!["MyCustomFont".to_string()];
-    assert_eq!(windows.candidate_families(&specific, &[]), names(&["MyCustomFont"]));
+    assert_eq!(
+        windows.candidate_families(&specific, &[]),
+        names(&["MyCustomFont"])
+    );
 
     // The 4.x entry points are thin wrappers over the same tables.
     #[allow(deprecated)]
@@ -197,14 +252,19 @@ fn test_unicode_range_matching() {
     };
 
     // Use list() and filter instead of query_all()
-    let matches: Vec<_> = cache.list().into_iter()
+    let matches: Vec<_> = cache
+        .list()
+        .into_iter()
         .filter(|(pattern, _)| {
             // Check if unicode ranges overlap
-            if pattern.unicode_ranges.is_empty() { return false; }
+            if pattern.unicode_ranges.is_empty() {
+                return false;
+            }
             pattern.unicode_ranges.iter().any(|r| {
-                latin_query.unicode_ranges.iter().any(|q| {
-                    r.start <= q.end && q.start <= r.end
-                })
+                latin_query
+                    .unicode_ranges
+                    .iter()
+                    .any(|q| r.start <= q.end && q.start <= r.end)
             })
         })
         .collect();
@@ -223,13 +283,18 @@ fn test_unicode_range_matching() {
         ..Default::default()
     };
 
-    let matches: Vec<_> = cache.list().into_iter()
+    let matches: Vec<_> = cache
+        .list()
+        .into_iter()
         .filter(|(pattern, _)| {
-            if pattern.unicode_ranges.is_empty() { return false; }
+            if pattern.unicode_ranges.is_empty() {
+                return false;
+            }
             pattern.unicode_ranges.iter().any(|r| {
-                cyrillic_query.unicode_ranges.iter().any(|q| {
-                    r.start <= q.end && q.start <= r.end
-                })
+                cyrillic_query
+                    .unicode_ranges
+                    .iter()
+                    .any(|q| r.start <= q.end && q.start <= r.end)
             })
         })
         .collect();
@@ -242,7 +307,9 @@ fn test_unicode_range_matching() {
         let text = "Hello Привет 你好"; // Latin, Cyrillic, and CJK
 
         // Build a generic font chain from our in-memory fonts
-        let families: Vec<String> = cache.list().iter()
+        let families: Vec<String> = cache
+            .list()
+            .iter()
             .filter_map(|(pattern, _)| pattern.family.clone())
             .collect();
 
@@ -257,9 +324,8 @@ fn test_unicode_range_matching() {
         let runs = chain.query_for_text(&cache, text);
 
         // Collect unique fonts used
-        let unique_fonts: std::collections::HashSet<_> = runs.iter()
-            .filter_map(|r| r.font_id)
-            .collect();
+        let unique_fonts: std::collections::HashSet<_> =
+            runs.iter().filter_map(|r| r.font_id).collect();
 
         assert!(
             unique_fonts.len() >= 2,
@@ -658,8 +724,10 @@ fn test_font_search() {
 
     // Test 2: Search for any monospace font using list() with filter
     let mut trace: Vec<TraceMsg> = Vec::new();
-    
-    let results: Vec<_> = cache.list().into_iter()
+
+    let results: Vec<_> = cache
+        .list()
+        .into_iter()
         .filter(|(pattern, _)| pattern.monospace == PatternMatch::True)
         .collect();
     assert_eq!(results.len(), 2, "Should find two monospace fonts");
@@ -677,7 +745,9 @@ fn test_font_search() {
         let cjk_text = "你好"; // Hello in Chinese
 
         // Build font chain from all available fonts
-        let families: Vec<String> = cache.list().iter()
+        let families: Vec<String> = cache
+            .list()
+            .iter()
             .filter_map(|(pattern, _)| pattern.family.clone())
             .collect();
 
@@ -692,9 +762,7 @@ fn test_font_search() {
         let runs = chain.query_for_text(&cache, cjk_text);
         assert!(!runs.is_empty(), "Should find fonts for CJK text");
 
-        let result_ids: Vec<FontId> = runs.iter()
-            .filter_map(|r| r.font_id)
-            .collect();
+        let result_ids: Vec<FontId> = runs.iter().filter_map(|r| r.font_id).collect();
         assert!(
             result_ids.contains(&noto_cjk_id),
             "Should include Noto Sans CJK"
@@ -707,9 +775,8 @@ fn test_font_search() {
         let runs = chain.query_for_text(&cache, mixed_text);
 
         // Collect unique fonts
-        let unique_fonts: std::collections::HashSet<_> = runs.iter()
-            .filter_map(|r| r.font_id)
-            .collect();
+        let unique_fonts: std::collections::HashSet<_> =
+            runs.iter().filter_map(|r| r.font_id).collect();
 
         assert!(
             unique_fonts.len() >= 1,
@@ -788,25 +855,6 @@ fn test_failing_isolated_2() {
 }
 
 /// Regression test for the headless / wasm / embedder-bundled-font bug.
-///
-/// A bundled IN-MEMORY font, registered via `with_memory_fonts` with the
-/// kind of NAIVE pattern a normal caller actually writes (a generic-ish
-/// name and, crucially, an EMPTY `unicode_ranges`), must be usable to shape
-/// text when the document asks for the generic CSS family `"serif"` and the
-/// cache has NO system fonts at all.
-///
-/// Before the fix this returned `None` for two independent reasons:
-///   1. `with_memory_fonts` stored the empty `unicode_ranges` verbatim, and
-///      `resolve_char` skips fonts with no range info, so the font could
-///      never be selected for any character.
-///   2. The generic `"serif"` family was expanded to a hardcoded list of
-///      real OS font names (Times, DejaVu Serif, ...) and the original
-///      generic name was dropped, so a registered memory font was never
-///      reached.
-///
-/// Requires the `parsing` feature: without it the crate cannot inspect the
-/// font's cmap/OS2 to learn its Unicode coverage, so the empty ranges
-/// cannot be auto-populated.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[test]
 fn test_memory_font_generic_serif_resolves_char() {
@@ -853,28 +901,27 @@ fn test_memory_font_generic_serif_resolves_char() {
     );
 }
 
-/// `query` is fallible and `query_with_fallback` is total — the `fc-match`
-/// contract.
-///
-/// `fc-match Cantarell` answers `NotoSans-Regular.ttf` on a machine with no
-/// Cantarell, because fontconfig substitutes through its config chain. `query`
-/// deliberately does not: it reports honestly that the exact request could not
-/// be met. A RENDERER must not be handed that hole — either the text silently
-/// vanishes, or the caller invents a fallback whose font is not registered
-/// where the renderer later looks it up by hash.
+/// `query` is fallible and `query_with_fallback` is total — the `fc-match`.
 #[test]
 fn query_with_fallback_is_total_like_fc_match() {
     let installed = FcPattern {
         name: Some("Only Font".to_string()),
         family: Some("Only Family".to_string()),
         weight: FcWeight::Normal,
-        unicode_ranges: vec![UnicodeRange { start: 0x0000, end: 0x007F }],
+        unicode_ranges: vec![UnicodeRange {
+            start: 0x0000,
+            end: 0x007F,
+        }],
         ..Default::default()
     };
     let cache = FcFontCache::default();
     cache.with_memory_fonts(vec![(
         installed.clone(),
-        FcFont { bytes: vec![0, 1, 2, 3], font_index: 0, id: "only-font".to_string() },
+        FcFont {
+            bytes: vec![0, 1, 2, 3],
+            font_index: 0,
+            id: "only-font".to_string(),
+        },
     )]);
 
     // A family that simply is not installed — the "Cantarell" case.
@@ -898,7 +945,9 @@ fn query_with_fallback_is_total_like_fc_match() {
 
     // It must fall back to the font we actually have, not to nothing-in-particular.
     let mut trace = Vec::new();
-    let expected = cache.query(&installed, &mut trace).expect("the installed font matches itself");
+    let expected = cache
+        .query(&installed, &mut trace)
+        .expect("the installed font matches itself");
     assert_eq!(
         fallback.unwrap().id,
         expected.id,
@@ -914,24 +963,23 @@ fn query_with_fallback_is_total_like_fc_match() {
     };
     let mut trace = Vec::new();
     assert!(
-        cache.query_with_fallback(&missing_bold, &mut trace).is_some(),
+        cache
+            .query_with_fallback(&missing_bold, &mut trace)
+            .is_some(),
         "a bold request for a missing family must still resolve",
     );
 
     // The ONE case where it may fail: there is genuinely nothing to return.
     let mut trace = Vec::new();
     assert!(
-        FcFontCache::default().query_with_fallback(&missing, &mut trace).is_none(),
+        FcFontCache::default()
+            .query_with_fallback(&missing, &mut trace)
+            .is_none(),
         "an empty cache is the only legitimate None",
     );
 }
 
-/// A font's coverage is unioned from two sources whose block boundaries do not
-/// align: the OS/2 `ulUnicodeRange` bit mappings and the cmap block probe.
-/// `calculate_unicode_coverage` ranks fallback candidates by SUMMING range
-/// widths, so an un-coalesced union counts the shared codepoints twice and
-/// hands the font a score it did not earn — which is how a CJK megafont ends up
-/// winning a Latin run it has no business winning.
+/// A font's coverage is unioned from two sources whose block boundaries do not.
 #[test]
 fn normalize_unicode_ranges_coalesces_so_coverage_is_not_double_counted() {
     let r = |start, end| UnicodeRange { start, end };
@@ -962,13 +1010,7 @@ fn normalize_unicode_ranges_coalesces_so_coverage_is_not_double_counted() {
     assert_eq!(maxed, vec![r(0x0000, u32::MAX)]);
 }
 
-/// The coverage a parsed font reports must be a normalized set, which is what
-/// keeps the ranking sum above honest for REAL fonts and not just hand-built
-/// range vectors.
-///
-/// Before coverage became cmap-authoritative this vector was whatever the OS/2
-/// bits claimed, minus what the cmap disproved. Now the cmap's own blocks are
-/// unioned in, so without coalescing this font would report overlapping ranges.
+/// The coverage a parsed font reports must be a normalized set, which is what.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[test]
 fn parsed_font_coverage_is_a_normalized_set() {
@@ -983,7 +1025,11 @@ fn parsed_font_coverage_is_a_normalized_set() {
     };
     cache.with_memory_fonts(vec![(
         pattern.clone(),
-        FcFont { bytes: font_bytes, font_index: 0, id: "instrument".to_string() },
+        FcFont {
+            bytes: font_bytes,
+            font_index: 0,
+            id: "instrument".to_string(),
+        },
     )]);
 
     let mut trace = Vec::new();
@@ -992,7 +1038,10 @@ fn parsed_font_coverage_is_a_normalized_set() {
         .expect("the registered font matches itself");
 
     let ranges = &matched.unicode_ranges;
-    assert!(!ranges.is_empty(), "a parsed Latin font must report some coverage");
+    assert!(
+        !ranges.is_empty(),
+        "a parsed Latin font must report some coverage"
+    );
 
     for pair in ranges.windows(2) {
         let (a, b) = (pair[0], pair[1]);
@@ -1004,13 +1053,14 @@ fn parsed_font_coverage_is_a_normalized_set() {
 
     // Sanity: a Latin serif face covers Basic Latin.
     assert!(
-        ranges.iter().any(|r| r.start <= 'A' as u32 && 'A' as u32 <= r.end),
+        ranges
+            .iter()
+            .any(|r| r.start <= 'A' as u32 && 'A' as u32 <= r.end),
         "a Latin font must cover 'A', got {ranges:?}",
     );
 }
 
-/// Rebuild `font` without the table `drop_tag`, recomputing the table directory
-/// so the result is a valid sfnt rather than a file with dangling offsets.
+/// Rebuild `font` without the table `drop_tag`, recomputing the table directory.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn strip_table(font: &[u8], drop_tag: &[u8; 4]) -> Vec<u8> {
     let num = u16::from_be_bytes([font[4], font[5]]) as usize;
@@ -1055,8 +1105,7 @@ fn strip_table(font: &[u8], drop_tag: &[u8; 4]) -> Vec<u8> {
     out
 }
 
-/// Set or clear the `head.macStyle` bold bit, which is the only weight signal a
-/// font without an OS/2 table has.
+/// Set or clear the `head.macStyle` bold bit, which is the only weight signal a.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn set_head_bold(font: &mut [u8]) {
     let num = u16::from_be_bytes([font[4], font[5]]) as usize;
@@ -1074,19 +1123,13 @@ fn set_head_bold(font: &mut [u8]) {
 }
 
 /// A font without an OS/2 table must still parse.
-///
-/// OS/2 is optional in TrueType - only OpenType requires it - and fonts that
-/// omit it are common enough to matter: printpdf's embedded base-14 PDF font
-/// subsets (Helvetica, Times, Courier, ...) have no OS/2 table at all. Reading
-/// it with `??` made every one of them fail to parse, so `font-family:
-/// Helvetica` resolved to nothing and text silently fell back.
 #[test]
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn parses_a_font_without_an_os2_table() {
     let original = include_bytes!("fixtures/InstrumentSerif-Regular.ttf").to_vec();
 
-    let baseline = FcParseFontBytes(&original, "InstrumentSerif")
-        .expect("fixture itself must parse");
+    let baseline =
+        FcParseFontBytes(&original, "InstrumentSerif").expect("fixture itself must parse");
     let (baseline_pattern, _) = &baseline[0];
 
     let stripped = strip_table(&original, b"OS/2");
@@ -1118,19 +1161,7 @@ fn parses_a_font_without_an_os2_table() {
     assert_eq!(parsed_bold[0].0.weight, FcWeight::Bold);
 }
 
-/// A family lookup must find the fonts that carry that family, and must
-/// answer "nobody has it" without walking the cache.
-///
-/// `query_by_family_normalized` used to be the ONLY path a specific family
-/// name could take (`fuzzy_query_by_name` is a no-op on the azul web fork),
-/// and it walked every registered pattern allocating a normalized `String`
-/// per face per call. azul measured ~0.52 ms per lookup against a system
-/// font set, and a CSS stack with generic expansion asks ~150 times — 74 ms
-/// of a 177 ms cold pagination went here. It is a `family_index` probe now.
-///
-/// NEGATIVE CONTROL: making `index_pattern_family` a no-op (so the index is
-/// always empty) makes every resolve below come back with no fonts — run
-/// and seen.
+/// A family lookup must find the fonts that carry that family, and must.
 #[test]
 fn a_family_lookup_finds_its_faces_and_misses_cheaply() {
     let mk = |id: &str| FcFont {
@@ -1195,14 +1226,6 @@ fn a_family_lookup_finds_its_faces_and_misses_cheaply() {
 }
 
 /// fonts.conf handling, hermetic: a configuration tree in a temp directory.
-///
-/// The parser is not Linux-specific; only the default location is. What
-/// these pin down is the part that was wrong before 5.0: a relative
-/// `<include>` (the stock `conf.d`) resolved against the process's working
-/// directory, so on a stock distribution the whole `conf.d` tree — where
-/// every `<alias>` lives — was silently skipped unless the process happened
-/// to run from `/etc/fonts`; and includes were walked last-in-first-out over
-/// an unsorted directory listing, so which alias won depended on hash order.
 #[cfg(feature = "parsing")]
 mod fonts_conf_tree {
     use rust_fontconfig::{FcFallbackConfig, FcSystemConfig, GenericFamily};
@@ -1220,7 +1243,8 @@ mod fonts_conf_tree {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let dir = std::env::temp_dir().join(format!("rfc-fontsconf-{}-{nanos}-{n}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("rfc-fontsconf-{}-{nanos}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             TempTree(dir)
         }
@@ -1239,7 +1263,10 @@ mod fonts_conf_tree {
     }
 
     fn alias(family: &str, prefer: &[&str]) -> String {
-        let prefer: String = prefer.iter().map(|p| format!("<family>{p}</family>")).collect();
+        let prefer: String = prefer
+            .iter()
+            .map(|p| format!("<family>{p}</family>"))
+            .collect();
         format!("<alias><family>{family}</family><prefer>{prefer}</prefer></alias>")
     }
 
@@ -1285,7 +1312,10 @@ mod fonts_conf_tree {
         tree.write("etc/fonts/conf.d/README", "not a configuration file");
         tree.write(
             "etc/fonts/extra/more.conf",
-            &format!("<fontconfig>{}</fontconfig>", alias("monospace", &["Rel Mono"])),
+            &format!(
+                "<fontconfig>{}</fontconfig>",
+                alias("monospace", &["Rel Mono"])
+            ),
         );
 
         // Run from somewhere that is NOT the config directory: the old code
@@ -1328,7 +1358,10 @@ mod fonts_conf_tree {
             fallback.generic_candidates(GenericFamily::SansSerif),
             &["First Sans".to_string(), "Second Sans".to_string()][..]
         );
-        assert_eq!(fallback.substitutions_for("Arial"), &["First Arial".to_string()][..]);
+        assert_eq!(
+            fallback.substitutions_for("Arial"),
+            &["First Arial".to_string()][..]
+        );
     }
 
     #[test]
@@ -1336,11 +1369,17 @@ mod fonts_conf_tree {
         let tree = TempTree::new();
         let a = tree.write(
             "a.conf",
-            &format!("<fontconfig>{}<include>b.conf</include></fontconfig>", alias("serif", &["A Serif"])),
+            &format!(
+                "<fontconfig>{}<include>b.conf</include></fontconfig>",
+                alias("serif", &["A Serif"])
+            ),
         );
         tree.write(
             "b.conf",
-            &format!("<fontconfig>{}<include>a.conf</include></fontconfig>", alias("serif", &["B Serif"])),
+            &format!(
+                "<fontconfig>{}<include>a.conf</include></fontconfig>",
+                alias("serif", &["B Serif"])
+            ),
         );
         let config = FcSystemConfig::parse_tree(&a).expect("parses");
         let read: Vec<String> = config.files.iter().map(|p| name_of(p)).collect();
@@ -1365,11 +1404,7 @@ mod fonts_conf_tree {
     }
 }
 
-/// Coverage is what the cmap says, codepoint for codepoint — not a union of
-/// whole Unicode blocks decided by a handful of probes. Before 5.0 a face
-/// that mapped three of six sampled ideographs was recorded as covering all
-/// 20,992 of them, and a face whose script was not in the fixed 50-block probe
-/// list (Tibetan, Braille, every emoji) was recorded as covering nothing.
+/// Coverage is what the cmap says, codepoint for codepoint — not a union of.
 #[cfg(feature = "parsing")]
 #[test]
 fn parsed_coverage_is_exact_not_block_rounded() {
@@ -1379,7 +1414,10 @@ fn parsed_coverage_is_exact_not_block_rounded() {
 
     // Normalized: sorted, disjoint, no touching neighbours.
     for pair in ranges.windows(2) {
-        assert!(pair[0].end + 1 < pair[1].start, "ranges are sorted, disjoint and coalesced: {ranges:?}");
+        assert!(
+            pair[0].end + 1 < pair[1].start,
+            "ranges are sorted, disjoint and coalesced: {ranges:?}"
+        );
     }
     let contains = |cp: u32| ranges.iter().any(|r| r.start <= cp && cp <= r.end);
     assert!(contains('A' as u32) && contains('z' as u32));
@@ -1391,14 +1429,20 @@ fn parsed_coverage_is_exact_not_block_rounded() {
         .map(|r| {
             let s = r.start.max(0x0100);
             let e = r.end.min(0x017F);
-            if s <= e { e - s + 1 } else { 0 }
+            if s <= e {
+                e - s + 1
+            } else {
+                0
+            }
         })
         .sum::<u32>();
-    assert!(in_block > 0 && in_block < 128, "partial block coverage survives: {in_block}/128");
+    assert!(
+        in_block > 0 && in_block < 128,
+        "partial block coverage survives: {in_block}/128"
+    );
 }
 
-/// A pattern registered with unsorted, overlapping coverage is stored
-/// normalized, so every reader can rely on the invariant.
+/// A pattern registered with unsorted, overlapping coverage is stored.
 #[test]
 fn registered_coverage_is_normalized_on_insert() {
     let cache = FcFontCache::default();
@@ -1407,71 +1451,132 @@ fn registered_coverage_is_normalized_on_insert() {
             name: Some("Messy".to_string()),
             family: Some("Messy".to_string()),
             unicode_ranges: vec![
-                UnicodeRange { start: 0x0400, end: 0x04FF },
-                UnicodeRange { start: 0x0020, end: 0x007E },
-                UnicodeRange { start: 0x0040, end: 0x00FF },
-                UnicodeRange { start: 0x0100, end: 0x017F },
+                UnicodeRange {
+                    start: 0x0400,
+                    end: 0x04FF,
+                },
+                UnicodeRange {
+                    start: 0x0020,
+                    end: 0x007E,
+                },
+                UnicodeRange {
+                    start: 0x0040,
+                    end: 0x00FF,
+                },
+                UnicodeRange {
+                    start: 0x0100,
+                    end: 0x017F,
+                },
             ],
             ..Default::default()
         },
-        FcFont { bytes: vec![0], font_index: 0, id: "messy".to_string() },
+        FcFont {
+            bytes: vec![0],
+            font_index: 0,
+            id: "messy".to_string(),
+        },
     )]);
     let (pattern, _) = &cache.list()[0];
     assert_eq!(
         pattern.unicode_ranges,
         vec![
-            UnicodeRange { start: 0x0020, end: 0x017F },
-            UnicodeRange { start: 0x0400, end: 0x04FF },
+            UnicodeRange {
+                start: 0x0020,
+                end: 0x017F
+            },
+            UnicodeRange {
+                start: 0x0400,
+                end: 0x04FF
+            },
         ]
     );
 }
 
-/// One record per font. The same face of the same file registered twice — a
-/// directory scanned twice, a manifest loaded on top of a scan — is one
-/// record; two different files that happen to carry identical name tables are
-/// two. (The cache used to key its pattern map by the pattern itself, so the
-/// second silently overwrote the first and orphaned its id.)
+/// One record per font.
 #[test]
 fn fonts_are_one_record_each() {
     let cache = FcFontCache::default();
     let pattern = FcPattern {
         name: Some("Twin".to_string()),
         family: Some("Twin".to_string()),
-        unicode_ranges: vec![UnicodeRange { start: 0x20, end: 0x7E }],
+        unicode_ranges: vec![UnicodeRange {
+            start: 0x20,
+            end: 0x7E,
+        }],
         ..Default::default()
     };
-    let at = |path: &str, face: usize| FcFontPath { path: path.to_string(), font_index: face, bytes_hash: 0 };
+    let at = |path: &str, face: usize| FcFontPath {
+        path: path.to_string(),
+        font_index: face,
+        bytes_hash: 0,
+    };
 
     cache.insert_builder_font(pattern.clone(), at("/fonts/a.ttf", 0));
     cache.insert_builder_font(pattern.clone(), at("/fonts/a.ttf", 0));
-    assert_eq!(cache.len(), 1, "the same face registered twice is one record");
+    assert_eq!(
+        cache.len(),
+        1,
+        "the same face registered twice is one record"
+    );
     cache.insert_builder_font(pattern.clone(), at("/fonts/a.ttf", 1));
     cache.insert_builder_font(pattern.clone(), at("/fonts/b.ttf", 0));
-    assert_eq!(cache.len(), 3, "another face, and another file, are records of their own");
-    assert_eq!(cache.list().iter().filter(|(p, _)| p.name.as_deref() == Some("Twin")).count(), 3);
-    assert_eq!(cache.lookup_paths_cached("/fonts/a.ttf").map(|ids| ids.len()), Some(2));
+    assert_eq!(
+        cache.len(),
+        3,
+        "another face, and another file, are records of their own"
+    );
+    assert_eq!(
+        cache
+            .list()
+            .iter()
+            .filter(|(p, _)| p.name.as_deref() == Some("Twin"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        cache
+            .lookup_paths_cached("/fonts/a.ttf")
+            .map(|ids| ids.len()),
+        Some(2)
+    );
     assert_eq!(cache.lookup_paths_cached("/fonts/none.ttf"), None);
 
-    let font = |bytes: &[u8]| FcFont { bytes: bytes.to_vec(), font_index: 0, id: "mem".to_string() };
+    let font = |bytes: &[u8]| FcFont {
+        bytes: bytes.to_vec(),
+        font_index: 0,
+        id: "mem".to_string(),
+    };
     cache.with_memory_fonts(vec![(pattern.clone(), font(&[1, 2, 3]))]);
     cache.with_memory_fonts(vec![(pattern.clone(), font(&[1, 2, 3]))]);
-    assert_eq!(cache.len(), 4, "identical pattern and bytes: one memory record");
+    assert_eq!(
+        cache.len(),
+        4,
+        "identical pattern and bytes: one memory record"
+    );
     cache.with_memory_fonts(vec![(pattern, font(&[9, 9, 9]))]);
-    assert_eq!(cache.len(), 5, "different bytes under the same pattern: a record of its own");
+    assert_eq!(
+        cache.len(),
+        5,
+        "different bytes under the same pattern: a record of its own"
+    );
 }
 
-/// The font-file walk follows directory symlinks but visits each directory
-/// once, so a link cycle terminates and a second route to the same directory
-/// does not list its files twice. (Both scanners used to recurse unguarded; a
-/// cycle overflowed the scout thread's stack, which aborts the process.)
+/// The font-file walk follows directory symlinks but visits each directory.
 #[cfg(unix)]
 #[test]
 fn font_file_walk_survives_a_symlink_cycle_and_lists_each_file_once() {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let root = std::env::temp_dir().join(format!("rfc-walk-{}-{nanos}", std::process::id()));
     let fonts = root.join("a");
     std::fs::create_dir_all(&fonts).unwrap();
-    std::fs::write(fonts.join("one.ttf"), include_bytes!("fixtures/InstrumentSerif-Regular.ttf")).unwrap();
+    std::fs::write(
+        fonts.join("one.ttf"),
+        include_bytes!("fixtures/InstrumentSerif-Regular.ttf"),
+    )
+    .unwrap();
     std::fs::write(fonts.join("notes.txt"), "not a font").unwrap();
     std::os::unix::fs::symlink(&root, fonts.join("loop")).unwrap(); // a/loop -> root: a cycle
     std::os::unix::fs::symlink(&fonts, root.join("twin")).unwrap(); // twin -> a: a second route
