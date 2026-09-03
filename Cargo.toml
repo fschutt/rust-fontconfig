@@ -1,6 +1,6 @@
 [package]
 name = "rust-fontconfig"
-version = "5.0.0"
+version = "5.1.0"
 authors = ["Felix Schütt <felix.schuett@maps4print.com>"]
 edition = "2021"
 license = "MIT"
@@ -43,6 +43,11 @@ parsing = ["allsorts", "xmlparser", "std"]
 ffi = ["parsing", "std", "async-registry"]
 cache = ["serde", "bincode", "std", "dirs"]
 async-registry = ["std", "parsing"]
+# Ask the running desktop for its configured fonts (`FcDesktopFonts::detect`).
+# Spawns `gsettings` and reads `kdeglobals` on Linux, so it is OFF by default:
+# nothing else in the crate ever starts a process. The string *parsers*
+# (`FcDesktopFont::parse`, `parse_qt`) are always available and do no I/O.
+desktop-detect = ["std"]
 # Replace the internal RwLock-backed `StLock` with a NO-ATOMIC UnsafeCell bypass.
 # UNSOUND in multi-threaded programs — enable ONLY in a known single-threaded environment
 # (e.g. the azul remill-lifted single-threaded-wasm web backend, where std's queue RwLock

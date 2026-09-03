@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.1.0] - 2026-09-03
+
+### Added
+- `FcDesktopFont::parse`: Pango font descriptions (`'Cantarell Bold 11'`) to family, weight, italic, size. No I/O.
+- `FcDesktopFont::parse_qt`: Qt/`kdeglobals` descriptions (`Noto Sans,10,-1,5,50,0,...`), both weight scales. No I/O.
+- `FcDesktopFont::parse_gvariant`: unwrap the tuple/variant layers `gsettings` and `gdbus` print, then parse. No I/O.
+- `FcDesktopFonts { ui, document, monospace }`, `from_kdeglobals_str` and `fill_from`.
+- `FcFallbackConfig::{set_generic, prefer, prefer_for}`: edit a generic's candidates; `prefer` keeps the old list as fallback.
+- `FcFontCache::modify_fallback_config`: edit the config in place under one lock, no lost updates.
+- Feature `desktop-detect` (off by default): `FcDesktopFonts::{detect, from_xdg_portal, from_gsettings, from_kdeglobals}`. `detect` layers the XDG Settings Portal (right under Flatpak), GNOME's `gsettings` and KDE's `kdeglobals`, filling only unset roles; KDE goes first when `$XDG_CURRENT_DESKTOP` says so. Nothing else in the crate starts a process.
+
 ## [5.0.0] - 2026-09-03
 
 ### Breaking

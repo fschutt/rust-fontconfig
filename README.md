@@ -32,7 +32,7 @@ Now for the more practical reasons:
 
 ```toml
 [dependencies]
-rust-fontconfig = { version = "5.0", features = ["parsing"] }
+rust-fontconfig = { version = "5.1", features = ["parsing"] }
 ```
 
 The default build (`std` only) discovers system fonts via **filename
@@ -50,6 +50,7 @@ accurate family names, weights, Unicode coverage and
 | `cache` | | Persist the parsed cache to disk (serde + bincode + dirs). |
 | `async-registry` | | `FcFontRegistry` for incremental/background font discovery. Implies `parsing`. |
 | `ffi` | | C API bindings. Implies `parsing` + `async-registry`. |
+| `desktop-detect` | | Ask the running desktop for its configured fonts (`gsettings`, `kdeglobals`). The only code here that starts a process. |
 
 > **WASM:** `wasm32-*` targets build out of the box - `mmapio` and `rayon` are
 > excluded automatically via `cfg`. Build with `--features parsing`.
@@ -103,7 +104,7 @@ fn main() {
 
 ### Font Fallback Chain for CSS font-family
 
-The new API separates font chain resolution from text querying:
+The API separates font chain resolution from text querying:
 
 1. **`resolve_font_chain()`** - Create a fallback chain from CSS font-family (without text)
 2. **`chain.resolve_text()`** - Query which fonts to use for specific text
@@ -142,38 +143,31 @@ fn main() {
 
 ### Controlling fallback
 
-Everything the chain builder knows about the host is injected through an
-`FcFallbackConfig`: which families stand behind each generic, which fonts to
-prefer for a script, what to substitute for a missing named family, and what
-to draw when nothing covers a character. `FcFontCache::build()` parses the
-platform configuration where there is one (Linux `fonts.conf` aliases) and
-fills the gaps from `FcFallbackConfig::os_defaults`; `FcFontCache::default()`
-starts empty.
+`FcFallbackConfig` controls fallback behavior: CSS generic mappings, per-script preferences, missing family substitutions, and last-resort fonts. `FcFontCache::build()` automatically uses platform defaults (and Linux `fonts.conf`), while `FcFontCache::default()` starts empty.
 
 ```rust
 use rust_fontconfig::{
-    FcFallbackConfig, FcFontCache, FcScriptFallback, FcWeight, GenericFamily,
+    FcFallbackConfig, FcFontCache, FcWeight, GenericFamily,
     OperatingSystem, PatternMatch, UnicodeRange,
 };
 
 let mut config = FcFallbackConfig::os_defaults(OperatingSystem::current());
-// Prefer a specific font for Hiragana when the stack asks for sans-serif.
-config.script_fallbacks.insert(0, FcScriptFallback {
-    range: UnicodeRange { start: 0x3040, end: 0x309F },
-    generic: Some(GenericFamily::SansSerif),
-    families: vec!["Noto Sans JP".to_string()],
-});
-// The font whose .notdef is drawn for anything no font covers.
+
+// 1. Substitute a missing named font
+config.substitutions.insert("Helvetica".to_string(), vec!["Arial".to_string()]);
+
+// 2. Prepend a preferred font to a CSS generic
+config.prefer(GenericFamily::SansSerif, "Open Sans");
+
+// 3. Set a catch-all last resort font
 config.last_resort = vec!["Noto Sans".to_string()];
 
 let cache = FcFontCache::build().with_fallback_config(config);
 
-// The scripts hint bounds what the chain precomputes: `Some(&[])` builds no
-// script tier at all (ASCII-only documents pull in no CJK fonts), `None` uses
-// `DEFAULT_UNICODE_FALLBACK_SCRIPTS`, and a list of blocks - usually derived
-// from the document's text - builds exactly those.
+// `scripts_hint` limits which Unicode blocks are precomputed in the chain.
+// `None` builds the default 7 fallback scripts; `Some(&[])` builds none.
 let chain = cache.resolve_font_chain_with_scripts(
-    &["sans-serif".to_string()],
+    &["Helvetica".to_string(), "sans-serif".to_string()],
     FcWeight::Normal,
     PatternMatch::DontCare,
     PatternMatch::DontCare,
@@ -182,19 +176,28 @@ let chain = cache.resolve_font_chain_with_scripts(
 );
 ```
 
-A chain resolves a character in three tiers, first hit wins: the CSS stack
-(a generic's per-script preferred fonts before its base fonts), then the
-coverage-gated group for the character's script block - configured
-preferences first, then registered fonts ranked by coverage of *that* block,
-style, and dedication to the script (a font that is mostly this script beats
-one that merely includes it; breadth of coverage is never a bonus) - then
-the configured last resort. `resolve_char` and `query_for_text` read only
-the chain: no lock, no cache access per character.
+Font fallback resolves in three tiers (first hit wins):
+1. **CSS stack**: Generics and their per-script preferred fonts.
+2. **Script block**: Configured script preferences, then installed fonts ranked by coverage of that specific block, style match, and dedication (narrow coverage beats pan-Unicode fonts).
+3. **Last resort**: The configured fallback for uncovered characters.
 
-For the async registry, `FcFontRegistry::new_with_configs(scan, fallback)`
-injects both the scan side and the resolution side; the families it parses
-ahead of a request are exactly `config.candidate_families(stack, scripts)`,
-so what is prefetched and what a chain can contain agree by construction.
+Text resolution (`resolve_char`, `query_for_text`) reads only the precomputed chain, requiring no locks or cache access per character.
+
+For the async registry, use `FcFontRegistry::new_with_configs(scan, fallback)`.
+
+### The Desktop's Configured Font
+
+Enable the `desktop-detect` feature to read the user's system font preferences (`FcDesktopFonts::detect()`). On Linux, this queries the XDG Settings Portal, GNOME (`gsettings`), and KDE (`kdeglobals`). On macOS/Windows, this returns nothing by default (you must supply your own `FcDesktopFont::new`).
+
+```rust
+if let Some(ui) = rust_fontconfig::FcDesktopFonts::detect().ui {
+    cache.modify_fallback_config(|c| {
+        c.prefer_for(&[GenericFamily::SystemUi, GenericFamily::UiSansSerif], ui.family);
+    });
+}
+```
+
+The parsed desktop configuration can simply be prepended to the generic fallbacks (via `prefer_for`), ensuring built-in fallbacks still work if the user's font is missing.
 
 ### Character-by-Character Font Resolution
 
