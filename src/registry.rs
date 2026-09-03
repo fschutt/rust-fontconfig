@@ -219,7 +219,6 @@ impl FcFontRegistry {
     pub fn request_fonts(&self, family_stacks: &[Vec<String>]) -> Vec<FontFallbackChain> {
         let deadline = Instant::now() + Duration::from_secs(5);
 
-
         let mut needed_families: Vec<String> = Vec::new();
         let config = self.cache.fallback_config();
 
@@ -232,7 +231,6 @@ impl FcFontRegistry {
                 }
             }
         }
-
 
         if self.cache_loaded.load(Ordering::Acquire) || self.build_complete.load(Ordering::Acquire)
         {
@@ -271,7 +269,6 @@ impl FcFontRegistry {
                 .collect()
         };
 
-
         let incomplete_paths = self
             .known_paths
             .read()
@@ -279,7 +276,6 @@ impl FcFontRegistry {
             .zip(self.completed_paths.lock().ok())
             .map(|(known, completed)| find_incomplete_paths(&needed_families, &known, &completed))
             .unwrap_or_default();
-
 
         if missing.is_empty() && incomplete_paths.is_empty() {
             let r = self.resolve_chains(family_stacks);
@@ -349,7 +345,6 @@ impl FcFontRegistry {
                 };
             }
         }
-
 
         // 8. Resolve chains from the now-populated registry
         let r = self.resolve_chains(family_stacks);
