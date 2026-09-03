@@ -6,9 +6,9 @@
 //!   desktops store their font choices in into a family name and style. Pure
 //!   string work: no processes, no files, no environment.
 //! - [`FcDesktopFonts::detect`] asks the running desktop what those strings
-//!   are. It spawns `gsettings` and reads `kdeglobals`, so it lives behind the
-//!   off-by-default `desktop-detect` feature and is never called on your
-//!   behalf.
+//!   are — the XDG Settings Portal, then GNOME's `gsettings`, then KDE's
+//!   `kdeglobals`. It spawns processes, so it lives behind the off-by-default
+//!   `desktop-detect` feature and is never called on your behalf.
 //!
 //! Nothing here decides which generic a preference applies to; that is a
 //! policy the embedder owns. Feed the result to
@@ -244,6 +244,31 @@ impl FcDesktopFont {
         })
     }
 
+    /// Parse a Pango description out of the GVariant text `gsettings` and
+    /// `gdbus` print, then hand it to [`parse`](Self::parse).
+    ///
+    /// `gsettings get` prints a bare string, `gdbus call` wraps it in a tuple
+    /// and one or two variant layers. The innermost single-quoted run is the
+    /// value; text with no quotes at all is parsed as-is.
+    ///
+    /// ```
+    /// # use rust_fontconfig::FcDesktopFont;
+    /// // gsettings get org.gnome.desktop.interface font-name
+    /// assert_eq!(FcDesktopFont::parse_gvariant("'Cantarell 11'\n").unwrap().family, "Cantarell");
+    /// // gdbus call ... Settings.ReadOne
+    /// assert_eq!(FcDesktopFont::parse_gvariant("(<'Cantarell 11'>,)").unwrap().family, "Cantarell");
+    /// // gdbus call ... Settings.Read (double-wrapped)
+    /// assert_eq!(FcDesktopFont::parse_gvariant("(<<'Cantarell 11'>>,)").unwrap().family, "Cantarell");
+    /// ```
+    pub fn parse_gvariant(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        let inner = match (raw.find('\''), raw.rfind('\'')) {
+            (Some(start), Some(end)) if end > start => &raw[start + 1..end],
+            _ => raw,
+        };
+        Self::parse(inner)
+    }
+
     /// Parse a Qt font description: `family,pointSize,pixelSize,styleHint,weight,italic,...`.
     ///
     /// This is what KDE writes into `kdeglobals` (`[General] font=`, `fixed=`)
@@ -370,27 +395,65 @@ impl FcDesktopFonts {
     }
 }
 
+impl FcDesktopFonts {
+    /// Fill this set's empty roles from `other`, keeping what is already set.
+    ///
+    /// Sources answer partially — `kdeglobals` has no document font — so
+    /// [`detect`](Self::detect) layers them instead of taking the first one
+    /// that answers at all.
+    pub fn fill_from(&mut self, other: Self) -> &mut Self {
+        if self.ui.is_none() {
+            self.ui = other.ui;
+        }
+        if self.document.is_none() {
+            self.document = other.document;
+        }
+        if self.monospace.is_none() {
+            self.monospace = other.monospace;
+        }
+        self
+    }
+}
+
 #[cfg(feature = "desktop-detect")]
 impl FcDesktopFonts {
     /// Ask the running desktop for its configured fonts.
     ///
-    /// **This talks to the system.** On Linux it spawns `gsettings` and reads
-    /// `kdeglobals` under `$XDG_CONFIG_HOME`; every other platform answers
-    /// with [`FcDesktopFonts::default`]. Nothing in this crate calls it for
-    /// you — `FcFontCache::build` and `FcFontRegistry::new` never spawn a
-    /// process.
+    /// **This talks to the system.** Nothing in this crate calls it for you —
+    /// `FcFontCache::build` and `FcFontRegistry::new` never spawn a process.
     ///
-    /// Inside a Flatpak sandbox `gsettings` reports the sandbox's own values,
-    /// not the host's. Read the XDG Settings Portal yourself there and hand
-    /// the strings to [`FcDesktopFont::parse`].
+    /// On Linux it consults, in order, filling only what is still unset:
+    ///
+    /// | Source | How | Notes |
+    /// |---|---|---|
+    /// | [XDG Settings Portal](Self::from_xdg_portal) | `gdbus call --session --dest org.freedesktop.portal.Desktop …` | The one that is right inside a Flatpak or Snap sandbox |
+    /// | [GNOME](Self::from_gsettings) | `gsettings get org.gnome.desktop.interface font-name` | Reports the sandbox's own values when sandboxed, hence the order |
+    /// | [KDE](Self::from_kdeglobals) | reads `$XDG_CONFIG_HOME/kdeglobals` | Tried first when `$XDG_CURRENT_DESKTOP` names KDE |
+    ///
+    /// Every other platform answers with [`FcDesktopFonts::default`]: macOS
+    /// does not let the user change the UI font, and Windows keeps its choice
+    /// in a binary `LOGFONT` that needs a Win32 call this crate will not make.
+    /// Use [`FcDesktopFont::new`] with what your own code found there.
+    ///
+    /// There is no `fc-match` step: since 5.0 the `fonts.conf` tree is parsed
+    /// directly, so `FcFontCache::build` already knows what `fc-match` would
+    /// have said.
     pub fn detect() -> Self {
         #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
         {
-            let gnome = Self::from_gsettings();
-            if gnome != Self::default() {
-                return gnome;
+            let kde_first = std::env::var("XDG_CURRENT_DESKTOP")
+                .map(|v| v.to_ascii_uppercase().contains("KDE"))
+                .unwrap_or(false);
+            let mut out = Self::default();
+            if kde_first {
+                out.fill_from(Self::from_kdeglobals());
             }
-            return Self::from_kdeglobals();
+            out.fill_from(Self::from_xdg_portal());
+            out.fill_from(Self::from_gsettings());
+            if !kde_first {
+                out.fill_from(Self::from_kdeglobals());
+            }
+            out
         }
         #[cfg(not(all(target_os = "linux", not(target_family = "wasm"))))]
         {
@@ -398,7 +461,36 @@ impl FcDesktopFonts {
         }
     }
 
+    /// The XDG Settings Portal, over `gdbus`.
+    ///
+    /// ```text
+    /// gdbus call --session --dest org.freedesktop.portal.Desktop \
+    ///   --object-path /org/freedesktop/portal/desktop \
+    ///   --method org.freedesktop.portal.Settings.ReadOne \
+    ///   org.gnome.desktop.interface font-name
+    /// ```
+    ///
+    /// This is the only source that reports the *host's* settings from inside
+    /// a Flatpak or Snap sandbox. Portals older than version 2 have no
+    /// `ReadOne`, so `Read` is tried as well.
+    #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+    pub fn from_xdg_portal() -> Self {
+        Self {
+            ui: portal_font("font-name"),
+            document: portal_font("document-font-name"),
+            monospace: portal_font("monospace-font-name"),
+        }
+    }
+
     /// GNOME and anything else on the `org.gnome.desktop.interface` schema.
+    ///
+    /// ```text
+    /// gsettings get org.gnome.desktop.interface font-name
+    /// ```
+    ///
+    /// Inside a sandbox this answers with the sandbox's own values, not the
+    /// host's — [`from_xdg_portal`](Self::from_xdg_portal) is asked first for
+    /// that reason.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_gsettings() -> Self {
         Self {
@@ -408,7 +500,10 @@ impl FcDesktopFonts {
         }
     }
 
-    /// KDE's `kdeglobals`.
+    /// KDE's `kdeglobals`, under `$XDG_CONFIG_HOME` (or `~/.config`).
+    ///
+    /// Reads `[General] font` and `[General] fixed`. KDE stores no document
+    /// font, so that role stays `None`.
     #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
     pub fn from_kdeglobals() -> Self {
         let path = match std::env::var_os("XDG_CONFIG_HOME") {
@@ -426,6 +521,23 @@ impl FcDesktopFonts {
     }
 }
 
+/// Run `command` with `args` and parse its stdout as a desktop font.
+#[cfg(all(
+    feature = "desktop-detect",
+    target_os = "linux",
+    not(target_family = "wasm")
+))]
+fn command_font(command: &str, args: &[&str]) -> Option<FcDesktopFont> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    FcDesktopFont::parse_gvariant(core::str::from_utf8(&output.stdout).ok()?)
+}
+
 /// One `gsettings get org.gnome.desktop.interface <key>`.
 #[cfg(all(
     feature = "desktop-detect",
@@ -433,14 +545,36 @@ impl FcDesktopFonts {
     not(target_family = "wasm")
 ))]
 fn gsettings_font(key: &str) -> Option<FcDesktopFont> {
-    let output = std::process::Command::new("gsettings")
-        .arg("get")
-        .arg("org.gnome.desktop.interface")
-        .arg(key)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    command_font("gsettings", &["get", "org.gnome.desktop.interface", key])
+}
+
+/// One `org.freedesktop.portal.Settings` read, `ReadOne` then `Read`.
+#[cfg(all(
+    feature = "desktop-detect",
+    target_os = "linux",
+    not(target_family = "wasm")
+))]
+fn portal_font(key: &str) -> Option<FcDesktopFont> {
+    const PORTAL: &[&str] = &[
+        "call",
+        "--session",
+        "--dest",
+        "org.freedesktop.portal.Desktop",
+        "--object-path",
+        "/org/freedesktop/portal/desktop",
+        "--method",
+    ];
+    for method in [
+        "org.freedesktop.portal.Settings.ReadOne",
+        "org.freedesktop.portal.Settings.Read",
+    ] {
+        let mut args = PORTAL.to_vec();
+        args.push(method);
+        args.push("org.gnome.desktop.interface");
+        args.push(key);
+        if let Some(font) = command_font("gdbus", &args) {
+            return Some(font);
+        }
     }
-    FcDesktopFont::parse(core::str::from_utf8(&output.stdout).ok()?)
+    None
 }

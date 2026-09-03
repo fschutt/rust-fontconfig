@@ -273,3 +273,49 @@ fn an_empty_kdeglobals_yields_nothing() {
         rust_fontconfig::FcDesktopFonts::from_kdeglobals_str("[General]\nXftHinting=true\n");
     assert_eq!(fonts, rust_fontconfig::FcDesktopFonts::default());
 }
+
+// --- What the tools actually print -------------------------------------------
+
+#[test]
+fn the_gvariant_wrappers_the_tools_print_are_unwrapped() {
+    // gsettings get org.gnome.desktop.interface font-name
+    // gdbus call ... Settings.ReadOne   -> one variant layer
+    // gdbus call ... Settings.Read      -> two
+    for raw in [
+        "'Cantarell 11'\n",
+        "(<'Cantarell 11'>,)\n",
+        "(<<'Cantarell 11'>>,)\n",
+        "  (<<'Cantarell 11'>>,)  ",
+    ] {
+        let f = FcDesktopFont::parse_gvariant(raw).unwrap();
+        assert_eq!(f.family, "Cantarell", "for {raw:?}");
+        assert_eq!(f.size_pt, Some(11.0), "for {raw:?}");
+    }
+}
+
+#[test]
+fn unquoted_gvariant_text_is_parsed_as_is() {
+    let f = FcDesktopFont::parse_gvariant("Cantarell Bold 11").unwrap();
+    assert_eq!(f.family, "Cantarell");
+    assert_eq!(f.weight, FcWeight::Bold);
+    assert!(FcDesktopFont::parse_gvariant("").is_none());
+}
+
+#[test]
+fn fill_from_keeps_what_is_already_set() {
+    use rust_fontconfig::FcDesktopFonts;
+
+    // KDE answers ui + monospace but never document; GNOME fills the rest.
+    let mut fonts = FcDesktopFonts::from_kdeglobals_str(
+        "[General]\nfont=Noto Sans,10,-1,5,50,0,0,0,0,0\nfixed=Hack,9\n",
+    );
+    fonts.fill_from(FcDesktopFonts {
+        ui: Some(FcDesktopFont::new("Should Not Win")),
+        document: Some(FcDesktopFont::new("Noto Serif")),
+        monospace: Some(FcDesktopFont::new("Should Not Win")),
+    });
+
+    assert_eq!(fonts.ui.as_ref().unwrap().family, "Noto Sans");
+    assert_eq!(fonts.monospace.as_ref().unwrap().family, "Hack");
+    assert_eq!(fonts.document.as_ref().unwrap().family, "Noto Serif");
+}

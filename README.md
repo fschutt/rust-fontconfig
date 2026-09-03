@@ -212,15 +212,26 @@ cache.modify_fallback_config(|c| {
 ```
 
 Parsing does no I/O. Asking the desktop does, so it sits behind the
-off-by-default `desktop-detect` feature - with it on, `FcDesktopFonts::detect()`
-spawns `gsettings` and reads `kdeglobals` on Linux and returns `ui`,
-`document` and `monospace`. Which generic each of those maps to is your
-decision, not the crate's. Nothing else here ever starts a process: a default
-build makes no OS calls beyond reading font files and `fonts.conf`.
+off-by-default `desktop-detect` feature. With it on, `FcDesktopFonts::detect()`
+returns `ui`, `document` and `monospace` from, in order:
 
-Under Flatpak, `gsettings` reports the sandbox's values rather than the
-host's - read the XDG Settings Portal yourself there and hand the string to
-`FcDesktopFont::parse`.
+| Source | Command | |
+|---|---|---|
+| XDG Settings Portal | `gdbus call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.ReadOne org.gnome.desktop.interface font-name` | the only one that is right inside a Flatpak or Snap sandbox |
+| GNOME | `gsettings get org.gnome.desktop.interface font-name` | reports the sandbox's own values when sandboxed |
+| KDE | reads `$XDG_CONFIG_HOME/kdeglobals` | tried first when `$XDG_CURRENT_DESKTOP` names KDE |
+
+Each source fills only the roles still unset, so KDE's missing document font
+comes from GNOME's if that answers. macOS does not let the user change the UI
+font, and Windows keeps its choice in a binary `LOGFONT` behind a Win32 call
+this crate will not make - on both, `detect()` returns nothing and you pass
+`FcDesktopFont::new(family)` in yourself.
+
+Which generic each role maps to is your decision, not the crate's. Nothing
+else here ever starts a process: a default build makes no OS calls beyond
+reading font files and `fonts.conf`. There is no `fc-match` step either -
+since 5.0 the `fonts.conf` tree is parsed directly, so the cache already
+knows what `fc-match` would have said.
 
 ### Character-by-Character Font Resolution
 
