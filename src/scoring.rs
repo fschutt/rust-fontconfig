@@ -11,31 +11,31 @@ use crate::config;
 use crate::utils::normalize_family_name;
 use crate::FcPattern;
 
-// ── Priority Queue Types ────────────────────────────────────────────────────
+// Priority Queue Types
 
 /// Priority levels for font build jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
-/// Everything else found by Scout.
+    /// Everything else found by Scout.
     Low = 0,
-/// Disk cache hit (cheap deserialization).
+    /// Disk cache hit (cheap deserialization).
     Medium = 1,
-/// Common OS default fonts (sans-serif, serif, monospace).
+    /// Common OS default fonts (sans-serif, serif, monospace).
     High = 2,
-/// Main thread is blocked waiting for this font.
+    /// Main thread is blocked waiting for this font.
     Critical = 3,
 }
 
 /// A job for the Builder pool to process.
 #[derive(Debug, Clone)]
 pub struct FcBuildJob {
-/// How urgently this font file needs to be parsed.
+    /// How urgently this font file needs to be parsed.
     pub priority: Priority,
-/// Absolute path to the font file on disk.
+    /// Absolute path to the font file on disk.
     pub path: PathBuf,
-/// Face index within the font file (for `.ttc` collections).
+    /// Face index within the font file (for `.ttc` collections).
     pub font_index: Option<usize>,
-/// Normalized family name guessed from the filename (lowercase, no separators).
+    /// Normalized family name guessed from the filename (lowercase, no separators).
     pub guessed_family: String,
 }
 
@@ -58,7 +58,7 @@ impl Ord for FcBuildJob {
     }
 }
 
-// ── Scout Priority Assignment ───────────────────────────────────────────────
+//Scout Priority Assignment
 
 /// Assign initial priority for a font file discovered by the scout.
 pub fn assign_scout_priority(
@@ -72,7 +72,7 @@ pub fn assign_scout_priority(
     }
 }
 
-// ── Path Lookup Helpers ─────────────────────────────────────────────────────
+// Path Lookup Helpers
 
 /// Find all known file paths that match a normalized family name.
 pub fn find_family_paths(
