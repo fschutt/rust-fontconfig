@@ -147,18 +147,19 @@ fn main() {
 
 ```rust
 use rust_fontconfig::{
-    FcFallbackConfig, FcFontCache, FcScriptFallback, FcWeight, GenericFamily,
+    FcFallbackConfig, FcFontCache, FcWeight, GenericFamily,
     OperatingSystem, PatternMatch, UnicodeRange,
 };
 
 let mut config = FcFallbackConfig::os_defaults(OperatingSystem::current());
-// Prefer a specific font for Hiragana when the stack asks for sans-serif.
-config.script_fallbacks.insert(0, FcScriptFallback {
-    range: UnicodeRange { start: 0x3040, end: 0x309F },
-    generic: Some(GenericFamily::SansSerif),
-    families: vec!["Noto Sans JP".to_string()],
-});
-// The font whose .notdef is drawn for anything no font covers.
+
+// 1. Substitute a missing named font
+config.substitutions.insert("Helvetica".to_string(), vec!["Arial".to_string()]);
+
+// 2. Prepend a preferred font to a CSS generic
+config.prefer(GenericFamily::SansSerif, "Open Sans");
+
+// 3. Set a catch-all last resort font
 config.last_resort = vec!["Noto Sans".to_string()];
 
 let cache = FcFontCache::build().with_fallback_config(config);
@@ -166,7 +167,7 @@ let cache = FcFontCache::build().with_fallback_config(config);
 // `scripts_hint` limits which Unicode blocks are precomputed in the chain.
 // `None` builds the default 7 fallback scripts; `Some(&[])` builds none.
 let chain = cache.resolve_font_chain_with_scripts(
-    &["sans-serif".to_string()],
+    &["Helvetica".to_string(), "sans-serif".to_string()],
     FcWeight::Normal,
     PatternMatch::DontCare,
     PatternMatch::DontCare,
