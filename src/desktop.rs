@@ -1,18 +1,9 @@
 //! Desktop font preferences.
 //!
-//! Two halves, deliberately separated:
+//! - [`FcDesktopFont::parse`] and [`FcDesktopFont::parse_qt`] parse desktop font configurations into family names and styles.
+//! - [`FcDesktopFonts::detect`] (behind the `desktop-detect` feature) queries the host OS for its configured UI fonts.
 //!
-//! - [`FcDesktopFont::parse`] and [`FcDesktopFont::parse_qt`] turn the strings
-//!   desktops store their font choices in into a family name and style. Pure
-//!   string work: no processes, no files, no environment.
-//! - [`FcDesktopFonts::detect`] asks the running desktop what those strings
-//!   are — the XDG Settings Portal, then GNOME's `gsettings`, then KDE's
-//!   `kdeglobals`. It spawns processes, so it lives behind the off-by-default
-//!   `desktop-detect` feature and is never called on your behalf.
-//!
-//! Nothing here decides which generic a preference applies to; that is a
-//! policy the embedder owns. Feed the result to
-//! [`FcFallbackConfig::prefer_for`](crate::FcFallbackConfig::prefer_for):
+//! You can use the parsed results to configure fallback generics via [`FcFallbackConfig::prefer_for`](crate::FcFallbackConfig::prefer_for):
 //!
 //! ```no_run
 //! # use rust_fontconfig::*;
@@ -123,8 +114,7 @@ fn key_of(token: &str) -> String {
 pub struct FcDesktopFont {
     /// The first family of [`families`](Self::families).
     pub family: String,
-    /// Every family in the description, in order. Pango allows a
-    /// comma-separated list; most desktops write exactly one.
+    /// Every family in the description, in order.
     pub families: Vec<String>,
     /// [`FcWeight::Normal`] when the description names no weight.
     pub weight: FcWeight,
@@ -132,8 +122,7 @@ pub struct FcDesktopFont {
     pub italic: bool,
     /// The description asked for oblique.
     pub oblique: bool,
-    /// Point size, when the description carries one. A `px`-suffixed absolute
-    /// size is recognized and stripped, but reported as `None`.
+    /// Point size, if specified. Absolute 'px' sizes are ignored.
     pub size_pt: Option<f32>,
 }
 
@@ -151,14 +140,7 @@ impl FcDesktopFont {
         }
     }
 
-    /// Parse a Pango font description: `FAMILY-LIST [STYLE-OPTIONS] [SIZE]`.
-    ///
-    /// This is what GNOME's `org.gnome.desktop.interface font-name` and
-    /// anything else built on Pango stores. Surrounding single or double
-    /// quotes (as `gsettings get` prints them) are stripped, as is a trailing
-    /// `@variations` suffix.
-    ///
-    /// Returns `None` when nothing is left to use as a family.
+    /// Parses a Pango font description (e.g., `Cantarell Bold 11`).
     ///
     /// ```
     /// # use rust_fontconfig::{FcDesktopFont, FcWeight};
@@ -168,11 +150,7 @@ impl FcDesktopFont {
     /// assert_eq!(f.size_pt, Some(11.0));
     /// ```
     ///
-    /// Style keywords are only peeled off the end, so a family that ends in
-    /// one keeps it when nothing follows: `"Book Antiqua"` parses as the
-    /// family `Book Antiqua`, while `"Noto Sans Light"` parses as `Noto Sans`
-    /// at [`FcWeight::Light`]. Pango is ambiguous here in exactly the same
-    /// way.
+    /// Trailing keywords are parsed as style/weight tokens.
     pub fn parse(input: &str) -> Option<Self> {
         let input = input.trim();
         let input = input.trim_matches('\'').trim_matches('"').trim();
@@ -244,12 +222,8 @@ impl FcDesktopFont {
         })
     }
 
-    /// Parse a Pango description out of the GVariant text `gsettings` and
-    /// `gdbus` print, then hand it to [`parse`](Self::parse).
-    ///
-    /// `gsettings get` prints a bare string, `gdbus call` wraps it in a tuple
-    /// and one or two variant layers. The innermost single-quoted run is the
-    /// value; text with no quotes at all is parsed as-is.
+    /// Parses a Pango description from GVariant output (e.g., `gsettings`, `gdbus`).
+    /// Extracts the innermost string and passes it to [`parse`](Self::parse).
     ///
     /// ```
     /// # use rust_fontconfig::FcDesktopFont;
@@ -283,9 +257,7 @@ impl FcDesktopFont {
     /// assert_eq!(f.size_pt, Some(10.0));
     /// ```
     ///
-    /// Qt writes weight on its own 0-99 scale in the older format and on the
-    /// CSS 1-1000 scale in the newer one. A value at or below 99 is read as
-    /// the Qt scale.
+    /// Resolves both Qt's legacy 0-99 weight scale and the CSS 1-1000 scale.
     pub fn parse_qt(input: &str) -> Option<Self> {
         let input = input.trim();
         let mut fields = input.split(',');
@@ -354,19 +326,16 @@ fn split_families(input: &str) -> Vec<String> {
 /// role belongs to is the embedder's decision — see the module docs.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FcDesktopFonts {
-    /// The interface font (GNOME `font-name`, KDE `[General] font`).
+    /// The UI font.
     pub ui: Option<FcDesktopFont>,
-    /// The document font (GNOME `document-font-name`).
+    /// The document font.
     pub document: Option<FcDesktopFont>,
-    /// The fixed-width font (GNOME `monospace-font-name`, KDE `[General] fixed`).
+    /// The fixed-width font.
     pub monospace: Option<FcDesktopFont>,
 }
 
 impl FcDesktopFonts {
-    /// Parse the `[General]` section of a `kdeglobals` file.
-    ///
-    /// Pure string work — [`from_kdeglobals`](Self::from_kdeglobals) is the
-    /// one that goes looking for the file.
+    /// Parses the `[General]` section of a `kdeglobals` file.
     pub fn from_kdeglobals_str(text: &str) -> Self {
         let mut out = Self::default();
         let mut in_general = false;

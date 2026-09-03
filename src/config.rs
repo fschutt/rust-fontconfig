@@ -578,26 +578,14 @@ impl FcFallbackConfig {
         config
     }
 
-    /// Replace the preferred families for `generic`.
-    ///
-    /// The previous list is discarded, so `generic` resolves to `families` or
-    /// to nothing. Use [`prefer`](Self::prefer) to keep the old list as a
-    /// fallback for the case where `families` is not installed.
+    /// Overwrites the preferred families for `generic`.
     pub fn set_generic(&mut self, generic: GenericFamily, families: Vec<String>) -> &mut Self {
         self.generic_families.insert(generic, families);
         self
     }
 
-    /// Put `family` first among `generic`'s candidates, keeping the rest.
-    ///
-    /// This is the shape a desktop preference wants: the configured font wins
-    /// when it is installed, and the built-in list still answers when it is
-    /// not. An entry equal to `family` (ASCII case-insensitive) is moved to
-    /// the front rather than duplicated.
-    ///
-    /// A generic with no list of its own inherits one from its
-    /// [`parent`](GenericFamily::parent); preferring a family gives it a list
-    /// of its own, so the inherited candidates are copied in behind `family`.
+    /// Prepends `family` to `generic`'s candidates.
+    /// Existing duplicate entries are removed, and missing lists are inherited from the generic's parent.
     pub fn prefer(&mut self, generic: GenericFamily, family: impl Into<String>) -> &mut Self {
         let family = family.into();
         let mut list = match self.generic_families.remove(&generic) {

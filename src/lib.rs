@@ -1410,13 +1410,8 @@ impl FcFontCache {
         self
     }
 
-    /// Edit the fallback configuration in place.
-    ///
-    /// One write lock for the whole edit, so concurrent callers cannot lose
-    /// each other's changes the way a
-    /// [`fallback_config`](Self::fallback_config) → mutate →
-    /// [`set_fallback_config`](Self::set_fallback_config) round trip can. The
-    /// memoized chains are dropped once, after `f` returns.
+    /// Mutates the fallback configuration in-place.
+    /// Clears the chain cache after `f` returns.
     ///
     /// ```no_run
     /// # use rust_fontconfig::*;
