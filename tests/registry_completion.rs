@@ -125,3 +125,41 @@ fn wait_for_scout_returns_promptly_when_the_build_completes() {
     assert!(registry.is_build_complete());
     assert!(started.elapsed() < Duration::from_secs(2), "took too long");
 }
+
+/// `wait_for_fonts` loads the families and resolves no chain. A caller that
+/// only needs the fonts in the cache (azul's pre-layout request for the common
+/// families, `request_and_resolve_with_scripts`' own wait) left a full
+/// default-script chain per stack in the memo - megabytes each with CJK fonts
+/// installed, 75 MB for azul's 34 common stacks on macOS.
+#[test]
+fn waiting_for_fonts_resolves_no_chain() {
+    let tmp = TempDir::new();
+    let path = tmp.0.join("face.ttf");
+    std::fs::write(&path, FIXTURE).expect("write fixture copy");
+
+    let registry = FcFontRegistry::new_with_config(FcScanConfig::empty());
+    registry.set_persist_on_complete(false);
+    {
+        let mut queue = registry.build_queue.lock().expect("queue lock");
+        queue.push(FcBuildJob {
+            priority: Priority::Critical,
+            path: path.clone(),
+            font_index: None,
+            guessed_family: "instrumentserif".to_string(),
+        });
+    }
+    registry.spawn_scout_and_builders();
+
+    let stacks = vec![
+        vec!["instrumentserif".to_string()],
+        vec!["serif".to_string()],
+    ];
+    registry.wait_for_fonts(&stacks);
+    assert_eq!(registry.chain_cache_len(), 0, "a wait resolved chains");
+
+    let chains = registry.request_fonts(&stacks);
+    assert_eq!(chains.len(), 2);
+    assert_eq!(registry.chain_cache_len(), 2, "request_fonts still resolves");
+
+    registry.shutdown();
+}

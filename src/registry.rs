@@ -215,8 +215,20 @@ impl FcFontRegistry {
         }
     }
 
-    /// Block until requested font families are loaded (5s timeout).
+    /// Block until requested font families are loaded (5s timeout), then
+    /// resolve a chain for each stack.
     pub fn request_fonts(&self, family_stacks: &[Vec<String>]) -> Vec<FontFallbackChain> {
+        self.wait_for_fonts(family_stacks);
+        self.resolve_chains(family_stacks)
+    }
+
+    /// The waiting half of [`Self::request_fonts`]: queue the stacks' families
+    /// for parsing and block (5s timeout) until they are in the cache, without
+    /// resolving a chain. A resolved chain carries every script group's fonts
+    /// with their whole coverage - megabytes each on a desktop with CJK fonts -
+    /// and the memo keeps one per stack, so a caller that only needs the fonts
+    /// loaded (a first frame without FOUC) should wait, not resolve.
+    pub fn wait_for_fonts(&self, family_stacks: &[Vec<String>]) {
         let deadline = Instant::now() + Duration::from_secs(5);
 
         let mut needed_families: Vec<String> = Vec::new();
@@ -234,13 +246,12 @@ impl FcFontRegistry {
 
         if self.cache_loaded.load(Ordering::Acquire) || self.build_complete.load(Ordering::Acquire)
         {
-            let result = self.resolve_chains(family_stacks);
-            return result;
+            return;
         }
 
         if !self.scan_complete.load(Ordering::Acquire) {
             let Ok(mut completed) = self.completed_paths.lock() else {
-                return self.resolve_chains(family_stacks);
+                return;
             };
             while !self.scan_complete.load(Ordering::Acquire) {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -251,11 +262,11 @@ impl FcFontRegistry {
                              Proceeding with available fonts."
                         );
                     }
-                    return self.resolve_chains(family_stacks);
+                    return;
                 }
                 completed = match self.progress.wait_timeout(completed, remaining) {
                     Ok((c, _)) => c,
-                    Err(_) => return self.resolve_chains(family_stacks),
+                    Err(_) => return,
                 };
             }
         }
@@ -278,8 +289,7 @@ impl FcFontRegistry {
             .unwrap_or_default();
 
         if missing.is_empty() && incomplete_paths.is_empty() {
-            let r = self.resolve_chains(family_stacks);
-            return r;
+            return;
         }
 
         let wait_paths: HashSet<PathBuf> = if let (Ok(known_paths), Ok(mut queue)) =
@@ -320,7 +330,7 @@ impl FcFontRegistry {
         // 7. Wait for all wait_paths to be completed.
         if !wait_paths.is_empty() {
             let Ok(mut completed) = self.completed_paths.lock() else {
-                return self.resolve_chains(family_stacks);
+                return;
             };
             loop {
                 if wait_paths.iter().all(|p| completed.contains(p)) {
@@ -346,9 +356,6 @@ impl FcFontRegistry {
             }
         }
 
-        // 8. Resolve chains from the now-populated registry
-        let r = self.resolve_chains(family_stacks);
-        r
     }
 
     // ── Delegated accessors ─────────────────────────────────────────────────
@@ -407,8 +414,9 @@ impl FcFontRegistry {
         oblique: PatternMatch,
         scripts_hint: Option<&[UnicodeRange]>,
     ) -> FontFallbackChain {
-        // Trigger parse + wait for these families.
-        let _ = self.request_fonts(std::slice::from_ref(&font_families.to_vec()));
+        // Trigger parse + wait for these families (no default-script chain:
+        // the one resolved below is the one asked for).
+        self.wait_for_fonts(std::slice::from_ref(&font_families.to_vec()));
         // Resolve using the newly updated cache.
         let mut trace = Vec::new();
         self.cache.resolve_font_chain_with_scripts(

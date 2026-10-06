@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.1] - 2026-10-06
+
+### Added
+- `FcFontRegistry::wait_for_fonts`: the waiting half of `request_fonts` - loads the stacks' families and resolves no chain.
+
+### Fixed
+- `request_and_resolve_with_scripts` no longer resolves (and memoizes) a default-script chain per call before the one asked for. A default-script chain holds every script group's fonts with their whole coverage: about 2 MB each with CJK fonts installed.
+
 ## [5.0.0] - 2026-09-03
 
 ### Breaking
