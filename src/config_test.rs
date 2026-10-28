@@ -183,4 +183,48 @@ mod tests {
     fn tokenize_all(stem: &str) -> Vec<String> {
         tokenize_lowercase(stem)
     }
+
+    /// Apple's Geeza Pro (Arabic), Thonburi (Thai) and Devanagari MT shape
+    /// only through AAT `morx` tables, which an OpenType shaper does not read:
+    /// a page that names no font of its own came out with unjoined Arabic and
+    /// unstacked Thai marks. The script preferences try a face with OpenType
+    /// GSUB for the script first and keep an AAT-only face last, for its
+    /// coverage.
+    #[test]
+    fn apple_script_fallbacks_try_opentype_faces_before_aat_only_ones() {
+        let devanagari = crate::UnicodeRange {
+            start: 0x0900,
+            end: 0x097F,
+        };
+        for os in [OperatingSystem::MacOS, OperatingSystem::IOS] {
+            let config = FcFallbackConfig::os_defaults(os);
+            for (generic, block, script, opentype) in [
+                (GenericFamily::SansSerif, blocks::ARABIC, "Arabic", "Arial"),
+                (GenericFamily::Serif, blocks::ARABIC, "Arabic", "Times New Roman"),
+                (GenericFamily::SansSerif, blocks::THAI, "Thai", "Sukhumvit Set"),
+                (GenericFamily::SansSerif, devanagari, "Devanagari", "Kohinoor Devanagari"),
+            ] {
+                let candidates = config.script_candidates(Some(generic), &block);
+                assert_eq!(
+                    candidates.first().map(String::as_str),
+                    Some(opentype),
+                    "{os:?} {generic:?} {script} should try {opentype}, which carries OpenType \
+                     GSUB for {script}, first: {candidates:?}"
+                );
+            }
+            for (generic, block, aat_only) in [
+                (GenericFamily::SansSerif, blocks::ARABIC, "Geeza Pro"),
+                (GenericFamily::Serif, blocks::ARABIC, "Geeza Pro"),
+                (GenericFamily::SansSerif, blocks::THAI, "Thonburi"),
+            ] {
+                let candidates = config.script_candidates(Some(generic), &block);
+                assert_eq!(
+                    candidates.last().map(String::as_str),
+                    Some(aat_only),
+                    "{os:?} {generic:?} should keep the AAT-only {aat_only} last, for its \
+                     coverage: {candidates:?}"
+                );
+            }
+        }
+    }
 }
