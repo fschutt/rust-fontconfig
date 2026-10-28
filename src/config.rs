@@ -195,6 +195,10 @@ pub mod blocks {
         start: 0x0590,
         end: 0x05FF,
     };
+    pub const DEVANAGARI: UnicodeRange = UnicodeRange {
+        start: 0x0900,
+        end: 0x097F,
+    };
     pub const THAI: UnicodeRange = UnicodeRange {
         start: 0x0E00,
         end: 0x0E7F,
@@ -516,10 +520,21 @@ impl FcFallbackConfig {
                     &["Hiragino Sans", "PingFang SC"],
                     &["Hiragino Sans", "PingFang SC"],
                 );
-                script(Serif, ARABIC, &["Geeza Pro"]);
-                script(SansSerif, ARABIC, &["Geeza Pro"]);
+                // Geeza Pro and Thonburi shape only through AAT `morx`
+                // tables, which an OpenType shaper does not read, so faces
+                // that carry OpenType GSUB for the script come first and the
+                // AAT-only ones stay last, for their coverage. Devanagari
+                // names its OpenType faces so the coverage ranking does not
+                // land on the AAT-only Devanagari MT.
+                script(Serif, ARABIC, &["Times New Roman", "Geeza Pro"]);
+                script(SansSerif, ARABIC, &["Arial", "Tahoma", "Geeza Pro"]);
                 script(SansSerif, HEBREW, &["Arial Hebrew"]);
-                script(SansSerif, THAI, &["Thonburi"]);
+                script(SansSerif, THAI, &["Sukhumvit Set", "Tahoma", "Thonburi"]);
+                script(
+                    SansSerif,
+                    DEVANAGARI,
+                    &["Kohinoor Devanagari", "ITF Devanagari"],
+                );
             }
             OperatingSystem::Android => {
                 cjk(
