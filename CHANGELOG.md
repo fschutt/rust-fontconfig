@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.0.2] - 2026-10-29
+
+### Fixed
+- macOS / iOS script fallbacks try faces with OpenType GSUB first: Arabic takes Times New Roman (serif) or Arial / Tahoma (sans-serif) before Geeza Pro, Thai takes Sukhumvit Set / Tahoma before Thonburi. Geeza Pro and Thonburi shape only through AAT `morx`, so an OpenType shaper left their text unjoined; they stay last for their coverage.
+- Devanagari gets its own preference (Kohinoor Devanagari, ITF Devanagari) instead of the coverage ranking's AAT-only Devanagari MT.
+
 ## [5.0.1] - 2026-10-06
 
 ### Added
