@@ -1020,10 +1020,16 @@ pub struct FcFontPath {
 }
 
 /// In-memory font data.
+///
+/// The bytes are shared: a memory font is cloned whenever it is looked up
+/// ([`FcFontCache::get_font_by_id`], [`FcFontCache::get_memory_font`]) and handed
+/// out by [`FcFontCache::get_font_bytes`], and with a `Vec<u8>` each of those
+/// copied the whole font. A `Vec<u8>` or a `&[u8]` becomes one with `.into()`
+/// (`Arc::from`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(C)]
 pub struct FcFont {
-    pub bytes: Vec<u8>,
+    pub bytes: alloc::sync::Arc<[u8]>,
     pub font_index: usize,
     pub id: String, // For identification in tests
 }
@@ -1572,7 +1578,7 @@ impl FcFontCache {
         use std::sync::Arc;
         match self.get_font_by_id(id)? {
             OwnedFontSource::Memory(font) => {
-                Some(Arc::new(FontBytes::Owned(Arc::from(font.bytes.as_slice()))))
+                Some(Arc::new(FontBytes::Owned(Arc::clone(&font.bytes))))
             }
             OwnedFontSource::Disk(path) => {
                 let hash = path.bytes_hash;
@@ -3278,12 +3284,27 @@ pub fn FcParseFontBytes(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPatte
     FcParseFontBytesInner(font_bytes, font_id)
 }
 
+/// The patterns of the faces of `font_bytes`, as [`FcParseFontBytes`] makes
+/// them, without the font records: for a caller that wants a face's coverage
+/// or style and holds the bytes itself. Copies none of the bytes.
+#[cfg(all(feature = "std", feature = "parsing"))]
+#[allow(non_snake_case)]
+pub fn FcParseFontPatterns(font_bytes: &[u8]) -> Option<Vec<FcPattern>> {
+    Some(
+        parse_font_faces(font_bytes)?
+            .into_iter()
+            .map(|face| face.pattern)
+            .collect(),
+    )
+}
+
 /// Internal implementation for parsing font bytes.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn FcParseFontBytesInner(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPattern, FcFont)>> {
     let faces = parse_font_faces(font_bytes)?;
     let id = font_id.to_string();
-    let bytes = font_bytes.to_vec();
+    // One copy for all the faces of a collection (each record shares it).
+    let bytes: alloc::sync::Arc<[u8]> = alloc::sync::Arc::from(font_bytes);
 
     Some(
         faces
@@ -3292,7 +3313,7 @@ fn FcParseFontBytesInner(font_bytes: &[u8], font_id: &str) -> Option<Vec<(FcPatt
                 (
                     face.pattern,
                     FcFont {
-                        bytes: bytes.clone(),
+                        bytes: alloc::sync::Arc::clone(&bytes),
                         font_index: face.font_index,
                         id: id.clone(),
                     },

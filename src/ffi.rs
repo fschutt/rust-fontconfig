@@ -1233,7 +1233,7 @@ pub extern "C" fn fc_cache_add_memory_fonts(
                 memory_fonts.push((
                     pattern,
                     FcFont {
-                        bytes,
+                        bytes: bytes.into(),
                         font_index: font.font_index,
                         id: font_id,
                     },

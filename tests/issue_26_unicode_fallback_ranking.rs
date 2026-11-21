@@ -32,7 +32,7 @@ fn mock(family: &str, ranges: &[UnicodeRange]) -> (FcPattern, FcFont) {
         ..Default::default()
     };
     let font = FcFont {
-        bytes: vec![0, 1, 2, 3],
+        bytes: vec![0, 1, 2, 3].into(),
         font_index: 0,
         id: family.to_string(),
     };
