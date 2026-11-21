@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [5.1.0] - 2026-11-21
+
+### Breaking
+- `FcFont::bytes` is `Arc<[u8]>` (was `Vec<u8>`): a literal `FcFont { bytes: vec, .. }` needs `.into()`. Reading the bytes as a slice is unchanged.
+
+### Changed
+- The bytes of a memory font are one shared allocation: `get_font_by_id`, `get_memory_font` and `get_font_bytes` hand out the same `Arc` instead of a copy; `FcParseFontBytes` copies once per call, and the faces of one file share it.
+
+### Added
+- `FcParseFontPatterns(&[u8]) -> Option<Vec<FcPattern>>`: the patterns of a font file without copying its bytes.
+
 ## [5.0.2] - 2026-10-29
 
 ### Fixed
