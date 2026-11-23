@@ -1280,6 +1280,9 @@ pub(crate) struct FcFontCacheShared {
     pub(crate) chain_cache: StLock<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
     /// Shared file-bytes cache: content-hash → weak [`FontBytes`].
     pub(crate) shared_bytes: StLock<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
+    /// The axes of variable faces and the synthetic faces made from them.
+    #[cfg(all(feature = "std", feature = "parsing"))]
+    pub(crate) variation: StLock<variation::VariationState>,
 }
 
 /// The actual font-pattern state, held behind the RwLock in.
@@ -1293,6 +1296,8 @@ pub(crate) struct FcFontCacheInner {
     pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
     /// Metadata cache (patterns stored by ID for quick lookup).
     pub(crate) metadata: BTreeMap<FontId, FcPattern>,
+    /// Synthetic faces of variable fonts. Only the lookups by id return them.
+    pub(crate) derived: BTreeMap<FontId, variation::SyntheticFace>,
     /// Normalized family/name -> the fonts that carry it.
     pub(crate) family_index: BTreeMap<String, alloc::vec::Vec<FontId>>,
     /// What generic families, missing named families, script blocks and.
@@ -1394,6 +1399,8 @@ impl Default for FcFontCache {
                 state: StLock::new(FcFontCacheInner::default()),
                 chain_cache: StLock::new(std::collections::HashMap::new()),
                 shared_bytes: StLock::new(std::collections::HashMap::new()),
+                #[cfg(all(feature = "std", feature = "parsing"))]
+                variation: StLock::new(variation::VariationState::default()),
             }),
         }
     }
@@ -1561,7 +1568,7 @@ impl FcFontCache {
             .filter(|ids| !ids.is_empty())
     }
 
-    /// Get font data for a given font ID.
+    /// Get font data for a given font ID, synthetic faces included.
     pub fn get_font_by_id(&self, id: &FontId) -> Option<OwnedFontSource> {
         let state = self.state_read();
         if let Some(font) = state.memory_fonts.get(id) {
@@ -1570,15 +1577,22 @@ impl FcFontCache {
         if let Some(path) = state.disk_fonts.get(id) {
             return Some(OwnedFontSource::Disk(path.clone()));
         }
+        if let Some(face) = state.derived.get(id) {
+            return Some(OwnedFontSource::Memory(face.font.clone()));
+        }
         None
     }
 
-    /// Get metadata for a font ID.
+    /// Get metadata for a font ID, synthetic faces included.
     pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
-        self.state_read().metadata.get(id).cloned()
+        let state = self.state_read();
+        match state.metadata.get(id) {
+            Some(pattern) => Some(pattern.clone()),
+            None => state.derived.get(id).map(|face| face.pattern.clone()),
+        }
     }
 
-    /// Get the font bytes for `id` as a shared [`FontBytes`].
+    /// Get the font bytes for `id` as a shared [`FontBytes`], synthetic faces included.
     #[cfg(feature = "std")]
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<FontBytes>> {
         use std::sync::Arc;
@@ -1820,9 +1834,10 @@ impl FcFontCache {
         cache
     }
 
-    /// Check if a font ID is a memory font (preferred over disk fonts).
+    /// Check if a font ID is a memory font (preferred over disk fonts). A synthetic face is one.
     pub fn is_memory_font(&self, id: &FontId) -> bool {
-        self.state_read().memory_fonts.contains_key(id)
+        let state = self.state_read();
+        state.memory_fonts.contains_key(id) || state.derived.contains_key(id)
     }
 
     /// Every registered font with its pattern, in registration order.
@@ -1909,9 +1924,13 @@ impl FcFontCache {
         })
     }
 
-    /// Get in-memory font data (cloned out of the shared state).
+    /// Get in-memory font data (cloned out of the shared state), synthetic faces included.
     pub fn get_memory_font(&self, id: &FontId) -> Option<FcFont> {
-        self.state_read().memory_fonts.get(id).cloned()
+        let state = self.state_read();
+        match state.memory_fonts.get(id) {
+            Some(font) => Some(font.clone()),
+            None => state.derived.get(id).map(|face| face.font.clone()),
+        }
     }
 
     /// Check if a pattern matches the query, with detailed tracing.

@@ -254,6 +254,49 @@ fn main() {
 }
 ```
 
+### Variable fonts
+
+A variable font is one file with continuous axes (`wght`, `wdth`, `opsz`, `slnt`, `ital` and custom ones). With the `parsing` feature, `FcFontCache::variation` gives the axes of a face and `variable_instance` gives a static face (a synthetic face) at chosen values of them.
+
+```rust
+use rust_fontconfig::{FcFont, FcFontCache, FcPattern};
+
+fn main() {
+    let cache = FcFontCache::default();
+    cache.with_memory_fonts(vec![(
+        FcPattern {
+            family: Some("Red Hat Mono".to_string()),
+            ..Default::default()
+        },
+        FcFont {
+            bytes: std::fs::read("RedHatMono-VariableFont_wght.ttf").unwrap().into(),
+            font_index: 0,
+            id: "red-hat-mono".to_string(),
+        },
+    )]);
+    let face = cache.list()[0].1;
+
+    // The axes of the face; `None` for a static font.
+    let variation = cache.variation(&face).unwrap();
+    for axis in &variation.axes {
+        println!(
+            "{}: {} to {}, default {}",
+            String::from_utf8_lossy(&axis.tag),
+            axis.min,
+            axis.max,
+            axis.default
+        );
+    }
+
+    // A static face at wght=650: a font file without variation tables.
+    let semibold = cache.variable_instance(&face, &[(*b"wght", 650.0)]).unwrap();
+    let bytes = cache.get_font_bytes(&semibold).unwrap();
+    println!("{} bytes", bytes.len());
+}
+```
+
+The face is made on the first request and kept: the same coordinates give the same id. Values are clamped to the range of the axis and rounded to 1/64, an axis that is not named stays at its default, and a tag the font does not have is ignored. A synthetic face is reachable by its id only (`get_font_bytes`, `get_font_by_id`, `get_metadata_by_id`); it is not in `list`, `query` or a font chain. At most 32 faces and 128 MiB are made from one font face (`FC_MAX_INSTANCES_PER_FACE`, `FC_MAX_INSTANCE_BYTES_PER_FACE`); beyond that the nearest one is returned. `FcReadVariation` and `FcCreateVariableInstance` do the same for font bytes, without a cache.
+
 ## Using from C
 
 ### Linking with the C API
@@ -375,6 +418,7 @@ cl.exe /I./include /Fe:font_example.exe example.c rust_fontconfig.lib
 - Support for font weights (thin, light, normal, bold, etc.)
 - Support for font stretches (condensed, normal, expanded, etc.)
 - In-memory font loading and caching
+- Variable fonts: the axes of a face, and static faces at chosen axis values
 - WASM support (`wasm32-*` targets; `mmapio`/`rayon` auto-excluded via `cfg`)
 - C API for integration with non-Rust languages
 
