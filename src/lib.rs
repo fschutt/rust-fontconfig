@@ -88,12 +88,18 @@ use std::path::PathBuf;
 pub mod config;
 pub mod fallback;
 pub mod utils;
+pub mod variation;
 #[cfg(feature = "std")]
 pub use config::{FcFallbackConfig, FcScriptFallback, GenericFamily};
 #[cfg(feature = "std")]
 use fallback::FontChainCacheKey;
 #[cfg(feature = "std")]
 pub use fallback::{CssFallbackGroup, FontFallbackChain, ScriptFallbackGroup};
+pub use variation::{
+    FcAxis, FcAxisTag, FcVariation, FC_MAX_INSTANCES_PER_FACE, FC_MAX_INSTANCE_BYTES_PER_FACE,
+};
+#[cfg(all(feature = "std", feature = "parsing"))]
+pub use variation::{FcCreateVariableInstance, FcReadVariation};
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
