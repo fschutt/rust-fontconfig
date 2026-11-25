@@ -1,55 +1,28 @@
 # rust-fontconfig
 
-Pure-Rust rewrite of the Linux fontconfig library (no system dependencies). Enable the `parsing` feature to parse `.woff`, `.woff2`, `.ttc`, `.otf` and `.ttf` with allsorts.
+Pure-Rust font discovery and font fallback library without system dependencies. Works on Linux, macOS, Windows, and WASM.
 
-**NOTE**: Also works on Windows, macOS and WASM - without external dependencies!
-
-## Motivation
-
-There are a number of reasons why I want to have a pure-Rust version of fontconfig:
-
-- fontconfig with all dependencies (expat and freetype) is ~190.000 lines of C (extremely bloated for what it does)
-- fontconfig, freetype, expat and basically any kind of parsing in C is a common attack vector (via maliciously crafted fonts). The Rust version (allsorts) checks the boundaries before accessing memory, so attacks via font files should be less common.
-- it gets rid of the cmake / cc dependencies necessary to build [azul](https://azul.rs) on Linux
-- fontconfig isn't really a "hard" library to rewrite, it just parses fonts and selects fonts by name
-- Rust has existing xml parsers and font parsers, just use those
-- It allows fontconfig libraries to be purely statically linked
-- Font parsing / loading can be easily multithreaded (parsing font files in parallel)
-- It reduces the number of necessary non-Rust dependencies on Linux for azul to 0
-- fontconfig (or at least the Rust bindings) do not allow you to store an in-memory cache, only an on-disk cache, requiring disk access on every query (= slow)
-- in-memory ("bring your own font files") font loading for WASM and sandboxed environments
- 
-Now for the more practical reasons:
-
-- libfontconfig 0.12.x sometimes hangs and crashes ([see issue](https://github.com/maps4print/azul/issues/110))
-- libfontconfig introduces build issues with cmake / cc ([see issue](https://github.com/maps4print/azul/issues/206))
-- To support font fallback in CSS selectors and text runs based on Unicode ranges, you have to do several calls into C, since fontconfig doesn't handle that
-- The rust rewrite uses multithreading and memory mapping, since that is faster than reading each file individually
-- The rust rewrite only parses the font tables necessary to select the name, not the entire font
-- The rust rewrite uses very few allocations (some are necessary because of UTF-16 / UTF-8 conversions and multithreading lifetime issues)
+- **Pure Rust**: Safe font parsing via `allsorts` with zero C dependencies.
+- **Fast**: In-memory caching, memory-mapped I/O, and optional multithreaded font discovery via `rayon`.
+- **CSS Fallback Chains**: Character-by-character resolution across CSS stacks and Unicode script blocks.
 
 ## Installation
 
 ```toml
 [dependencies]
-rust-fontconfig = { version = "5.0", features = ["parsing"] }
+rust-fontconfig = { version = "5.2", features = ["parsing"] }
 ```
 
-The default build (`std` only) discovers system fonts via **filename
-heuristics**. Enable `parsing` to read the actual font tables with allsorts for
-accurate family names, weights, Unicode coverage and
-`.woff`/`.woff2`/`.ttc`/`.otf`/`.ttf` support.
+The default build (`std` only) discovers system fonts via filename heuristics. Enable `parsing` to inspect actual font tables with `allsorts` for accurate family names, weights, Unicode coverage, and `.woff`/`.woff2`/`.ttc`/`.otf`/`.ttf` support.
 
 ### Cargo features
 
-| Feature | Default | Description |
-|---------|:-------:|-------------|
-| `std` | ✅ | Filesystem scanning + mmap-backed font loading. Currently required - the crate is std-only as of v4.1. |
-| `parsing` | | Parse font tables via allsorts (accurate metadata; WOFF/WOFF2/TTC/OTF/TTF). Implies `std`. |
-| `multithreading` | | Parallel font scanning/parsing via rayon. |
-| `cache` | | Persist the parsed cache to disk (serde + bincode + dirs). |
-| `async-registry` | | `FcFontRegistry` for incremental/background font discovery. Implies `parsing`. |
-| `ffi` | | C API bindings. Implies `parsing` + `async-registry`. |
+- `std` (default): Filesystem scanning and memory-mapped font loading (`mmapio`).
+- `parsing`: Parses font tables via allsorts (accurate metadata; WOFF/WOFF2/TTC/OTF/TTF). Implies `std`.
+- `multithreading`: Parallel font scanning and parsing via `rayon`.
+- `cache`: Persists the parsed font cache to disk (serde + bincode).
+- `async-registry`: Background and incremental font discovery via `FcFontRegistry`. Implies `parsing`.
+- `ffi`: C API bindings. Implies `parsing` and `async-registry`.
 
 > **WASM:** `wasm32-*` targets build out of the box - `mmapio` and `rayon` are
 > excluded automatically via `cfg`. Build with `--features parsing`.
@@ -103,7 +76,7 @@ fn main() {
 
 ### Font Fallback Chain for CSS font-family
 
-The new API separates font chain resolution from text querying:
+The API separates font chain resolution from text querying:
 
 1. **`resolve_font_chain()`** - Create a fallback chain from CSS font-family (without text)
 2. **`chain.resolve_text()`** - Query which fonts to use for specific text
