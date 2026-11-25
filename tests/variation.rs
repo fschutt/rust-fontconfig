@@ -1,4 +1,4 @@
-//! Variable fonts: the axes of a face, and the synthetic faces the cache makes from it.
+//! Integration tests for variable font variation and instances.
 
 #![cfg(all(feature = "std", feature = "parsing"))]
 
@@ -7,16 +7,16 @@ use std::sync::Arc;
 
 use rust_fontconfig::*;
 
-/// Red Hat Mono: TrueType outlines, one `wght` axis from 300 to 700.
+/// Red Hat Mono test fixture (TrueType, wght 300..700).
 const RED_HAT_MONO: &[u8] = include_bytes!("fixtures/RedHatMono-VariableFont_wght.ttf");
-/// Cantarell: CFF2 outlines, one `wght` axis from 100 to 800.
+/// Cantarell test fixture (CFF2, wght 100..800).
 const CANTARELL: &[u8] = include_bytes!("fixtures/Cantarell-VF.otf");
-/// A static font.
+/// Static font test fixture.
 const INSTRUMENT_SERIF: &[u8] = include_bytes!("fixtures/InstrumentSerif-Regular.ttf");
 
 const WGHT: FcAxisTag = *b"wght";
 
-/// Register `bytes` as a memory font named `family` and return its id.
+/// Registers `bytes` as a memory font named `family`.
 fn add_font(cache: &FcFontCache, bytes: &[u8], family: &str) -> FontId {
     let id = FontId::new();
     let pattern = FcPattern {
@@ -39,7 +39,7 @@ fn cache_with(bytes: &[u8], family: &str) -> (FcFontCache, FontId) {
     (cache, id)
 }
 
-/// The bytes of a face the cache holds.
+/// Reads font bytes from cache for `id`.
 fn bytes_of(cache: &FcFontCache, id: &FontId) -> Vec<u8> {
     cache
         .get_font_bytes(id)
@@ -48,7 +48,7 @@ fn bytes_of(cache: &FcFontCache, id: &FontId) -> Vec<u8> {
         .to_vec()
 }
 
-/// The tags of the tables of an sfnt font.
+/// Extracts sfnt table tags from font bytes.
 fn table_tags(font: &[u8]) -> Vec<String> {
     let num = u16::from_be_bytes([font[4], font[5]]) as usize;
     (0..num)
@@ -56,7 +56,7 @@ fn table_tags(font: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// An sfnt font with `tables`. The checksums are 0: the readers here do not check them.
+/// Constructs an sfnt font from table data.
 fn sfnt(version: &[u8], tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     let mut tables = tables.to_vec();
     tables.sort_by_key(|(tag, _)| *tag);
@@ -87,7 +87,7 @@ fn sfnt(version: &[u8], tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-/// `font` without the tables in `drop`, and with the tables in `add`.
+/// Replaces or drops sfnt tables in `font`.
 fn rebuild(font: &[u8], drop: &[&[u8; 4]], add: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     let num = u16::from_be_bytes([font[4], font[5]]) as usize;
     let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::new();
@@ -104,7 +104,7 @@ fn rebuild(font: &[u8], drop: &[&[u8; 4]], add: Vec<([u8; 4], Vec<u8>)>) -> Vec<
     sfnt(&font[0..4], &tables)
 }
 
-/// A font collection of `fonts`: each face keeps its table directory, and the tables follow.
+/// Constructs a TTC font collection from font faces.
 fn collection(fonts: &[&[u8]]) -> Vec<u8> {
     type Table = ([u8; 4], [u8; 4], Vec<u8>); // tag, checksum, data
     let faces: Vec<([u8; 4], Vec<Table>)> = fonts
@@ -164,7 +164,7 @@ fn collection(fonts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// An `fvar` table: tag, minimum, default, maximum and flags of each axis.
+/// Constructs an `fvar` table from axis definitions.
 fn fvar_table(axes: &[(FcAxisTag, f32, f32, f32, u16)]) -> Vec<u8> {
     let fixed = |value: f32| ((value * 65536.0) as i32).to_be_bytes();
     let mut out = Vec::new();
@@ -220,11 +220,11 @@ fn a_variable_font_has_its_axes_and_a_static_font_has_none() {
     assert_eq!(variation.axis(WGHT), Some(axis));
     assert_eq!(variation.axis(*b"wdth"), None);
 
-    // The cache and the free function read the same axes, and the cache keeps them.
+    // Cache and free function return identical axes
     assert_eq!(*variation, FcReadVariation(RED_HAT_MONO, 0).unwrap());
     assert!(Arc::ptr_eq(&variation, &cache.variation(&id).unwrap()));
 
-    // A static font, an unknown id, bytes that are no font, a face the file does not have.
+    // Negative test cases (static, invalid, missing)
     let serif = add_font(&cache, INSTRUMENT_SERIF, "Instrument Serif");
     assert_eq!(cache.variation(&serif), None);
     assert_eq!(cache.variation(&FontId::new()), None);
@@ -244,7 +244,6 @@ fn an_fvar_table_gives_its_axes_in_order_with_range_and_hidden_flag() {
                 (*b"wght", 100.0, 400.0, 900.0, 0),
                 (*b"opsz", 8.0, 14.0, 144.0, 0),
                 (*b"slnt", -15.0, 0.0, 0.0, 1),
-                // only bit 0 of the flags is HIDDEN_AXIS
                 (*b"ital", 0.0, 0.0, 1.0, 0xFFFE),
             ]),
         )],
@@ -282,7 +281,7 @@ fn an_fvar_table_gives_its_axes_in_order_with_range_and_hidden_flag() {
     assert_eq!(slnt.clamp(10.0), 0.0);
     assert_eq!(slnt.clamp(f32::NAN), 0.0);
 
-    // The same axes through a cache.
+    // Cache read test
     let cache = FcFontCache::default();
     let id = add_font(&cache, &font, "Only fvar");
     assert_eq!(*cache.variation(&id).unwrap(), variation);
@@ -293,7 +292,7 @@ fn an_fvar_table_that_cannot_be_used_is_not_variable() {
     let with_axes = |axes: &[(FcAxisTag, f32, f32, f32, u16)]| {
         sfnt(&[0, 1, 0, 0], &[(*b"fvar", fvar_table(axes))])
     };
-    // a range that is not in order (minimum, default, maximum)
+    // Invalid axis range (min > max)
     assert_eq!(
         FcReadVariation(&with_axes(&[(WGHT, 700.0, 400.0, 300.0, 0)]), 0),
         None
@@ -302,9 +301,9 @@ fn an_fvar_table_that_cannot_be_used_is_not_variable() {
         FcReadVariation(&with_axes(&[(WGHT, 300.0, 800.0, 700.0, 0)]), 0),
         None
     );
-    // no axis at all
+    // Empty axes array
     assert_eq!(FcReadVariation(&with_axes(&[]), 0), None);
-    // the same table with a good range reads
+    // Valid axes
     assert!(FcReadVariation(&with_axes(&[(WGHT, 300.0, 400.0, 700.0, 0)]), 0).is_some());
 }
 
@@ -317,25 +316,25 @@ fn the_same_coordinates_give_the_same_instance() {
     assert_ne!(made, id);
     assert_eq!(cache.variable_instance(&id, &[(WGHT, 350.0)]), Some(made));
 
-    // Values are rounded to 1/64: 350.001 is the same instance, 350.02 is the next one.
+    // Coordinates rounded to 1/64th units
     assert_eq!(cache.variable_instance(&id, &[(WGHT, 350.001)]), Some(made));
     let next = cache.variable_instance(&id, &[(WGHT, 350.02)]).unwrap();
     assert_ne!(next, made);
     assert_eq!(cache.variable_instance_count(&id), 2);
 
-    // An axis the face does not have is ignored.
+    // Missing axes ignored
     assert_eq!(
         cache.variable_instance(&id, &[(*b"wdth", 80.0), (WGHT, 350.0)]),
         Some(made)
     );
-    // A tag given twice takes its last value.
+    // Duplicate tags take last value
     assert_eq!(
         cache.variable_instance(&id, &[(WGHT, 300.0), (WGHT, 350.0)]),
         Some(made)
     );
     assert_eq!(cache.variable_instance_count(&id), 2);
 
-    // Another weight is another instance, and so is each of them in its own right.
+    // Distinct coordinates produce distinct instances
     let bold = cache.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
     assert!(bold != made && bold != next);
     assert_eq!(cache.variable_instance_count(&id), 3);
@@ -362,7 +361,7 @@ fn coordinates_are_clamped_and_the_default_coordinates_are_an_instance() {
     );
     assert_eq!(cache.variable_instance_count(&id), 2);
 
-    // No coordinates, the default value and NaN are the default instance.
+    // Default coordinates test
     let default = cache
         .variable_instance(&id, &[])
         .expect("the default instance");
@@ -381,7 +380,7 @@ fn coordinates_are_clamped_and_the_default_coordinates_are_an_instance() {
     );
     assert_eq!(cache.variable_instance_count(&id), 3);
 
-    // It is a static font: no `fvar`, and no table that only a variable font has.
+    // Instance produces a static font without variation tables
     let bytes = bytes_of(&cache, &default);
     let tags = table_tags(&bytes);
     for variable_only in ["fvar", "gvar", "avar", "HVAR", "MVAR"] {
@@ -416,7 +415,7 @@ fn a_static_or_unknown_source_has_no_instance() {
 
 #[test]
 fn a_font_that_cannot_be_instanced_gives_none() {
-    // Red Hat Mono without its `gvar` table: the axes are there, the outlines do not vary.
+    // Font missing gvar table cannot be instanced
     let font = rebuild(RED_HAT_MONO, &[b"gvar"], Vec::new());
     let (cache, id) = cache_with(&font, "Without gvar");
     assert!(cache.variation(&id).is_some());
@@ -426,7 +425,7 @@ fn a_font_that_cannot_be_instanced_gives_none() {
     assert_eq!(cache.variable_instance_count(&id), 0);
     assert_eq!(FcCreateVariableInstance(&font, 0, &[(WGHT, 650.0)]), None);
 
-    // The same holds for a static font that only has an `fvar` table.
+    // Font with only fvar table cannot be instanced
     let font = rebuild(
         INSTRUMENT_SERIF,
         &[],
@@ -454,7 +453,7 @@ fn an_instance_is_the_font_the_free_function_makes() {
         );
     }
 
-    // The free function takes the same coordinates: out of range is clamped, NaN is the default.
+    // Coordinate clamping and NaN handling
     let at =
         |coordinates: &[(FcAxisTag, f32)]| FcCreateVariableInstance(RED_HAT_MONO, 0, coordinates);
     assert!(at(&[(WGHT, 650.0)]).is_some());
@@ -466,7 +465,7 @@ fn an_instance_is_the_font_the_free_function_makes() {
     assert_eq!(at(&[(*b"wdth", 80.0)]), at(&[]));
     assert_eq!(at(&[(WGHT, 300.0), (WGHT, 650.0)]), at(&[(WGHT, 650.0)]));
 
-    // A static font, no such face, bytes that are no font.
+    // Negative test cases
     assert_eq!(
         FcCreateVariableInstance(INSTRUMENT_SERIF, 0, &[(WGHT, 650.0)]),
         None
@@ -487,7 +486,7 @@ fn a_face_has_at_most_32_instances_and_a_further_request_gets_the_nearest() {
     assert_eq!(FC_MAX_INSTANCE_BYTES_PER_FACE, 128 << 20);
 
     let (cache, id) = cache_with(RED_HAT_MONO, "Red Hat Mono");
-    let at = |k: u32| 300.0 + 12.0 * k as f32; // 300, 312, ... 672
+    let at = |k: u32| 300.0 + 12.0 * k as f32;
     let made: Vec<FontId> = (0..32)
         .map(|k| {
             cache
@@ -502,7 +501,7 @@ fn a_face_has_at_most_32_instances_and_a_further_request_gets_the_nearest() {
     assert_eq!(cache.variable_instance_count(&id), 32);
     let listed = cache.list();
 
-    // Past the bound: the nearest instance, nothing new.
+    // Cache limit: returns nearest instance
     assert_eq!(
         cache.variable_instance(&id, &[(WGHT, 690.0)]),
         Some(made[31])
@@ -518,20 +517,19 @@ fn a_face_has_at_most_32_instances_and_a_further_request_gets_the_nearest() {
     assert_eq!(
         cache.variable_instance(&id, &[(WGHT, 400.0)]),
         Some(made[8])
-    ); // the default is 396 or 408
-       // 306 is 6 from 300 and 6 from 312: the earlier one.
+    );
+    // Tie breaker: selects earlier instance
     assert_eq!(
         cache.variable_instance(&id, &[(WGHT, 306.0)]),
         Some(made[0])
     );
-    // An instance that exists stays itself.
     assert_eq!(
         cache.variable_instance(&id, &[(WGHT, at(5))]),
         Some(made[5])
     );
     assert_eq!(cache.variable_instance_count(&id), 32);
 
-    // Nothing is evicted and nothing shows up in the lists.
+    // Verifies instances are not exposed in lists
     for face in &made {
         assert!(cache.get_font_bytes(face).is_some());
     }
@@ -550,7 +548,7 @@ fn synthetic_faces_are_reachable_by_id_only() {
         .variable_instance(&id, &[(WGHT, 650.0)])
         .expect("an instance");
 
-    // Not in the lists, the queries or the chains.
+    // Synthetic faces are not listed in queries or fallback chains
     assert_eq!(cache.list(), listed);
     assert_eq!(cache.len(), listed.len());
     assert!(!cache.is_empty());
@@ -605,7 +603,7 @@ fn synthetic_faces_are_reachable_by_id_only() {
         Some(id)
     );
 
-    // Reachable by id.
+    // Synthetic faces are retrievable by ID
     let bytes = bytes_of(&cache, &synthetic);
     assert_eq!(FcReadVariation(&bytes, 0), None);
     assert_ne!(bytes, RED_HAT_MONO);
@@ -619,7 +617,7 @@ fn synthetic_faces_are_reachable_by_id_only() {
     assert_eq!(cache.variation(&synthetic), None);
     assert_eq!(cache.variable_instance(&synthetic, &[(WGHT, 300.0)]), None);
 
-    // Its pattern is the source's with a label for family and name, and the weight of the instance.
+    // Pattern properties match instance coordinates
     let pattern = cache.get_metadata_by_id(&synthetic).expect("a pattern");
     assert_eq!(pattern.family.as_deref(), Some(label.as_str()));
     assert_eq!(pattern.name.as_deref(), Some(label.as_str()));
@@ -673,7 +671,7 @@ fn clones_share_their_instances_and_a_new_cache_does_not() {
         &clone.variation(&id).unwrap()
     ));
 
-    // The same face, the same id, in another cache: nothing is shared.
+    // Independent caches do not share instances
     let other = FcFontCache::default();
     let pattern = cache.get_metadata_by_id(&id).unwrap();
     let font = cache.get_memory_font(&id).unwrap();
@@ -718,7 +716,7 @@ fn one_font_registered_under_three_names_shares_its_instances() {
 
 #[test]
 fn two_fonts_of_one_size_are_two_font_faces() {
-    // Red Hat Mono with one letter of its copyright text changed: the same size, another font.
+    // Distinct fonts with identical sizes generate separate instances
     let copyright: Vec<u8> = "Copyright"
         .encode_utf16()
         .flat_map(u16::to_be_bytes)
@@ -789,7 +787,7 @@ fn a_font_on_disk_gives_instances_too() {
 
 #[test]
 fn the_faces_of_a_collection_have_their_own_axes_and_instances() {
-    // Face 0 is Red Hat Mono (wght 300 to 700, TrueType), face 1 is Cantarell (100 to 800, CFF2).
+    // Multi-face collection test
     let font = collection(&[RED_HAT_MONO, CANTARELL]);
     let range = |index| {
         FcReadVariation(&font, index)
@@ -799,7 +797,7 @@ fn the_faces_of_a_collection_have_their_own_axes_and_instances() {
     assert_eq!(range(1), Some((100.0, 800.0)));
     assert_eq!(range(2), None);
 
-    // The same bytes under two face indexes.
+    // Multi-face registration test
     let cache = FcFontCache::default();
     let ids: Vec<FontId> = (0..2)
         .map(|index| {
@@ -827,7 +825,7 @@ fn the_faces_of_a_collection_have_their_own_axes_and_instances() {
         800.0
     );
 
-    // Each face has its own instance, made from its own outlines.
+    // Each collection face generates instances from its own outlines
     let made: Vec<FontId> = ids
         .iter()
         .map(|id| {
@@ -868,11 +866,11 @@ fn a_font_file_that_is_missing_is_not_remembered_as_static() {
     );
     let id = cache.lookup_paths_cached(&path).expect("registered")[0];
 
-    // No file, so nothing to read.
+    // Missing files return None without caching negative result
     assert_eq!(cache.variation(&id), None);
     assert_eq!(cache.variable_instance(&id, &[(WGHT, 650.0)]), None);
 
-    // The file is there now: the earlier answers were not kept.
+    // Newly written file is detected on next call
     std::fs::write(&path, RED_HAT_MONO).expect("write the font");
     assert!(cache.variation(&id).is_some());
     assert!(cache.variable_instance(&id, &[(WGHT, 650.0)]).is_some());
@@ -919,7 +917,7 @@ fn the_cache_of_a_registry_shares_its_instances() {
         .variable_instance(&id, &[(WGHT, 650.0)])
         .expect("an instance");
 
-    // Another handle of the same registry has it, and so has the registry itself.
+    // Cloned caches share instance state
     let second = registry.shared_cache();
     assert_eq!(second.variable_instance_count(&id), 1);
     assert_eq!(second.variable_instance(&id, &[(WGHT, 650.0)]), Some(made));

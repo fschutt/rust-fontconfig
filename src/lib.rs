@@ -1280,7 +1280,7 @@ pub(crate) struct FcFontCacheShared {
     pub(crate) chain_cache: StLock<std::collections::HashMap<FontChainCacheKey, FontFallbackChain>>,
     /// Shared file-bytes cache: content-hash → weak [`FontBytes`].
     pub(crate) shared_bytes: StLock<std::collections::HashMap<u64, std::sync::Weak<FontBytes>>>,
-    /// The axes of variable faces and the synthetic faces made from them.
+    /// Variable font axes and synthetic instances cache.
     #[cfg(all(feature = "std", feature = "parsing"))]
     pub(crate) variation: StLock<variation::VariationState>,
 }
@@ -1296,7 +1296,7 @@ pub(crate) struct FcFontCacheInner {
     pub(crate) memory_fonts: BTreeMap<FontId, FcFont>,
     /// Metadata cache (patterns stored by ID for quick lookup).
     pub(crate) metadata: BTreeMap<FontId, FcPattern>,
-    /// Synthetic faces of variable fonts. Only the lookups by id return them.
+    /// Synthetic instances of variable fonts (looked up by ID).
     pub(crate) derived: BTreeMap<FontId, variation::SyntheticFace>,
     /// Normalized family/name -> the fonts that carry it.
     pub(crate) family_index: BTreeMap<String, alloc::vec::Vec<FontId>>,
@@ -1568,7 +1568,7 @@ impl FcFontCache {
             .filter(|ids| !ids.is_empty())
     }
 
-    /// Get font data for a given font ID, synthetic faces included.
+    /// Get font data for a given font ID.
     pub fn get_font_by_id(&self, id: &FontId) -> Option<OwnedFontSource> {
         let state = self.state_read();
         if let Some(font) = state.memory_fonts.get(id) {
@@ -1583,7 +1583,7 @@ impl FcFontCache {
         None
     }
 
-    /// Get metadata for a font ID, synthetic faces included.
+    /// Get metadata for a font ID.
     pub fn get_metadata_by_id(&self, id: &FontId) -> Option<FcPattern> {
         let state = self.state_read();
         match state.metadata.get(id) {
@@ -1592,7 +1592,7 @@ impl FcFontCache {
         }
     }
 
-    /// Get the font bytes for `id` as a shared [`FontBytes`], synthetic faces included.
+    /// Get the font bytes for `id` as a shared [`FontBytes`].
     #[cfg(feature = "std")]
     pub fn get_font_bytes(&self, id: &FontId) -> Option<std::sync::Arc<FontBytes>> {
         use std::sync::Arc;
@@ -1834,7 +1834,7 @@ impl FcFontCache {
         cache
     }
 
-    /// Check if a font ID is a memory font (preferred over disk fonts). A synthetic face is one.
+    /// Check if a font ID is a memory font (including synthetic instances).
     pub fn is_memory_font(&self, id: &FontId) -> bool {
         let state = self.state_read();
         state.memory_fonts.contains_key(id) || state.derived.contains_key(id)
@@ -1924,7 +1924,7 @@ impl FcFontCache {
         })
     }
 
-    /// Get in-memory font data (cloned out of the shared state), synthetic faces included.
+    /// Get in-memory font data.
     pub fn get_memory_font(&self, id: &FontId) -> Option<FcFont> {
         let state = self.state_read();
         match state.memory_fonts.get(id) {

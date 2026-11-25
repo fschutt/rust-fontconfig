@@ -295,7 +295,7 @@ fn main() {
 }
 ```
 
-The face is made on the first request and kept: the same coordinates give the same id. Values are clamped to the range of the axis and rounded to 1/64, an axis that is not named stays at its default, and a tag the font does not have is ignored. A synthetic face is reachable by its id only (`get_font_bytes`, `get_font_by_id`, `get_metadata_by_id`); it is not in `list`, `query` or a font chain. At most 32 faces and 128 MiB are made from one font face (`FC_MAX_INSTANCES_PER_FACE`, `FC_MAX_INSTANCE_BYTES_PER_FACE`); beyond that the nearest one is returned. `FcReadVariation` and `FcCreateVariableInstance` do the same for font bytes, without a cache.
+Variable font instances are cached by axis coordinates and retrievable by font ID. Standalone parsing is also available via `FcReadVariation` and `FcCreateVariableInstance` without an `FcFontCache`.
 
 ## Using from C
 
@@ -418,7 +418,7 @@ cl.exe /I./include /Fe:font_example.exe example.c rust_fontconfig.lib
 - Support for font weights (thin, light, normal, bold, etc.)
 - Support for font stretches (condensed, normal, expanded, etc.)
 - In-memory font loading and caching
-- Variable fonts: the axes of a face, and static faces at chosen axis values
+- Variable font support (axes inspection and synthetic static instances)
 - WASM support (`wasm32-*` targets; `mmapio`/`rayon` auto-excluded via `cfg`)
 - C API for integration with non-Rust languages
 
