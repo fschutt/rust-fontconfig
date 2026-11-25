@@ -157,6 +157,10 @@ fn waiting_for_fonts_resolves_no_chain() {
     registry.wait_for_fonts(&stacks);
     assert_eq!(registry.chain_cache_len(), 0, "a wait resolved chains");
 
+    // The job was queued by hand, so the wait above does not cover it: the builder
+    // may still add the font, and adding a font clears the chain cache.
+    registry.wait_for_scout();
+
     let chains = registry.request_fonts(&stacks);
     assert_eq!(chains.len(), 2);
     assert_eq!(registry.chain_cache_len(), 2, "request_fonts still resolves");
