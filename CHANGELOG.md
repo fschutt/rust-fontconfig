@@ -5,13 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [5.2.0] - 2026-11-23
 
 ### Added
-- `FcFontCache::variation(&id)`: the axes of a face (`FcVariation`, `FcAxis`, `FcAxisTag`), read from its `fvar` table once; `None` for a static face.
-- `FcFontCache::variable_instance(&source, &coordinates)`: a static synthetic face of a variable face at chosen axis values, made on the first request and kept. Values are clamped and rounded to 1/64; the same coordinates give the same id.
-- `FcFontCache::variable_instance_count(&source)`.
-- Synthetic faces are reachable by id only: `get_font_bytes`, `get_font_by_id`, `get_metadata_by_id`, `get_memory_font` and `is_memory_font` return them; `list`, `query` and the chains do not include them. Clones of a cache share them.
-- `FC_MAX_INSTANCES_PER_FACE` (32) and `FC_MAX_INSTANCE_BYTES_PER_FACE` (128 MiB): past either, a request gets the nearest existing synthetic face and none is removed.
-- `FcReadVariation(bytes, index)` and `FcCreateVariableInstance(bytes, index, coordinates)`: the same for font bytes, without a cache.
-- Needs `allsorts-azul` 0.17.4 (`parsing`).
+- Added `FcFontCache::variation()` to read variable font axes from `fvar`.
+- Added `FcFontCache::variable_instance()` to generate static synthetic faces for chosen axis values.
+- Added standalone `FcReadVariation()` and `FcCreateVariableInstance()` functions for raw font bytes.
+- Added `FC_MAX_INSTANCES_PER_FACE` and `FC_MAX_INSTANCE_BYTES_PER_FACE` cache limits.
 
 ## [5.1.0] - 2026-11-21
 

@@ -1,12 +1,4 @@
-//! Variable fonts: the axes of a face, and static faces made from it at chosen coordinates.
-//!
-//! `FcReadVariation` reads the axes of a face and `FcCreateVariableInstance` makes a static
-//! font at chosen values of them. `FcFontCache::variable_instance` does the same inside a
-//! cache and keeps the result as a synthetic face.
-//!
-//! A synthetic face is reachable by id only: `get_font_bytes`, `get_font_by_id`,
-//! `get_metadata_by_id`, `get_memory_font` and `is_memory_font` return it for its id, while
-//! `list`, `len`, `for_each_pattern`, `query` and the font chains do not include it.
+//! Variable font axes inspection and static instance generation.
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 use alloc::string::String;
@@ -36,28 +28,25 @@ use crate::{
     StReadGuard, StWriteGuard,
 };
 
-/// Four-byte tag of a variation axis, such as `*b"wght"`.
+/// Four-byte variation axis tag (e.g. `*b"wght"`).
 pub type FcAxisTag = [u8; 4];
 
-/// One axis of a variable font, as its `fvar` table declares it.
-///
-/// Values are in the unit of the axis: weight units for `wght`, percent for
-/// `wdth`, points for `opsz`, degrees for `slnt`.
+/// A variable font axis defined in the `fvar` table.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FcAxis {
     pub tag: FcAxisTag,
-    /// The lowest value.
+    /// Minimum axis value.
     pub min: f32,
-    /// The value of the default instance.
+    /// Default axis value.
     pub default: f32,
-    /// The highest value.
+    /// Maximum axis value.
     pub max: f32,
-    /// The `HIDDEN_AXIS` flag: the axis is not meant to be shown to a user.
+    /// Whether the axis is hidden from UI.
     pub hidden: bool,
 }
 
 impl FcAxis {
-    /// `value` limited to `min..=max`; NaN gives `default`.
+    /// Clamps `value` to `min..=max` (returns `default` if NaN).
     pub fn clamp(&self, value: f32) -> f32 {
         if value.is_nan() {
             self.default
@@ -67,32 +56,30 @@ impl FcAxis {
     }
 }
 
-/// The axes of a variable font face, in the order of its `fvar` table.
+/// Axes of a variable font face.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FcVariation {
     pub axes: Vec<FcAxis>,
 }
 
 impl FcVariation {
-    /// The first axis with `tag`.
+    /// Returns the axis matching `tag`.
     pub fn axis(&self, tag: FcAxisTag) -> Option<&FcAxis> {
         self.axes.iter().find(|axis| axis.tag == tag)
     }
 }
 
-/// Most synthetic faces the cache makes from one font face; a further request
-/// gets the nearest one that exists.
+/// Maximum number of synthetic instances cached per font face.
 pub const FC_MAX_INSTANCES_PER_FACE: usize = 32;
 
-/// Most bytes of synthetic faces the cache keeps for one font face. The first
-/// one is kept whatever its size.
+/// Maximum bytes of synthetic instances cached per font face.
 pub const FC_MAX_INSTANCE_BYTES_PER_FACE: usize = 128 << 20;
 
-/// `fvar` axis flag: the axis is not meant to be shown to a user.
+/// Flag indicating a hidden axis in `fvar`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 const HIDDEN_AXIS: u16 = 0x0001;
 
-/// A synthetic face: its bytes as a memory font, and its pattern.
+/// Cached synthetic instance.
 #[derive(Debug)]
 #[cfg_attr(not(all(feature = "std", feature = "parsing")), allow(dead_code))]
 pub(crate) struct SyntheticFace {
@@ -100,15 +87,16 @@ pub(crate) struct SyntheticFace {
     pub(crate) pattern: FcPattern,
 }
 
-/// What the cache keeps about variable fonts: the lock `FcFontCacheShared::variation`.
+/// Internal cache for variable font axes and generated instances.
 #[cfg(all(feature = "std", feature = "parsing"))]
 pub(crate) struct VariationState {
-    /// The axes of each source face looked up so far.
+    /// Cached axes per source font ID.
     faces: HashMap<FontId, SourceFace>,
-    /// The synthetic faces made from each font face, by content.
+    /// Generated instances keyed by font content.
     sets: HashMap<ContentKey, InstanceSet>,
-    /// `FC_MAX_INSTANCES_PER_FACE` and `FC_MAX_INSTANCE_BYTES_PER_FACE`; unit tests lower them.
+    /// Instance count limit.
     max_instances: usize,
+    /// Total byte size limit.
     max_bytes: usize,
 }
 
@@ -126,24 +114,23 @@ impl Default for VariationState {
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 impl VariationState {
-    /// Whether `set` takes no further instance. Its first instance is always kept.
+    /// Checks whether an instance set has reached capacity.
     fn is_full(&self, set: &InstanceSet) -> bool {
         !set.made.is_empty()
             && (set.closed || set.made.len() >= self.max_instances || set.bytes >= self.max_bytes)
     }
 }
 
-/// What was read from one source face.
+/// Cached metadata for a source font face.
 #[cfg(all(feature = "std", feature = "parsing"))]
 struct SourceFace {
-    /// `None`: a static face.
+    /// None for static faces.
     variation: Option<Arc<FcVariation>>,
-    /// Set when the first instance of the face is wanted.
+    /// Content key for sharing instances across IDs.
     content: Option<ContentKey>,
 }
 
-/// A font face by content, so that one font registered under several ids shares its instances.
-/// The hash is of the whole file: a collision would give a wrong face.
+/// Content-based identity of a font face.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ContentKey {
@@ -152,27 +139,27 @@ struct ContentKey {
     index: usize,
 }
 
-/// The synthetic faces made from one font face, in the order they were made.
+/// Instances generated for a font face.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[derive(Default)]
 struct InstanceSet {
     made: Vec<Instance>,
-    /// The bytes of all of `made`.
+    /// Total size of generated instances in bytes.
     bytes: usize,
-    /// No more instances are made: the next one would have gone over the byte bound.
+    /// Whether the size limit has been reached.
     closed: bool,
-    /// The font cannot be made into an instance.
+    /// True if instance generation failed for this font.
     unsupported: bool,
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
 struct Instance {
-    /// One value per axis in `fvar` order, in 1/64 units.
+    /// Coordinates per axis in 1/64th units.
     cells: Vec<i32>,
     id: FontId,
 }
 
-/// The result of a look in the instances of a font face.
+/// Instance lookup result.
 #[cfg(all(feature = "std", feature = "parsing"))]
 enum Lookup {
     Found(FontId),
@@ -180,17 +167,17 @@ enum Lookup {
     Make,
 }
 
-/// The result of making an instance.
+/// Instance creation result.
 #[cfg(all(feature = "std", feature = "parsing"))]
 enum Made {
     Font(Vec<u8>),
-    /// The font cannot be made into an instance.
+    /// Unsupported font format.
     Cannot,
-    /// The bytes of the source face could not be read.
+    /// Source font bytes could not be read.
     NoSource,
 }
 
-/// An axis as the `fvar` table holds it: values are 16.16 fixed point numbers.
+/// Internal 16.16 fixed-point representation of an `fvar` axis.
 #[cfg(all(feature = "std", feature = "parsing"))]
 struct Axis {
     tag: FcAxisTag,
@@ -212,7 +199,7 @@ impl Axis {
         }
     }
 
-    /// A 16.16 number limited to the range of the axis.
+    /// Clamps a 16.16 value to the axis range.
     fn fixed(&self, raw: i64) -> Fixed {
         let (min, max) = (
             i64::from(self.min.raw_value()),
@@ -221,7 +208,7 @@ impl Axis {
         Fixed::from_raw(raw.clamp(min, max) as i32)
     }
 
-    /// The value for a cell of 1/64; the cell of the default is exactly the default.
+    /// Converts a 1/64th cell coordinate to a 16.16 fixed point value.
     fn at_cell(&self, cell: i32) -> Fixed {
         if cell == to_cell(f32::from(self.default)) {
             self.default
@@ -231,7 +218,7 @@ impl Axis {
     }
 }
 
-/// The face `index` of a font file. A file with one face has no other index.
+/// Returns a table provider for face `index`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn face_provider<'a>(
     font_file: &FontData<'a>,
@@ -248,8 +235,7 @@ fn face_provider<'a>(
     font_file.table_provider(index).ok()
 }
 
-/// The axes of the `fvar` table. `None` without the table, without an axis, or when an axis has
-/// a range that is not in order (minimum, default, maximum).
+/// Reads axes from the `fvar` table.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn read_axes(provider: &impl FontTableProvider) -> Option<Vec<Axis>> {
     let data = provider.table_data(tag::FVAR).ok()??;
@@ -270,10 +256,8 @@ fn read_axes(provider: &impl FontTableProvider) -> Option<Vec<Axis>> {
     (!axes.is_empty() && in_order).then_some(axes)
 }
 
-/// The axes of face `font_index` of `font_bytes`, in the order of its `fvar` table.
-///
-/// `None` for a static face, a font that does not parse, a file without that face, and an
-/// `fvar` table without an axis or with an axis whose range is not in order.
+/// Reads the variation axes for `font_index` from font bytes.
+/// Returns `None` if the font is static or invalid.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[allow(non_snake_case)]
 pub fn FcReadVariation(font_bytes: &[u8], font_index: usize) -> Option<FcVariation> {
@@ -285,15 +269,10 @@ pub fn FcReadVariation(font_bytes: &[u8], font_index: usize) -> Option<FcVariati
     })
 }
 
-/// A static font made from face `font_index` of the variable font `font_bytes`, with the axes
-/// at `coordinates` (axis tag and value).
+/// Generates static font bytes at the given axis coordinates.
 ///
-/// An axis that is not named stays at its default. A value outside the range of its axis is
-/// clamped and NaN gives the default. A tag the face does not have is ignored, and a tag given
-/// twice takes its last value. Values are not rounded here; the cache rounds them to 1/64.
-///
-/// `None` for a static face, and for a font whose outlines are neither TrueType with `gvar`
-/// nor CFF2. A CFF2 font keeps its CFF2 table in the result.
+/// Unspecified axes remain at default. Out-of-range values are clamped.
+/// Returns `None` if the font is static or unsupported.
 #[cfg(all(feature = "std", feature = "parsing"))]
 #[allow(non_snake_case)]
 pub fn FcCreateVariableInstance(
@@ -307,8 +286,7 @@ pub fn FcCreateVariableInstance(
     make_static(&provider, &tuple_for_values(&axes, coordinates))
 }
 
-/// One number of the font per axis for `coordinates`. The default value gives exactly the
-/// default of the font, so asking for it is the same as not naming the axis.
+/// Maps coordinates to fixed-point axis tuples.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn tuple_for_values(axes: &[Axis], coordinates: &[(FcAxisTag, f32)]) -> Vec<Fixed> {
     axes.iter()
@@ -321,7 +299,7 @@ fn tuple_for_values(axes: &[Axis], coordinates: &[(FcAxisTag, f32)]) -> Vec<Fixe
         .collect()
 }
 
-/// One number of the font per axis for `cells`.
+/// Maps 1/64th cell coordinates to fixed-point axis tuples.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn tuple_for_cells(axes: &[Axis], cells: &[i32]) -> Vec<Fixed> {
     axes.iter()
@@ -330,7 +308,7 @@ fn tuple_for_cells(axes: &[Axis], cells: &[i32]) -> Vec<Fixed> {
         .collect()
 }
 
-/// The value of the last coordinate with `tag`.
+/// Returns the last coordinate value matching `tag`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn last_value(coordinates: &[(FcAxisTag, f32)], tag: FcAxisTag) -> Option<f32> {
     coordinates
@@ -340,7 +318,7 @@ fn last_value(coordinates: &[(FcAxisTag, f32)], tag: FcAxisTag) -> Option<f32> {
         .map(|(_, value)| *value)
 }
 
-/// The font at `tuple`: one value per axis in `fvar` order.
+/// Instantiates a static font at the given coordinate tuple.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn make_static(provider: &DynamicFontTableProvider<'_>, tuple: &[Fixed]) -> Option<Vec<u8>> {
     allsorts::variations::instance(provider, tuple)
@@ -348,7 +326,7 @@ fn make_static(provider: &DynamicFontTableProvider<'_>, tuple: &[Fixed]) -> Opti
         .map(|(font, _)| font)
 }
 
-/// The font of face `font_index` at `cells` (see `Instance::cells`).
+/// Instantiates a static font from quantized cell coordinates.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn make_from_cells(font_bytes: &[u8], font_index: usize, cells: &[i32]) -> Option<Vec<u8>> {
     let font_file = ReadScope::new(font_bytes).read::<FontData<'_>>().ok()?;
@@ -360,14 +338,13 @@ fn make_from_cells(font_bytes: &[u8], font_index: usize, cells: &[i32]) -> Optio
     make_static(&provider, &tuple_for_cells(&axes, cells))
 }
 
-/// A value in 1/64 units.
+/// Quantizes a float value to 1/64th units.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn to_cell(value: f32) -> i32 {
     (value * 64.0).round() as i32
 }
 
-/// The coordinates of one instance: one cell of 1/64 per axis in `fvar` order. An axis that is
-/// not named is at its default; a value is clamped first, and NaN is the default.
+/// Converts coordinates to canonical 1/64th cell values per axis.
 #[cfg(all(feature = "std", feature = "parsing"))]
 pub(crate) fn canonical_cells(
     variation: &FcVariation,
@@ -383,14 +360,13 @@ pub(crate) fn canonical_cells(
         .collect()
 }
 
-/// The text of a tag.
+/// Converts tag bytes to a string.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn tag_text(tag: FcAxisTag) -> String {
     String::from_utf8_lossy(&tag).into_owned()
 }
 
-/// The label of a synthetic face, such as `Red Hat Mono @ wght=650 wdth=87.5`: the source's
-/// family, then the axes that are not at their default.
+/// Formats a descriptive label for a synthetic face (e.g. `Family @ wght=650`).
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn synthetic_label(source: &FcPattern, variation: &FcVariation, cells: &[i32]) -> String {
     let family = source
@@ -413,8 +389,7 @@ fn synthetic_label(source: &FcPattern, variation: &FcVariation, cells: &[i32]) -
     label
 }
 
-/// The width class nearest to a `wdth` value in percent, as an OS/2 table has it; a tie goes to
-/// the narrower class.
+/// Maps a `wdth` percentage to `FcStretch`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn stretch_of(percent: f32) -> FcStretch {
     const CLASSES: [(f32, FcStretch); 9] = [
@@ -437,8 +412,7 @@ fn stretch_of(percent: f32) -> FcStretch {
     best.1
 }
 
-/// The pattern of a synthetic face: the source's, with `family` and `name` set to the label,
-/// and weight, stretch, italic and oblique set from the axes the face has.
+/// Builds an `FcPattern` for a synthetic instance.
 #[cfg(all(feature = "std", feature = "parsing"))]
 pub(crate) fn synthetic_pattern(
     source: &FcPattern,
@@ -475,8 +449,7 @@ pub(crate) fn synthetic_pattern(
     pattern
 }
 
-/// The instance of `made` nearest to `wanted`: the sum over the axes of the difference as a
-/// part of the range of the axis. A tie goes to the earlier id.
+/// Finds the existing instance closest to `wanted`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 fn nearest(made: &[Instance], variation: &FcVariation, wanted: &[i32]) -> Option<FontId> {
     let distance = |cells: &[i32]| -> f64 {
@@ -517,7 +490,7 @@ impl FcFontCache {
         }
     }
 
-    /// The bytes and the face index of the face `id`.
+    /// Returns font bytes and face index for `id`.
     fn source_bytes(&self, id: &FontId) -> Option<(Arc<FontBytes>, usize)> {
         let index = match self.get_font_by_id(id)? {
             OwnedFontSource::Memory(font) => font.font_index,
@@ -526,7 +499,7 @@ impl FcFontCache {
         Some((self.get_font_bytes(id)?, index))
     }
 
-    /// The identity of the font face `source` by content. Reads the bytes the first time.
+    /// Computes or retrieves the content key for `source`.
     fn content_key(&self, source: &FontId) -> Option<ContentKey> {
         let known = self
             .variation_read()
@@ -548,11 +521,8 @@ impl FcFontCache {
         Some(key)
     }
 
-    /// The axes of face `id`; `None` for a static face, an unknown id and a font that does not
-    /// parse.
-    ///
-    /// They are read from the bytes once and kept, the answer `None` of a static face too. An id
-    /// the cache does not hold, and bytes that cannot be read, are not kept.
+    /// Returns the variation axes of face `id`, or `None` if static or unparseable.
+    /// Results are cached.
     pub fn variation(&self, id: &FontId) -> Option<Arc<FcVariation>> {
         let known = self
             .variation_read()
@@ -562,13 +532,13 @@ impl FcFontCache {
         if let Some(variation) = known {
             return variation;
         }
-        // A synthetic face is static.
+        // Synthetic faces do not have variation tables.
         if self.state_read().derived.contains_key(id) {
             return None;
         }
         let (bytes, index) = self.source_bytes(id)?;
         let variation = FcReadVariation(bytes.as_slice(), index).map(Arc::new);
-        // If another call stored the answer first, that one is used.
+        // Cache the parsed variation.
         let mut state = self.variation_write();
         let face = state.faces.entry(*id).or_insert(SourceFace {
             variation,
@@ -577,29 +547,11 @@ impl FcFontCache {
         face.variation.clone()
     }
 
-    /// The synthetic face of the variable face `source` with its axes at `coordinates` (tag and
-    /// value).
+    /// Returns a synthetic static face for `source` at the chosen axis `coordinates`.
     ///
-    /// A synthetic face is a static font made from the variable one. It is made on the first
-    /// request and kept, and it is reachable by its id only: see the `variation` module.
-    ///
-    /// An axis that is not named stays at its default. A value outside the range of its axis is
-    /// clamped and NaN gives the default. A tag the face does not have is ignored, and a tag
-    /// given twice takes its last value. Values are rounded to 1/64, so 350.001 and 350 are one
-    /// instance. The default coordinates give the default instance, a static face too.
-    ///
-    /// At most `FC_MAX_INSTANCES_PER_FACE` faces and `FC_MAX_INSTANCE_BYTES_PER_FACE` bytes are
-    /// made from one font face; beyond that the nearest existing one is returned and none is
-    /// removed. A font face is its bytes and its index, so a font registered under several ids
-    /// shares its instances.
-    ///
-    /// The pattern of the face is the source's with `family` and `name` set to a label such as
-    /// `Red Hat Mono @ wght=650`, which no family query finds. Weight, stretch, italic and
-    /// oblique follow the axes `wght`, `wdth`, `ital` and `slnt` the face has.
-    ///
-    /// `None` if `source` is not a variable face, or if the font cannot be made into an instance
-    /// (its outlines are neither TrueType with `gvar` nor CFF2). The second case is kept: the
-    /// font is not tried again.
+    /// Instances are created on demand, cached, and retrievable by the returned `FontId`.
+    /// Unspecified axes use defaults, and coordinates are rounded to 1/64th units.
+    /// If capacity limits are reached, the nearest existing instance is returned.
     ///
     /// # Examples
     ///
@@ -625,9 +577,7 @@ impl FcFontCache {
     /// let face = cache.list()[0].1;
     ///
     /// let semibold = cache.variable_instance(&face, &[(*b"wght", 650.0)]).unwrap();
-    /// // The same coordinates give the same id.
     /// assert_eq!(cache.variable_instance(&face, &[(*b"wght", 650.0)]), Some(semibold));
-    /// // The face is a font file without variation tables.
     /// let bytes = cache.get_font_bytes(&semibold).unwrap();
     /// assert!(FcReadVariation(&bytes, 0).is_none());
     /// ```
@@ -644,7 +594,7 @@ impl FcFontCache {
             Lookup::Unsupported => return None,
             Lookup::Make => {}
         }
-        // No lock is held while the font is made: a large font takes a while.
+        // Generate instance outside the lock.
         let made = match self.source_bytes(source) {
             Some((bytes, index)) => match make_from_cells(bytes.as_slice(), index, &wanted) {
                 Some(font) => Made::Font(font),
@@ -655,8 +605,7 @@ impl FcFontCache {
         self.add_instance(source, key, &variation, wanted, made)
     }
 
-    /// The number of synthetic faces made from the font face of `source`. They are shared by
-    /// every id of the same bytes.
+    /// Returns the number of synthetic instances generated for `source`.
     pub fn variable_instance_count(&self, source: &FontId) -> usize {
         if self.variation(source).is_none() {
             return 0;
@@ -668,7 +617,7 @@ impl FcFontCache {
         state.sets.get(&key).map_or(0, |set| set.made.len())
     }
 
-    /// The instance with the coordinates `wanted`, or the nearest one if the set is full.
+    /// Looks up an existing instance or determines if a new one should be created.
     fn lookup_instance(&self, key: &ContentKey, variation: &FcVariation, wanted: &[i32]) -> Lookup {
         let state = self.variation_read();
         let Some(set) = state.sets.get(key) else {
@@ -689,8 +638,7 @@ impl FcFontCache {
         Lookup::Make
     }
 
-    /// Register a font that was just made as a synthetic face. If another call made the same
-    /// instance or filled the set in the meantime, its result is used and this font is dropped.
+    /// Registers a newly created synthetic instance in the cache.
     fn add_instance(
         &self,
         source: &FontId,

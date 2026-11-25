@@ -1,4 +1,4 @@
-//! Tests of the parts of `variation.rs` that need no font file, and of the bounds on the bytes.
+//! Tests for variation helper functions and instance cache limits.
 
 use super::*;
 
@@ -12,7 +12,7 @@ fn axis(tag: &[u8; 4], min: f32, default: f32, max: f32) -> FcAxis {
     }
 }
 
-/// The order of an `fvar` table, which is not alphabetical.
+/// Test fixture with 5 variation axes.
 fn five_axes() -> FcVariation {
     FcVariation {
         axes: vec![
@@ -28,9 +28,9 @@ fn five_axes() -> FcVariation {
 #[test]
 fn coordinates_become_one_cell_per_axis_in_fvar_order() {
     let axes = five_axes();
-    // No coordinates: every axis at its default, in 1/64 units.
+    // Default coordinates
     assert_eq!(canonical_cells(&axes, &[]), vec![25600, 6400, 896, 0, 0]);
-    // The order of the coordinates does not matter, the axes keep theirs.
+    // Preserves axis order
     assert_eq!(
         canonical_cells(
             &axes,
@@ -38,7 +38,7 @@ fn coordinates_become_one_cell_per_axis_in_fvar_order() {
         ),
         vec![44800, 5600, 896, 0, 64]
     );
-    // A tag the face does not have is ignored; a tag given twice takes its last value.
+    // Ignore unknown tags; last value wins for duplicates
     assert_eq!(
         canonical_cells(
             &axes,
@@ -51,7 +51,7 @@ fn coordinates_become_one_cell_per_axis_in_fvar_order() {
 #[test]
 fn values_are_clamped_and_rounded_to_a_cell_of_1_64() {
     let axes = five_axes();
-    // Out of range: clamped to the range of the axis.
+    // Clamping
     assert_eq!(
         canonical_cells(
             &axes,
@@ -59,9 +59,8 @@ fn values_are_clamped_and_rounded_to_a_cell_of_1_64() {
         ),
         vec![57600, 6400, 896, -960, 0]
     );
-    // `slnt` has no value above 0.
     assert_eq!(canonical_cells(&axes, &[(*b"slnt", 10.0)])[3], 0);
-    // NaN is the default; the infinities are the ends of the range.
+    // NaN defaults; infinities clamp to bounds
     assert_eq!(canonical_cells(&axes, &[(*b"wght", f32::NAN)])[0], 25600);
     assert_eq!(
         canonical_cells(&axes, &[(*b"wght", f32::INFINITY)])[0],
@@ -71,13 +70,13 @@ fn values_are_clamped_and_rounded_to_a_cell_of_1_64() {
         canonical_cells(&axes, &[(*b"wght", f32::NEG_INFINITY)])[0],
         6400
     );
-    // Rounded to the nearest 1/64, not cut off.
+    // Rounding to nearest 1/64
     assert_eq!(canonical_cells(&axes, &[(*b"wght", 350.001)])[0], 22400);
     assert_eq!(canonical_cells(&axes, &[(*b"wght", 350.02)])[0], 22401);
     assert_eq!(canonical_cells(&axes, &[(*b"wght", 350.012)])[0], 22401);
     assert_eq!(canonical_cells(&axes, &[(*b"slnt", -7.51)])[3], -481);
     assert_eq!(canonical_cells(&axes, &[(*b"slnt", -7.5)])[3], -480);
-    // A value a little off the default is the default.
+    // Near-default values resolve to default
     assert_eq!(
         canonical_cells(&axes, &[(*b"wght", 400.003)]),
         canonical_cells(&axes, &[])
@@ -104,7 +103,7 @@ fn the_label_names_the_axes_that_are_not_at_their_default() {
         "Foo @ slnt=-12.5 ital=1"
     );
     assert_eq!(label(&source, &[]), "Foo @ default");
-    // An axis at its default is not named, whatever way it was asked for.
+    // Default axes are omitted from label
     assert_eq!(label(&source, &[(*b"opsz", 14.0)]), "Foo @ default");
     assert_eq!(label(&source, &[(*b"wght", 12.5)]), "Foo @ wght=100");
 
@@ -136,7 +135,7 @@ fn the_pattern_follows_the_axes_the_face_has() {
         synthetic_pattern(&source, &axes, &canonical_cells(&axes, coordinates))
     };
 
-    // weight and bold from wght
+    // Weight mapping
     for (wght, weight, bold) in [
         (100.0, FcWeight::Thin, false),
         (300.0, FcWeight::Light, false),
@@ -152,7 +151,7 @@ fn the_pattern_follows_the_axes_the_face_has() {
         assert_ne!(pattern.bold, PatternMatch::DontCare);
     }
 
-    // stretch and condensed from wdth: the nearest class, a tie goes to the narrower
+    // Width mapping
     for (wdth, stretch, condensed) in [
         (50.0, FcStretch::UltraCondensed, true),
         (62.5, FcStretch::ExtraCondensed, true),
@@ -174,18 +173,17 @@ fn the_pattern_follows_the_axes_the_face_has() {
         assert_ne!(pattern.condensed, PatternMatch::DontCare);
     }
 
-    // italic from ital, oblique from slnt
+    // Italic/oblique mapping
     assert_eq!(made(&[(*b"ital", 1.0)]).italic, PatternMatch::True);
     assert_eq!(made(&[(*b"ital", 0.5)]).italic, PatternMatch::True);
     assert_eq!(made(&[(*b"ital", 0.4)]).italic, PatternMatch::False);
     assert_eq!(made(&[]).italic, PatternMatch::False);
     assert_eq!(made(&[(*b"slnt", -10.0)]).oblique, PatternMatch::True);
     assert_eq!(made(&[(*b"slnt", 0.0)]).oblique, PatternMatch::False);
-    // slnt does not set italic, ital does not set oblique
     assert_eq!(made(&[(*b"slnt", -10.0)]).italic, PatternMatch::False);
     assert_eq!(made(&[(*b"ital", 1.0)]).oblique, PatternMatch::False);
 
-    // the rest is the source's, and family and name are the label
+    // Inherit pattern metadata
     let pattern = made(&[(*b"wght", 650.0), (*b"wdth", 87.5), (*b"opsz", 20.0)]);
     assert_eq!(
         pattern.family.as_deref(),
@@ -197,7 +195,7 @@ fn the_pattern_follows_the_axes_the_face_has() {
     assert_eq!(pattern.metadata, source.metadata);
     assert_eq!(pattern.render_config, source.render_config);
 
-    // an axis the face lacks leaves the source's value
+    // Missing axes inherit source values
     let only_weight = FcVariation {
         axes: vec![axis(b"wght", 100.0, 400.0, 900.0)],
     };
@@ -238,14 +236,14 @@ fn the_nearest_instance_counts_each_axis_as_a_part_of_its_range() {
     };
     let wanted = canonical_cells(&axes, &[(*b"wght", 400.0), (*b"wdth", 100.0)]);
 
-    // 100 of 800 weight units is 0.125 of the range, 25 of 100 width units is 0.25: the first.
+    // Distance normalized by axis range
     let made = [
         instance(500.0, 100.0, ids[0]),
         instance(400.0, 125.0, ids[1]),
     ];
     assert_eq!(nearest(&made, &axes, &wanted), Some(ids[0]));
 
-    // An exact tie goes to the earlier id, not to the earlier place in the list.
+    // Ties break by FontId
     let made = [
         instance(500.0, 100.0, ids[2]),
         instance(300.0, 100.0, ids[1]),
@@ -254,7 +252,7 @@ fn the_nearest_instance_counts_each_axis_as_a_part_of_its_range() {
 
     assert_eq!(nearest(&[], &axes, &wanted), None);
 
-    // An axis without a range counts for nothing.
+    // Zero-range axes ignored
     let flat = FcVariation {
         axes: vec![
             axis(b"wght", 100.0, 400.0, 900.0),
@@ -274,7 +272,7 @@ fn the_nearest_instance_counts_each_axis_as_a_part_of_its_range() {
     assert_eq!(nearest(&made, &flat, &[25600, 0]), Some(ids[0]));
 }
 
-/// An `fvar` axis with raw 16.16 numbers.
+/// Test fixture for 16.16 axis.
 fn raw_axis(tag: &[u8; 4], min: i32, default: i32, max: i32) -> Axis {
     Axis {
         tag: *tag,
@@ -303,18 +301,18 @@ fn values_become_one_number_of_the_font_per_axis_in_fvar_order() {
     };
     let default = vec![raw(100.0), raw(400.0)];
     assert_eq!(tuple(&[]), default);
-    // The axes keep the order of the table, whatever the order of the values.
+    // Preserves axis order
     assert_eq!(
         tuple(&[(*b"wght", 650.0), (*b"wdth", 87.5)]),
         vec![raw(87.5), raw(650.0)]
     );
-    // Clamped to the range of the axis; NaN is the default.
+    // Clamping and NaN handling
     assert_eq!(tuple(&[(*b"wght", 2000.0)]), vec![raw(100.0), raw(700.0)]);
     assert_eq!(tuple(&[(*b"wght", 1.0)]), vec![raw(100.0), raw(300.0)]);
     assert_eq!(tuple(&[(*b"wght", f32::INFINITY)])[1], raw(700.0));
     assert_eq!(tuple(&[(*b"wght", f32::NEG_INFINITY)])[1], raw(300.0));
     assert_eq!(tuple(&[(*b"wght", f32::NAN)]), default);
-    // A tag given twice takes its last value, a tag the font lacks is ignored.
+    // Last value wins; missing tags ignored
     assert_eq!(
         tuple(&[(*b"wght", 300.0), (*b"opsz", 9.0), (*b"wght", 500.0)]),
         vec![raw(100.0), raw(500.0)]
@@ -323,14 +321,13 @@ fn values_become_one_number_of_the_font_per_axis_in_fvar_order() {
 
 #[test]
 fn the_default_value_is_exactly_the_default_of_the_font() {
-    // 26221159 / 65536 is about 400.1 and has 25 significant bits: an f32 holds it only rounded,
-    // and 16.16 numbers made from that f32 are 1/65536 off the default of the font.
+    // Exact match for default fixed point value
     let default = 26221159;
     let axes = [raw_axis(b"opsz", raw(8.0), default, raw(1000.0))];
     let as_f32 = f32::from(axes[0].default);
     assert_ne!((f64::from(as_f32) * 65536.0).round() as i32, default);
 
-    // Asking for the default value is the same as not naming the axis.
+    // Default value handling
     assert_eq!(
         tuple_for_values(&axes, &[(*b"opsz", as_f32)])[0].raw_value(),
         default
@@ -340,7 +337,7 @@ fn the_default_value_is_exactly_the_default_of_the_font() {
         tuple_for_values(&axes, &[(*b"opsz", 20.0)])[0].raw_value(),
         raw(20.0)
     );
-    // The same for the cell of the default.
+    // Default cell handling
     let cell = to_cell(as_f32);
     assert_eq!(tuple_for_cells(&axes, &[cell])[0].raw_value(), default);
     assert_eq!(
@@ -356,7 +353,7 @@ fn cells_become_numbers_of_the_font_limited_to_the_range() {
     assert_eq!(one(650 * 64), raw(650.0));
     assert_eq!(one(350 * 64 + 1), raw(350.0) + 1024);
     assert_eq!(one(400 * 64), raw(400.0));
-    // Beyond the range, and the cell next to the maximum that a clamped value rounds to.
+    // Out-of-range cell clamping
     assert_eq!(one(701 * 64), raw(700.5));
     assert_eq!(one(i32::MAX), raw(700.5));
     assert_eq!(one(i32::MIN), raw(300.0));
@@ -404,7 +401,7 @@ mod with_a_font {
             .variable_instance(&id, &[(WGHT, 650.0)])
             .expect("kept");
         assert!(cache.get_font_bytes(&first).is_some());
-        // Past the bound now: the next request gets the first one, and so does every other.
+        // Beyond limit: returns nearest instance
         assert_eq!(cache.variable_instance(&id, &[(WGHT, 300.0)]), Some(first));
         assert_eq!(cache.variable_instance(&id, &[(WGHT, 700.0)]), Some(first));
         assert_eq!(cache.variable_instance(&id, &[(WGHT, 650.0)]), Some(first));
@@ -413,20 +410,16 @@ mod with_a_font {
 
     #[test]
     fn instances_stop_at_the_byte_bound_and_the_nearest_one_is_returned() {
-        // How big two instances are.
         let (probe, id) = cache_with(RED_HAT_MONO);
         let room = size_of_instance(&probe, &id, 300.0) + size_of_instance(&probe, &id, 400.0);
 
-        // With exactly the room for two, the set is full after them and makes no third.
-        // With one byte more it is not full yet: the third is made, goes over the bound
-        // and is dropped, and the set takes no more.
+        // Verify byte capacity limits
         for max_bytes in [room, room + 1] {
             let (cache, id) = cache_with(RED_HAT_MONO);
             cache.variation_write().max_bytes = max_bytes;
             let light = cache.variable_instance(&id, &[(WGHT, 300.0)]).unwrap();
             let regular = cache.variable_instance(&id, &[(WGHT, 400.0)]).unwrap();
             assert_ne!(light, regular, "room {max_bytes}");
-            // The third would take more than there is room for: the nearest is returned.
             assert_eq!(
                 cache.variable_instance(&id, &[(WGHT, 700.0)]),
                 Some(regular),
@@ -444,7 +437,6 @@ mod with_a_font {
                 "room {max_bytes}"
             );
 
-            // From here on a new set of coordinates is not made at all.
             let variation = cache.variation(&id).unwrap();
             let key = cache.content_key(&id).unwrap();
             let wanted = canonical_cells(&variation, &[(WGHT, 500.0)]);
@@ -476,7 +468,7 @@ mod with_a_font {
         let variation = cache.variation(&id).unwrap();
         let key = cache.content_key(&id).unwrap();
         let wanted = canonical_cells(&variation, &[(WGHT, 600.0)]);
-        // Nothing made yet: the lookup asks for the font to be made.
+        // Cache miss
         assert!(matches!(
             cache.lookup_instance(&key, &variation, &wanted),
             Lookup::Make
@@ -487,7 +479,7 @@ mod with_a_font {
             Lookup::Make
         ));
         let bold = cache.variable_instance(&id, &[(WGHT, 700.0)]).unwrap();
-        // Two are made, the limit: the lookup answers with the nearest and makes nothing.
+        // Cache full: returns nearest
         assert!(matches!(
             cache.lookup_instance(&key, &variation, &wanted),
             Lookup::Found(found) if found == bold
@@ -512,13 +504,13 @@ mod with_a_font {
             (cells, Made::Font(font))
         };
 
-        // A call that looked before `first` existed comes with a font for the same coordinates.
+        // Concurrent creation deduplication
         let (cells, font) = made(300.0);
         assert_eq!(
             cache.add_instance(&id, key, &variation, cells, font),
             Some(first)
         );
-        // A call with other coordinates finds the set full: the nearest, not a second face.
+        // Set full: returns nearest
         let (cells, font) = made(700.0);
         assert_eq!(
             cache.add_instance(&id, key, &variation, cells, font),
@@ -544,7 +536,7 @@ mod with_a_font {
         assert_eq!(cache.variation(&unknown), None);
         assert!(!cache.variation_read().faces.contains_key(&unknown));
 
-        // A synthetic face is static, and nothing is kept about it.
+        // Synthetic faces are static
         let (cache, id) = cache_with(RED_HAT_MONO);
         let made = cache.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
         assert_eq!(cache.variation(&made), None);
@@ -553,7 +545,7 @@ mod with_a_font {
 
     #[test]
     fn a_font_that_cannot_be_instanced_is_kept_as_such() {
-        // Red Hat Mono with a gvar table that is gone: the name of the table is changed.
+        // Missing gvar table
         let mut font = RED_HAT_MONO.to_vec();
         let at = font
             .windows(4)
