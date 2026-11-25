@@ -1564,6 +1564,26 @@ impl FcFontCache {
         self.clear_chain_cache();
     }
 
+    /// Scans `dir` recursively and adds the fonts found, like fontconfig's
+    /// `FcConfigAppFontAddDir`. Returns the number of faces added; fonts the
+    /// cache already holds, and a missing directory, add nothing.
+    #[cfg(all(feature = "std", feature = "parsing"))]
+    pub fn add_font_dir(&self, dir: impl AsRef<std::path::Path>) -> usize {
+        let faces = FcScanSingleDirectoryRecursive(dir.as_ref().to_path_buf());
+        let added = {
+            let mut state = self.state_write();
+            let before = state.metadata.len();
+            for (pattern, path) in faces {
+                state.insert_disk_font(pattern, FontId::new(), path);
+            }
+            state.metadata.len() - before
+        };
+        if added > 0 {
+            self.clear_chain_cache();
+        }
+        added
+    }
+
     #[cfg(feature = "std")]
     #[doc(hidden)]
     pub fn chain_cache_len(&self) -> usize {

@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - Added `FcFontCache::variable_instance()` to generate static synthetic faces for chosen axis values.
 - Added standalone `FcReadVariation()` and `FcCreateVariableInstance()` functions for raw font bytes.
 - Added `FC_MAX_INSTANCES_PER_FACE` and `FC_MAX_INSTANCE_BYTES_PER_FACE` cache limits.
+- Added `FcFontCache::add_font_dir()` to add the fonts of a directory to the cache.
 
 ## [5.1.0] - 2026-11-21
 
