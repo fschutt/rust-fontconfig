@@ -256,46 +256,18 @@ fn main() {
 
 ### Variable fonts
 
-A variable font is one file with continuous axes (`wght`, `wdth`, `opsz`, `slnt`, `ital` and custom ones). With the `parsing` feature, `FcFontCache::variation` gives the axes of a face and `variable_instance` gives a static face (a synthetic face) at chosen values of them.
+With the `parsing` feature enabled, `FcFontCache::variation` reads a face's variation axes, and `variable_instance` generates a static synthetic face at specific coordinates:
 
 ```rust
-use rust_fontconfig::{FcFont, FcFontCache, FcPattern};
+// Inspect axes (None for static fonts)
+let axes = cache.variation(&font_id)?;
 
-fn main() {
-    let cache = FcFontCache::default();
-    cache.with_memory_fonts(vec![(
-        FcPattern {
-            family: Some("Red Hat Mono".to_string()),
-            ..Default::default()
-        },
-        FcFont {
-            bytes: std::fs::read("RedHatMono-VariableFont_wght.ttf").unwrap().into(),
-            font_index: 0,
-            id: "red-hat-mono".to_string(),
-        },
-    )]);
-    let face = cache.list()[0].1;
-
-    // The axes of the face; `None` for a static font.
-    let variation = cache.variation(&face).unwrap();
-    for axis in &variation.axes {
-        println!(
-            "{}: {} to {}, default {}",
-            String::from_utf8_lossy(&axis.tag),
-            axis.min,
-            axis.max,
-            axis.default
-        );
-    }
-
-    // A static face at wght=650: a font file without variation tables.
-    let semibold = cache.variable_instance(&face, &[(*b"wght", 650.0)]).unwrap();
-    let bytes = cache.get_font_bytes(&semibold).unwrap();
-    println!("{} bytes", bytes.len());
-}
+// Generate a static synthetic font at wght=650
+let semibold_id = cache.variable_instance(&font_id, &[(*b"wght", 650.0)])?;
+let bytes = cache.get_font_bytes(&semibold_id)?;
 ```
 
-Variable font instances are cached by axis coordinates and retrievable by font ID. Standalone parsing is also available via `FcReadVariation` and `FcCreateVariableInstance` without an `FcFontCache`.
+Standalone functions (`FcReadVariation` and `FcCreateVariableInstance`) are also available for raw font bytes without an `FcFontCache`.
 
 ## Using from C
 
