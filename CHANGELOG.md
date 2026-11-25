@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [5.2.0] - 2026-11-23
 
 ### Added
+- Added `FcDesktopFont` and `FcDesktopFonts` to parse desktop font preferences (Pango and Qt formats).
+- Added `desktop-detect` feature to query Linux desktop font preferences via XDG Portal, GNOME, and KDE.
+- Added `FcFallbackConfig::{set_generic, prefer, prefer_for}` and `FcFontCache::modify_fallback_config`.
 - Added `FcFontCache::variation()` to read variable font axes from `fvar`.
 - Added `FcFontCache::variable_instance()` to generate static synthetic faces for chosen axis values.
 - Added standalone `FcReadVariation()` and `FcCreateVariableInstance()` functions for raw font bytes.
