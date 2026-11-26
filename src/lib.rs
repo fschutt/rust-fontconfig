@@ -100,7 +100,8 @@ use fallback::FontChainCacheKey;
 #[cfg(feature = "std")]
 pub use fallback::{CssFallbackGroup, FontFallbackChain, ScriptFallbackGroup};
 pub use variation::{
-    FcAxis, FcAxisTag, FcVariation, FC_MAX_INSTANCES_PER_FACE, FC_MAX_INSTANCE_BYTES_PER_FACE,
+    FcAxis, FcAxisTag, FcInstanceKey, FcInstanceStore, FcVariation, FC_MAX_INSTANCES_PER_FACE,
+    FC_MAX_INSTANCE_BYTES_PER_FACE,
 };
 #[cfg(all(feature = "std", feature = "parsing"))]
 pub use variation::{FcCreateVariableInstance, FcReadVariation};
