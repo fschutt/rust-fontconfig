@@ -949,3 +949,147 @@ fn racing_requests_for_one_instance_make_one() {
     assert_eq!(cache.variable_instance_count(&id), 1);
     assert!(cache.get_font_bytes(&results[0].unwrap()).is_some());
 }
+
+/// A store in memory that counts what the cache asks of it.
+#[derive(Default)]
+struct FakeStore {
+    kept: std::sync::Mutex<std::collections::HashMap<FcInstanceKey, Vec<u8>>>,
+    loads: std::sync::atomic::AtomicUsize,
+    stores: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeStore {
+    fn loads(&self) -> usize {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn stores(&self) -> usize {
+        self.stores.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn keys(&self) -> Vec<FcInstanceKey> {
+        self.kept.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Replaces what is kept for `key`.
+    fn keep(&self, key: &FcInstanceKey, bytes: &[u8]) {
+        self.kept
+            .lock()
+            .unwrap()
+            .insert(key.clone(), bytes.to_vec());
+    }
+}
+
+impl FcInstanceStore for FakeStore {
+    fn load(&self, key: &FcInstanceKey) -> Option<Vec<u8>> {
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.kept.lock().unwrap().get(key).cloned()
+    }
+
+    fn store(&self, key: &FcInstanceKey, bytes: &[u8]) {
+        self.stores
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.keep(key, bytes);
+    }
+}
+
+/// A cache of the Red Hat Mono fixture whose instances go through `store`.
+fn stored_cache(store: &Arc<FakeStore>) -> (FcFontCache, FontId) {
+    let (cache, id) = cache_with(RED_HAT_MONO, "Red Hat Mono");
+    cache.set_instance_store(store.clone());
+    (cache, id)
+}
+
+#[test]
+fn an_instance_is_made_once_kept_and_asked_for_by_the_font_the_face_and_the_axis_values() {
+    let store = Arc::new(FakeStore::default());
+    let (cache, id) = stored_cache(&store);
+    let instance = cache.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
+    assert_eq!(
+        (store.loads(), store.stores()),
+        (1, 1),
+        "asked once, kept once"
+    );
+    let keys = store.keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].font_len, RED_HAT_MONO.len());
+    assert_eq!(keys[0].font_index, 0);
+    assert_eq!(keys[0].cells, vec![650 * 64], "the wght axis in 1/64 units");
+    let kept = store.kept.lock().unwrap().get(&keys[0]).cloned().unwrap();
+    assert_eq!(
+        kept,
+        bytes_of(&cache, &instance),
+        "the store holds the bytes of the instance"
+    );
+
+    // The same request again is the cache's own: the store is not asked.
+    assert_eq!(
+        cache.variable_instance(&id, &[(WGHT, 650.0)]),
+        Some(instance)
+    );
+    assert_eq!((store.loads(), store.stores()), (1, 1));
+}
+
+#[test]
+fn a_second_run_takes_the_instance_from_the_store_and_makes_nothing() {
+    let store = Arc::new(FakeStore::default());
+    let (first, id) = stored_cache(&store);
+    first.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
+    let key = store.keys().remove(0);
+    // What the store keeps for the key is a font that is NOT what the cache would make: if the
+    // second cache returns it, it did not make the instance.
+    store.keep(&key, INSTRUMENT_SERIF);
+
+    let (second, id) = stored_cache(&store);
+    let instance = second.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
+    assert_eq!(bytes_of(&second, &instance), INSTRUMENT_SERIF);
+    assert_eq!(
+        store.stores(),
+        1,
+        "nothing was made, so nothing was kept again"
+    );
+}
+
+#[test]
+fn what_the_store_holds_that_is_not_a_static_font_is_made_again_and_kept_over_it() {
+    let store = Arc::new(FakeStore::default());
+    let (first, id) = stored_cache(&store);
+    let made = first.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
+    let expected = bytes_of(&first, &made);
+    let key = store.keys().remove(0);
+
+    for bad in [
+        &b"not a font"[..],
+        &[][..],
+        RED_HAT_MONO,
+        &expected[..expected.len() / 2],
+    ] {
+        store.keep(&key, bad);
+        let stores_before = store.stores();
+        let (cache, id) = stored_cache(&store);
+        let instance = cache.variable_instance(&id, &[(WGHT, 650.0)]).unwrap();
+        assert_eq!(
+            bytes_of(&cache, &instance),
+            expected,
+            "made again, whatever the store held"
+        );
+        assert_eq!(
+            store.stores(),
+            stores_before + 1,
+            "and kept over the bad entry"
+        );
+    }
+}
+
+#[test]
+fn a_font_that_cannot_be_instanced_is_not_kept() {
+    let store = Arc::new(FakeStore::default());
+    let (cache, id) = cache_with(INSTRUMENT_SERIF, "Instrument Serif");
+    cache.set_instance_store(store.clone());
+    assert_eq!(cache.variable_instance(&id, &[(WGHT, 400.0)]), None);
+    assert_eq!(
+        (store.loads(), store.stores()),
+        (0, 0),
+        "a static face never reaches the store"
+    );
+}

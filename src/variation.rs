@@ -75,6 +75,29 @@ pub const FC_MAX_INSTANCES_PER_FACE: usize = 32;
 /// Maximum bytes of synthetic instances cached per font face.
 pub const FC_MAX_INSTANCE_BYTES_PER_FACE: usize = 128 << 20;
 
+/// What identifies an instance: the font file, the face in it and the axis values.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FcInstanceKey {
+    /// Length of the font file in bytes.
+    pub font_len: usize,
+    /// Content hash of the font file.
+    pub font_hash: u64,
+    /// Index of the face in the file.
+    pub font_index: usize,
+    /// Axis values in 1/64 units, one per axis in `fvar` order.
+    pub cells: Vec<i32>,
+}
+
+/// Keeps instances between runs. `FcFontCache::variable_instance` asks `load` before it makes an
+/// instance and hands `store` the bytes it made; both run outside the cache's locks. What `load`
+/// returns must be a static font: the store validates what it keeps.
+pub trait FcInstanceStore: Send + Sync {
+    /// The bytes kept for `key`, if any.
+    fn load(&self, key: &FcInstanceKey) -> Option<Vec<u8>>;
+    /// Keeps `bytes` for `key`.
+    fn store(&self, key: &FcInstanceKey, bytes: &[u8]);
+}
+
 /// Flag indicating a hidden axis in `fvar`.
 #[cfg(all(feature = "std", feature = "parsing"))]
 const HIDDEN_AXIS: u16 = 0x0001;
@@ -98,6 +121,8 @@ pub(crate) struct VariationState {
     max_instances: usize,
     /// Total byte size limit.
     max_bytes: usize,
+    /// Where instances are kept between runs.
+    store: Option<Arc<dyn FcInstanceStore>>,
 }
 
 #[cfg(all(feature = "std", feature = "parsing"))]
@@ -108,6 +133,7 @@ impl Default for VariationState {
             sets: HashMap::new(),
             max_instances: FC_MAX_INSTANCES_PER_FACE,
             max_bytes: FC_MAX_INSTANCE_BYTES_PER_FACE,
+            store: None,
         }
     }
 }
@@ -336,6 +362,59 @@ fn make_from_cells(font_bytes: &[u8], font_index: usize, cells: &[i32]) -> Optio
         return None;
     }
     make_static(&provider, &tuple_for_cells(&axes, cells))
+}
+
+/// Whether every table the directory of the sfnt `font` lists lies within its bytes (a cut file does not).
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn tables_within(font: &[u8]) -> bool {
+    if font.len() < 12 {
+        return false;
+    }
+    let tables = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    (0..tables).all(|i| {
+        font.get(12 + i * 16 + 8..12 + i * 16 + 16)
+            .is_some_and(|record| {
+                let offset =
+                    u32::from_be_bytes([record[0], record[1], record[2], record[3]]) as usize;
+                let length =
+                    u32::from_be_bytes([record[4], record[5], record[6], record[7]]) as usize;
+                offset
+                    .checked_add(length)
+                    .is_some_and(|end| end <= font.len())
+            })
+    })
+}
+
+/// The bytes of the instance at `wanted`: the store's when it has them as a font that parses, else
+/// made and handed to the store.
+#[cfg(all(feature = "std", feature = "parsing"))]
+fn instance_bytes(
+    store: Option<&dyn FcInstanceStore>,
+    key: &ContentKey,
+    font_bytes: &[u8],
+    font_index: usize,
+    wanted: &[i32],
+) -> Option<Vec<u8>> {
+    let Some(store) = store else {
+        return make_from_cells(font_bytes, font_index, wanted);
+    };
+    let store_key = FcInstanceKey {
+        font_len: key.len,
+        font_hash: key.hash,
+        font_index,
+        cells: wanted.to_vec(),
+    };
+    if let Some(kept) = store.load(&store_key) {
+        if tables_within(&kept)
+            && ReadScope::new(&kept).read::<FontData<'_>>().is_ok()
+            && FcReadVariation(&kept, 0).is_none()
+        {
+            return Some(kept);
+        }
+    }
+    let font = make_from_cells(font_bytes, font_index, wanted)?;
+    store.store(&store_key, &font);
+    Some(font)
 }
 
 /// Quantizes a float value to 1/64th units.
@@ -595,14 +674,23 @@ impl FcFontCache {
             Lookup::Make => {}
         }
         // Generate instance outside the lock.
+        let store = self.variation_read().store.clone();
         let made = match self.source_bytes(source) {
-            Some((bytes, index)) => match make_from_cells(bytes.as_slice(), index, &wanted) {
-                Some(font) => Made::Font(font),
-                None => Made::Cannot,
-            },
+            Some((bytes, index)) => {
+                match instance_bytes(store.as_deref(), &key, bytes.as_slice(), index, &wanted) {
+                    Some(font) => Made::Font(font),
+                    None => Made::Cannot,
+                }
+            }
             None => Made::NoSource,
         };
         self.add_instance(source, key, &variation, wanted, made)
+    }
+
+    /// Sets the store instances are loaded from before they are made and kept in once made.
+    pub fn set_instance_store(&self, store: Arc<dyn FcInstanceStore>) -> &Self {
+        self.variation_write().store = Some(store);
+        self
     }
 
     /// Returns the number of synthetic instances generated for `source`.

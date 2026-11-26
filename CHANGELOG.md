@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Added `FcInstanceStore` and `FcFontCache::set_instance_store()` to keep the instances `variable_instance()` makes between runs.
+
 ## [5.2.0] - 2026-11-23
 
 ### Added
