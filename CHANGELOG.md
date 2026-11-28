@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `FcFontRegistry::load_from_disk_cache_at` checks every manifest entry against its file (the size and the modification time the manifest recorded, one `open` each, outside the registry's locks). An entry whose file changed or went away is not loaded and its file is not marked as parsed, so the scan parses it again; `cache_loaded` (what lets a layout skip waiting for the scan) is set only when no entry was stale, and the function returns `None` otherwise. Before, a manifest was trusted whole: after an OS update that replaced a system font, or a removed font, the old names, weights and coverage stayed in the registry and were written back at every save.
+
+### Added
+- `FcFontRegistry::load_from_disk_cache_checked_at` and `CacheLoadReport` (`loaded`, `changed`, `missing`): the same load, with the numbers.
+
 ## [5.2.0] - 2026-11-23
 
 ### Added
