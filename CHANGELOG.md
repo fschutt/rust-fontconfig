@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `FcFontRegistry::set_builder_threads` and `builder_thread_count`: how many builder threads a scan starts. `0`, the default, is what it always was (one fewer than the machine's cores, at least one); an app on a phone sets `1` so that the scan of a start without a manifest does not take the CPUs of its first frame.
+
 ## [5.2.0] - 2026-11-23
 
 ### Added

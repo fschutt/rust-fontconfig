@@ -72,6 +72,8 @@ pub struct FcFontRegistry {
     pub cache_loaded: AtomicBool,
     /// When true, the scout finds paths but does not queue jobs unless requested.
     pub lazy_scout: AtomicBool,
+    /// How many builder threads a scan starts: 0 is one fewer than the machine's cores, at least one.
+    pub builder_threads: std::sync::atomic::AtomicUsize,
 
     // ── Injected host knowledge ──
     /// Configuration defining where fonts live and which families to parse first.
@@ -143,6 +145,7 @@ impl FcFontRegistry {
             shutdown: AtomicBool::new(false),
             cache_loaded: AtomicBool::new(false),
             lazy_scout: AtomicBool::new(false),
+            builder_threads: std::sync::atomic::AtomicUsize::new(0),
             scan_config,
             os: OperatingSystem::current(),
         })
@@ -161,6 +164,27 @@ impl FcFontRegistry {
     /// Enable/disable lazy scout mode.
     pub fn set_scout_lazy(&self, lazy: bool) {
         self.lazy_scout.store(lazy, Ordering::Release);
+    }
+
+    /// How many builder threads [`Self::spawn_scout_and_builders`] starts: `0`, the default, is one fewer than the
+    /// machine's cores, at least one (what it always was). A start with no manifest parses every font of the machine
+    /// while the app builds its first frame, and the builders take the CPUs that frame needs: an app on a phone sets `1`.
+    /// Takes effect for scans started after the call.
+    pub fn set_builder_threads(&self, threads: usize) {
+        self.builder_threads.store(threads, Ordering::Release);
+    }
+
+    /// The number of builder threads a scan started now would use: what [`Self::set_builder_threads`] set, or one fewer
+    /// than the machine's cores (at least one) when it is `0`.
+    pub fn builder_thread_count(&self) -> usize {
+        match self.builder_threads.load(Ordering::Acquire) {
+            0 => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .saturating_sub(1)
+                .max(1),
+            threads => threads,
+        }
     }
 
     /// Register in-memory (bundled) fonts.
@@ -184,11 +208,7 @@ impl FcFontRegistry {
 
         #[cfg(not(feature = "single-thread-unsafe-locks"))]
         {
-            let num_threads = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(2)
-                .saturating_sub(1)
-                .max(1);
+            let num_threads = self.builder_thread_count();
 
             // Spawn Scout thread. Threads hold only a Weak handle.
             let scout = Arc::downgrade(self);
